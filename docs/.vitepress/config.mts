@@ -55,6 +55,7 @@ export default defineConfig({
       ],
       '/templates/': [
         { text: '提示词与模板库', link: '/templates/' },
+        { text: 'AI 文章整理提示词模板', link: '/templates/ai-writing-assistant-template' },
         { text: '提示词收藏模板', link: '/templates/prompt-template' },
         { text: '问题记录模板', link: '/templates/problem-template' },
         { text: '周复盘模板', link: '/templates/weekly-review-template' }

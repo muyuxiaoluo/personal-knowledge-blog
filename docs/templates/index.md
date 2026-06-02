@@ -26,6 +26,11 @@ next: 每次写文章时优先复用模板，再按真实使用体验删减。
 <div class="kb-section full">
 <h2>常用模板</h2>
 <div class="kb-grid">
+<a class="kb-card" href="./ai-writing-assistant-template">
+<h3>AI 文章整理提示词模板</h3>
+<p>把自然语言经验描述整理成符合本站规范的 Markdown 文章。</p>
+<div class="kb-badges"><span class="kb-badge">AI 写作</span><span class="kb-badge">Markdown</span></div>
+</a>
 <a class="kb-card" href="../tools/tool-review-template">
 <h3>工具评测模板</h3>
 <p>判断一个工具是否真正服务当前流程。</p>
