@@ -1,13 +1,8 @@
-# Local data architecture
+# 本地数据架构
 
-The UI depends on `ArticleRepository`, not on HTTP, D1, PostgreSQL, or Tauri.
+桌面界面只依赖 `ArticleRepository`，不会依赖网页 API、D1 或特定云数据库。
 
-## Current web prototype
-
-`HttpArticleRepository` talks to `/api/articles`, preserving the existing
-Vinext/D1 development flow.
-
-## Tauri client
+## Tauri 客户端
 
 `SqliteArticleRepository` owns the device-local article database. It accepts the
 same `execute` and `select` methods exposed by `@tauri-apps/plugin-sql`, so the
@@ -16,7 +11,7 @@ future Tauri entry point only needs to:
 1. load `sqlite:mind-garden.db`;
 2. create `SqliteArticleRepository` with a stable device id and bundled seed
    articles;
-3. pass that repository to `KnowledgeWorkbench`.
+3. pass that repository to `DesktopWorkbench`.
 
 The repository creates its schema lazily and stores:
 
@@ -38,7 +33,7 @@ preserved as a visible conflict copy before the server version is applied.
 keeps its access token in memory. Login is optional, so an unavailable server
 never blocks local writing.
 
-## Migration rule
+## 迁移规则
 
 New schema changes must be appended as idempotent migration statements. Existing
 columns must not be silently repurposed because local databases will survive app

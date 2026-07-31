@@ -42,7 +42,7 @@ jobs:
           tagName: v__VERSION__
           releaseName: 人生攻略库 v__VERSION__
           releaseBody: |
-            Windows 桌面版更新。
+            人生攻略库 0.3 带来了真正面向桌面使用的工作台：固定三栏布局、收集箱、本地检索、每日回声、全局快速记录与系统托盘。
 
             已安装 v0.2.1 或更高版本时，可直接在应用内检查并安装更新。
           releaseDraft: false

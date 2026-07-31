@@ -1,56 +1,41 @@
 {
-  "name": "life-strategy-library-sites",
-  "version": "0.2.2",
+  "name": "life-strategy-library-desktop",
+  "version": "0.3.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
     "content:generate": "node scripts/generate-content.mjs",
-    "predev": "npm run content:generate",
-    "dev": "vinext dev",
-    "prebuild": "npm run content:generate",
-    "build": "vinext build",
+    "dev": "npm run tauri:dev",
     "desktop:dev": "vite --config desktop/vite.config.ts",
+    "predesktop:build": "npm run content:generate",
     "desktop:build": "tsc -p desktop/tsconfig.json && vite build --config desktop/vite.config.ts",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "start": "vinext start",
-    "test": "npm run build && tsx --test tests/rendered-html.test.mjs tests/sqlite-article-repository.test.ts",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern desktop-dist --ignore-pattern src-tauri/target --ignore-pattern .next",
-    "db:generate": "drizzle-kit generate"
+    "test": "npm run desktop:build && tsx --test tests/sqlite-article-repository.test.ts",
+    "lint": "tsc -p desktop/tsconfig.json",
+    "check": "npm run lint && npm test"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-global-shortcut": "^2.3.0",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-sql": "2.4.0",
     "@tauri-apps/plugin-updater": "^2.10.1",
-    "drizzle-orm": "0.45.2",
-    "next": "16.2.6",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.37.1",
-    "@cloudflare/workers-types": "^4.20260702.1",
-    "@tailwindcss/postcss": "4.2.1",
     "@tauri-apps/cli": "2.11.4",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
-    "@vitejs/plugin-rsc": "0.5.26",
-    "drizzle-kit": "0.31.10",
-    "eslint": "9.39.4",
-    "eslint-config-next": "16.2.6",
-    "react-server-dom-webpack": "19.2.6",
-    "tailwindcss": "4.2.1",
     "tsx": "4.22.1",
     "typescript": "5.9.3",
-    "vinext": "0.0.50",
-    "vite": "8.0.13",
-    "wrangler": "4.92.0"
+    "vite": "8.2.0"
   },
   "type": "module"
 }

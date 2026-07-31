@@ -6,7 +6,7 @@
 
 1. 同步修改 `sites-app/package.json`、`sites-app/src-tauri/Cargo.toml` 和 `sites-app/src-tauri/tauri.conf.json` 中的版本号。
 2. 将代码提交并推送到 GitHub。
-3. 在 GitHub 仓库的 Actions 页面运行“发布 Windows 桌面版”，或推送与版本一致的标签（例如 `v0.2.2`）。
+3. 在 GitHub 仓库的 Actions 页面运行“发布 Windows 桌面版”，或推送与版本一致的标签（例如 `v0.3.0`）。
 4. 流程会创建正式 GitHub Release，并上传 NSIS 安装包、签名文件和 `latest.json`。
 5. 已安装的客户端启动后会静默检查，也可以点击顶部的“检查更新”。
 

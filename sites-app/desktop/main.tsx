@@ -1,6 +1,5 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import "../app/globals.css";
 import "./desktop.css";
 import { DesktopApp } from "./DesktopApp";
 

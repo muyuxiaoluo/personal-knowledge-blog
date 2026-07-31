@@ -1,8 +1,9 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { isRegistered, register } from "@tauri-apps/plugin-global-shortcut";
 import Database from "@tauri-apps/plugin-sql";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { KnowledgeWorkbench } from "../app/KnowledgeWorkbench";
 import { AppUpdater } from "./AppUpdater";
+import { DesktopWorkbench } from "./DesktopWorkbench";
 import {
   CloudSyncClient,
   CloudSyncError,
@@ -14,6 +15,8 @@ import seedArticles from "../app/generated/articles.json";
 import type { Article } from "../app/types";
 
 const defaultServerUrl = "https://mind.47-108-88-117.sslip.io";
+const quickCaptureShortcut = "CommandOrControl+Shift+Space";
+let shortcutInitialization: Promise<void> | null = null;
 
 type BackupPath = {
   path: string;
@@ -51,6 +54,26 @@ export function DesktopApp() {
   });
   const autoSyncTimer = useRef<number | null>(null);
   const syncInFlight = useRef(false);
+
+  useEffect(() => {
+    if (!isTauri() || shortcutInitialization) return;
+    shortcutInitialization = (async () => {
+      if (await isRegistered(quickCaptureShortcut)) return;
+      await register(quickCaptureShortcut, async (event) => {
+        if (event.state !== "Pressed") return;
+        await invoke("show_main_window").catch(() => undefined);
+        window.dispatchEvent(new Event("mind-garden:quick-capture"));
+      });
+    })().catch((error) => {
+      shortcutInitialization = null;
+      setNotice({
+        tone: "warning",
+        text: error instanceof Error
+          ? `全局快速记录暂不可用：${error.message}`
+          : "全局快速记录暂不可用",
+      });
+    });
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -242,9 +265,8 @@ export function DesktopApp() {
         </nav>
       </header>
 
-      <KnowledgeWorkbench
+      <DesktopWorkbench
         key={revision}
-        initialArticles={seedArticles as Article[]}
         repository={runtime.repository}
         onRepositoryChange={() => {
           void updatePendingCount();

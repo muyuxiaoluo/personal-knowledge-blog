@@ -1,16 +1,12 @@
 {
-  "name": "personal-knowledge-blog",
-  "version": "0.1.0",
+  "name": "life-strategy-library",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vitepress dev docs",
-    "api": "node scripts/local-api.mjs",
-    "workbench": "node scripts/workbench.mjs",
-    "build": "vitepress build docs",
-    "preview": "vitepress preview docs"
-  },
-  "devDependencies": {
-    "vitepress": "^1.6.3"
+    "dev": "npm --prefix sites-app run tauri:dev",
+    "build": "npm --prefix sites-app run tauri:build",
+    "test": "npm --prefix sites-app test",
+    "check": "npm --prefix sites-app run check"
   }
 }
