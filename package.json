@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vitepress dev docs",
+    "api": "node scripts/local-api.mjs",
+    "workbench": "node scripts/workbench.mjs",
     "build": "vitepress build docs",
     "preview": "vitepress preview docs"
   },

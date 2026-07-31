@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["vite/client"],
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "./**/*.ts",
+    "./**/*.tsx",
+    "../app/KnowledgeWorkbench.tsx",
+    "../app/types.ts",
+    "../app/data/**/*.ts",
+    "../app/generated/articles.json"
+  ]
+}

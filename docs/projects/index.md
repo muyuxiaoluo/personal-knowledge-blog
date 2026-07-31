@@ -2,14 +2,16 @@
 title: 项目档案
 created: 2026-06-02
 updated: 2026-06-02
+branch: 待分类
+subbranch:
 stage: 已整理
 validity: 待验证
 category: 项目档案
 tags: [项目, 主线任务, 支线任务]
-type: 资产
+type: 模板
 project: 个人知识库博客
 confidence: 中
-source: 复盘
+source: [复盘]
 reviewDate: 2026-07-02
 summary: 把长期项目和阶段性实验集中管理，避免文章变成孤立碎片。
 next: 每个项目至少关联一篇复盘、工具或模板文章。
@@ -43,6 +45,10 @@ next: 每个项目至少关联一篇复盘、工具或模板文章。
 <div class="kb-progress"><span style="width: 24%"></span></div>
 </a>
 </div>
+</div>
+<div class="kb-section full">
+<h2>项目相关文章</h2>
+<ArticleBrowser collection="projects" />
 </div>
 </section>
 </div>

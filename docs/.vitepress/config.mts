@@ -1,10 +1,23 @@
 import { defineConfig } from 'vitepress'
 
+const knowledgeSidebar = [
+  { text: '知识树', link: '/tree' },
+  { text: '项目档案', link: '/projects/' }
+]
+
+const managementSidebar = [
+  { text: '内容管理', link: '/manage' },
+  { text: '草稿箱', link: '/drafts/' },
+  { text: '复盘搜索', link: '/review-search' },
+  { text: '复查中心', link: '/review-center' }
+]
+
 export default defineConfig({
   title: '人生攻略库',
   description: '一个本地优先的个人知识库博客，用来复盘、整理经验和沉淀可复用资产。',
   lang: 'zh-CN',
   cleanUrls: true,
+  srcExclude: ['examples/**', '.trash/**', '.backups/**'],
   themeConfig: {
     logo: '/logo.svg',
     search: {
@@ -12,33 +25,20 @@ export default defineConfig({
     },
     nav: [
       { text: '首页', link: '/' },
-      { text: '复盘', link: '/reviews/' },
-      { text: '工具', link: '/tools/' },
-      { text: '学习', link: '/learning/' },
-      { text: '模板', link: '/templates/' },
-      { text: '思考', link: '/thoughts/' },
-      { text: '项目', link: '/projects/' },
-      {
-        text: '更多',
-        items: [
-          { text: '草稿区', link: '/drafts/' },
-          { text: '示例存档', link: '/examples/' }
-        ]
-      }
+      { text: '写入', link: '/write' },
+      { text: '知识树', link: '/tree' },
+      { text: '管理', link: '/manage' }
     ],
     sidebar: {
-      '/': [
-        {
-          text: '知识库入口',
-          items: [
-            { text: '复盘日志', link: '/reviews/' },
-            { text: '工具评测与工作流', link: '/tools/' },
-            { text: '学习方法与知识整理', link: '/learning/' },
-            { text: '提示词与模板库', link: '/templates/' },
-            { text: '思考随笔', link: '/thoughts/' },
-            { text: '项目档案', link: '/projects/' }
-          ]
-        }
+      '/tree': knowledgeSidebar,
+      '/manage': managementSidebar,
+      '/review-search': managementSidebar,
+      '/review-center': managementSidebar,
+      '/write': [
+        { text: '快速记录', link: '/write' }
+      ],
+      '/edit': [
+        { text: '编辑内容', link: '/edit' }
       ],
       '/reviews/': [
         { text: '复盘日志', link: '/reviews/' },
@@ -65,13 +65,12 @@ export default defineConfig({
         { text: '为什么这不是普通博客', link: '/thoughts/why-this-is-not-a-normal-blog' }
       ],
       '/projects/': [
+        ...knowledgeSidebar,
         { text: '项目档案', link: '/projects/' },
         { text: '个人知识库博客', link: '/projects/personal-knowledge-blog' },
         { text: 'AI 辅助学习工作流', link: '/projects/ai-learning-workflow' }
       ],
-      '/drafts/': [
-        { text: '草稿区', link: '/drafts/' }
-      ],
+      '/drafts/': managementSidebar,
       '/examples/': [
         { text: '示例存档', link: '/examples/' },
         { text: 'VitePress 示例文章', link: '/examples/default-example' }

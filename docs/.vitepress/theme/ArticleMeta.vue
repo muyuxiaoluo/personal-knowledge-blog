@@ -19,15 +19,19 @@ function formatValue(value: unknown) {
 const items = computed(() => {
   const data = frontmatter.value
   return [
-    ['阶段', data.stage],
+    ['主线', data.branch],
+    ['子分支', data.subbranch],
     ['有效性', data.validity],
-    ['类型', data.type],
-    ['项目', data.project],
-    ['置信度', data.confidence],
-    ['复查', data.reviewDate]
+    ['来源', data.source],
+    ['更新', data.updated || data.created]
   ]
-    .filter((item): item is [string, unknown] => Boolean(item[1]))
+    .filter((item): item is [string, unknown] => item[1] !== undefined && item[1] !== null && item[1] !== '')
     .map(([label, value]) => [label, formatValue(value)] as [string, string])
+})
+
+const breadcrumb = computed(() => {
+  const data = frontmatter.value
+  return ['人生攻略库', data.branch, data.subbranch, data.title].filter(Boolean).map(formatValue)
 })
 
 const shouldShow = computed(() => {
@@ -37,9 +41,16 @@ const shouldShow = computed(() => {
 
 <template>
   <section v-if="shouldShow" class="article-meta-panel" aria-label="文章元信息">
-    <span v-for="[label, value] in items" :key="label" class="article-meta-chip">
-      <span class="article-meta-label">{{ label }}</span>
-      <span class="article-meta-value">{{ value }}</span>
-    </span>
+    <nav class="article-breadcrumb" aria-label="当前位置">
+      <span v-for="(item, index) in breadcrumb" :key="`${item}-${index}`">
+        {{ item }}
+      </span>
+    </nav>
+    <div class="article-meta-grid">
+      <span v-for="[label, value] in items" :key="label" class="article-meta-chip">
+        <span class="article-meta-label">{{ label }}</span>
+        <span class="article-meta-value">{{ value }}</span>
+      </span>
+    </div>
   </section>
 </template>

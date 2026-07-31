@@ -1,5 +1,19 @@
 node_modules/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
+docs/.trash/
+docs/.backups/
+.env
 
 npm-debug.log*
+
+# Desktop application outputs and local data
+sites-app/desktop-dist/
+sites-app/src-tauri/target/
+sites-app/src-tauri/gen/
+sync-server/data/
+sync-server/.env
+deploy-artifacts/
+
+# Windows shortcuts are machine-local.
+*.lnk

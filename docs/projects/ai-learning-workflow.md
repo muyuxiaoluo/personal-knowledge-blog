@@ -2,14 +2,16 @@
 title: AI 辅助学习工作流
 created: 2026-06-02
 updated: 2026-06-02
+branch: 待分类
+subbranch:
 stage: 草稿
 validity: 待验证
 category: 项目档案
 tags: [AI, 学习, 工作流]
-type: 过程
+type: 记录
 project: AI 辅助学习工作流
 confidence: 低
-source: 复盘
+source: [复盘]
 reviewDate: 2026-07-02
 summary: 逐步验证一套适合自己的课程、视频和资料整理流程。
 next: 测试 B站视频总结与课堂录音总结两条路线。
@@ -34,7 +36,7 @@ next: 测试 B站视频总结与课堂录音总结两条路线。
 ## 相关内容
 
 - [豆包录音总结为什么解决了我的课堂总结需求](../tools/doubao-audio-summary.md)
-- [AI 辅助学习工作流笔记](../learning/ai-learning-workflow-notes.md)
+- [学习方法与知识整理](../learning/)
 
 ## 下一步
 
@@ -45,3 +47,7 @@ next: 测试 B站视频总结与课堂录音总结两条路线。
 ## 更新记录
 
 - 2026-06-02：创建项目档案。
+
+## 项目聚合
+
+<ProjectHub project="AI 辅助学习工作流" />
