@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "人生攻略库",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "identifier": "com.muyuxiaoluo.life-strategy-library",
   "build": {
     "beforeDevCommand": "npm run desktop:dev",
@@ -36,7 +36,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "windows": {
       "webviewInstallMode": {
         "type": "embedBootstrapper"
@@ -54,5 +54,16 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaW5pIHB1YmxpYyBrZXk6IEVGODhFMDI5QzUxMzQ1QjQKUldTMFJSUEZLZUNJNzZHejhrMENSOE1BSWtTcmdVekh5dm1iRUxHTVlJbWJ6N29QbEw5QVNGZDAK",
+      "endpoints": [
+        "https://github.com/muyuxiaoluo/personal-knowledge-blog/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

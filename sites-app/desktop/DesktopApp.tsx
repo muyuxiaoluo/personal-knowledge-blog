@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import Database from "@tauri-apps/plugin-sql";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { KnowledgeWorkbench } from "../app/KnowledgeWorkbench";
+import { AppUpdater } from "./AppUpdater";
 import {
   CloudSyncClient,
   CloudSyncError,
@@ -213,6 +214,7 @@ export function DesktopApp() {
           <button disabled={backingUp} onClick={createBackup}>
             {backingUp ? "备份中…" : "本地备份"}
           </button>
+          <AppUpdater />
           {session ? (
             <>
               <span className="sync-account">{session.username}</span>

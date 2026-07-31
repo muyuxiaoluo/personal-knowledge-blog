@@ -77,6 +77,12 @@
   color: #23463d;
 }
 
+.desktop-statusbar nav .update-entry.has-update {
+  border-color: #9fd6ad;
+  background: rgba(159, 214, 173, 0.14);
+  color: #c9efd3;
+}
+
 .sync-account {
   color: #e4c590;
   font-size: 9px;
@@ -92,6 +98,130 @@
   padding: 20px;
   background: rgba(19, 31, 27, 0.58);
   backdrop-filter: blur(9px);
+}
+
+.update-backdrop {
+  position: fixed;
+  z-index: 130;
+  display: grid;
+  inset: 0;
+  place-items: center;
+  padding: 20px;
+  background: rgba(19, 31, 27, 0.62);
+  backdrop-filter: blur(9px);
+}
+
+.update-dialog {
+  position: relative;
+  width: min(480px, 100%);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 5px 28px 5px 28px;
+  padding: 33px;
+  background: #fbf8ef;
+  box-shadow: 0 35px 90px rgba(20, 35, 30, 0.32);
+}
+
+.update-close {
+  position: absolute;
+  top: 14px;
+  right: 15px;
+  border: 0;
+  background: none;
+  color: #6e7771;
+  font-size: 24px;
+  cursor: pointer;
+}
+
+.update-close:disabled {
+  cursor: wait;
+  opacity: 0.35;
+}
+
+.update-dialog > span {
+  color: #c96f54;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.17em;
+}
+
+.update-dialog h2 {
+  margin: 12px 0 8px;
+  color: #1b2723;
+  font-family: "Noto Serif SC", Georgia, serif;
+  font-size: 31px;
+  font-weight: 600;
+}
+
+.update-dialog > p {
+  margin: 0 0 22px;
+  color: #6e7771;
+  font-size: 11px;
+  line-height: 1.75;
+}
+
+.update-notes {
+  max-height: 210px;
+  overflow: auto;
+  border: 1px solid rgba(38, 70, 60, 0.12);
+  border-radius: 12px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.update-notes strong {
+  color: #315e50;
+  font-size: 10px;
+}
+
+.update-notes p {
+  margin: 8px 0;
+  color: #46564f;
+  font-size: 11px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.update-notes small,
+.update-progress small {
+  color: #8a928d;
+  font-size: 9px;
+}
+
+.update-progress {
+  display: grid;
+  gap: 9px;
+}
+
+.update-progress > div {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: rgba(49, 94, 80, 0.12);
+}
+
+.update-progress i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #315e50;
+  transition: width 180ms ease;
+}
+
+.update-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
+.update-primary {
+  border: 0;
+  border-radius: 11px;
+  padding: 12px 17px;
+  background: #315e50;
+  color: white;
+  font-size: 11px;
+  font-weight: 850;
+  cursor: pointer;
 }
 
 .account-dialog {
