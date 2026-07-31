@@ -21,7 +21,7 @@ type AvailableUpdate = {
 };
 
 export function AppUpdater() {
-  const [currentVersion, setCurrentVersion] = useState("0.2.1");
+  const [currentVersion, setCurrentVersion] = useState("0.2.2");
   const [phase, setPhase] = useState<UpdatePhase>("idle");
   const [available, setAvailable] = useState<AvailableUpdate | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);

@@ -1,6 +1,6 @@
 [package]
 name = "life-strategy-library"
-version = "0.2.1"
+version = "0.2.2"
 description = "本地优先的私人思考花园"
 authors = ["Muyuxiaoluo"]
 edition = "2021"
