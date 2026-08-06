@@ -2,14 +2,16 @@
 title: 个人博客建设：项目档案 v1.1
 created: 2026-06-02
 updated: 2026-06-02
+branch: 待分类
+subbranch:
 stage: 已整理
 validity: 待验证
 category: 项目档案
 tags: [个人知识库, VitePress, 项目档案]
-type: 过程
+type: 记录
 project: 个人知识库博客
 confidence: 中
-source: 复盘
+source: [复盘]
 reviewDate: 2026-07-02
 summary: 搭建一个本地优先、Markdown 优先、可长期维护的个人知识库控制台。
 next: 完成 v1.1 后，用一周真实记录测试它是否顺手。
@@ -33,20 +35,20 @@ v1.1：视觉与内容体验升级。
 
 - 本地能启动。
 - 首页像个人知识库控制台。
-- 6 个主栏目都是入口页。
+- 知识树是内容分类和浏览的唯一入口。
 - 有草稿区和弱化的示例存档。
 - 普通文章顶部显示元信息。
 - 搜索可用。
 
 ## 相关内容
 
-- [我的个人知识库为什么不是普通博客](../thoughts/why-this-is-not-a-normal-blog.md)
+- [思考随笔](../thoughts/)
 - [工具评测模板 v0.1](../tools/tool-review-template.md)
-- [问题记录模板](../templates/problem-template.md)
+- [提示词与模板库](../templates/)
 
 ## 下一步
 
-- 用真实文章验证栏目是否清楚。
+- 用真实文章验证主线和子分支是否清楚。
 - 一周后复查：这个系统有没有降低行动成本？
 - 如果开始变复杂，优先删功能而不是加功能。
 
@@ -54,3 +56,7 @@ v1.1：视觉与内容体验升级。
 
 - 2026-06-02：创建项目档案。
 - 2026-06-02：升级为 v1.1 视觉与内容体验版本。
+
+## 项目聚合
+
+<ProjectHub project="个人知识库博客" />

@@ -2,14 +2,16 @@
 title: 复盘日志
 created: 2026-06-02
 updated: 2026-06-02
+branch: 复盘记录
+subbranch:
 stage: 已整理
 validity: 待验证
 category: 复盘日志
 tags: [复盘, 经验]
-type: 资产
+type: 模板
 project: 个人知识库博客
 confidence: 中
-source: 复盘
+source: [复盘]
 reviewDate: 2026-07-02
 summary: 记录做过的事、踩过的坑、尝试过的方法，以及下次应该怎么做。
 next: 每周至少写一次短复盘，优先记录真实问题。
@@ -20,8 +22,10 @@ next: 每周至少写一次短复盘，优先记录真实问题。
 <div class="kb-eyebrow">复盘日志 · Experience Review</div>
 <h1>把经历转化成下次可复用的判断。</h1>
 <p>这里记录做过的事、踩过的坑、尝试过的方法，以及下次遇到类似问题应该怎么做。</p>
-</section><section class="kb-dashboard">
-<div class="kb-section large">
+</section>
+
+<section class="kb-dashboard">
+<div class="kb-section full">
 <h2>复盘入口</h2>
 <div class="kb-grid">
 <a class="kb-card" href="./weekly-review-template">
@@ -41,13 +45,20 @@ next: 每周至少写一次短复盘，优先记录真实问题。
 </div>
 </a>
 </div>
-</div><div class="kb-section medium">
+</div>
+
+<div class="kb-section full">
 <h2>适合记录</h2>
 <ul class="kb-list">
 <li>周复盘：这一周到底推进了什么？</li>
 <li>项目复盘：某个阶段为什么有效或失控？</li>
 <li>问题复盘：下次如何少走同样的弯路？</li>
 </ul>
+</div>
+
+<div class="kb-section full">
+<h2>正式文章</h2>
+<ArticleBrowser collection="reviews" />
 </div>
 </section>
 </div>

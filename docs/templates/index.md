@@ -2,14 +2,16 @@
 title: 提示词与模板库
 created: 2026-06-02
 updated: 2026-06-02
+branch: 经验整理
+subbranch:
 stage: 已整理
 validity: 待验证
 category: 模板库
 tags: [模板, 提示词, 复用]
-type: 资产
+type: 模板
 project: 个人知识库博客
 confidence: 中
-source: 复盘
+source: [复盘]
 reviewDate: 2026-07-02
 summary: 保存可重复使用的提示词、清单和记录模板。
 next: 每次写文章时优先复用模板，再按真实使用体验删减。
@@ -52,6 +54,11 @@ next: 每次写文章时优先复用模板，再按真实使用体验删减。
 <div class="kb-badges"><span class="kb-badge">复盘</span><span class="kb-badge">轻量</span></div>
 </a>
 </div>
+</div>
+
+<div class="kb-section full">
+<h2>正式文章</h2>
+<ArticleBrowser collection="templates" />
 </div>
 </section>
 </div>

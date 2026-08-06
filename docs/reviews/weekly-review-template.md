@@ -2,14 +2,16 @@
 title: 周复盘模板
 created: 2026-06-02
 updated: 2026-06-02
+branch: 复盘记录
+subbranch:
 stage: 已整理
 validity: 有效
 category: 复盘日志
 tags: [复盘, 模板, 周总结]
-type: 资产
+type: 复盘
 project: 个人知识库博客
 confidence: 中
-source: 复盘
+source: [复盘]
 reviewDate: 2026-07-02
 summary: 一个用于每周回看行动、问题和下一步的轻量模板。
 next: 用一次真实周复盘测试是否需要删减字段。

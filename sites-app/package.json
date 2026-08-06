@@ -1,0 +1,41 @@
+{
+  "name": "life-strategy-library-desktop",
+  "version": "0.3.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "content:generate": "node scripts/generate-content.mjs",
+    "dev": "npm run tauri:dev",
+    "desktop:dev": "vite --config desktop/vite.config.ts",
+    "predesktop:build": "npm run content:generate",
+    "desktop:build": "tsc -p desktop/tsconfig.json && vite build --config desktop/vite.config.ts",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "test": "npm run desktop:build && tsx --test tests/sqlite-article-repository.test.ts",
+    "lint": "tsc -p desktop/tsconfig.json",
+    "check": "npm run lint && npm test"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-global-shortcut": "^2.3.0",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-sql": "2.4.0",
+    "@tauri-apps/plugin-updater": "^2.10.1",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "tsx": "4.22.1",
+    "typescript": "5.9.3",
+    "vite": "8.2.0"
+  },
+  "type": "module"
+}

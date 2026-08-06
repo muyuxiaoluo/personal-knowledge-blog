@@ -1,0 +1,51 @@
+name: 发布 Windows 桌面版
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: 构建并发布 Windows 安装包
+    runs-on: windows-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sites-app/package-lock.json
+
+      - name: 准备 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装前端依赖
+        working-directory: sites-app
+        run: npm ci
+
+      - name: 构建并发布
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        with:
+          projectPath: sites-app
+          tauriScript: npm run tauri
+          tagName: v__VERSION__
+          releaseName: 人生攻略库 v__VERSION__
+          releaseBody: |
+            人生攻略库 0.3 带来了真正面向桌面使用的工作台：固定三栏布局、收集箱、本地检索、每日回声、全局快速记录与系统托盘。
+
+            已安装 v0.2.1 或更高版本时，可直接在应用内检查并安装更新。
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          updaterJsonPreferNsis: true

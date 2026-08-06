@@ -2,14 +2,16 @@
 title: 工具评测模板 v0.1
 created: 2026-06-02
 updated: 2026-06-02
+branch: 经验整理
+subbranch:
 stage: 已整理
 validity: 有效
 category: 工具评测
 tags: [工具评测, 模板, 工作流]
-type: 资产
+type: 模板
 project: 个人知识库博客
 confidence: 中
-source: 复盘
+source: [复盘]
 reviewDate: 2026-07-02
 summary: 用固定问题判断一个工具是否真的适合自己的实际流程。
 next: 用 2-3 个工具评测案例检验模板是否过重。

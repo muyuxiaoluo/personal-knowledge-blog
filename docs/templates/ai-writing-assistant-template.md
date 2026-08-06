@@ -1,16 +1,20 @@
 ---
 title: AI 文章整理提示词模板
 created: 2026-06-02
-updated: 2026-06-02
+updated:
+updateCount: 0
+updateHistory: []
+branch: 经验整理
+subbranch:
 stage: 已整理
 validity: 有效
 category: 模板库
 tags: [AI, 提示词, Markdown, 写作整理]
-type: 资产
+type: 模板
 project: 个人知识库博客
 confidence: 中
-source: 复盘
-reviewDate: 2026-07-02
+source: [复盘]
+reviewDate:
 summary: 用于把自然语言经验描述整理成符合本站规范的 Markdown 文章。
 next: 用一篇真实经验描述测试输出结构是否足够自然。
 ---
@@ -58,12 +62,15 @@ next: 用一篇真实经验描述测试输出结构是否足够自然。
 - 只输出 Markdown 正文。
 - 必须包含统一 frontmatter。
 - frontmatter 必须包含这些字段：
-  title, created, updated, stage, validity, category, tags, type, project, confidence, source, reviewDate, summary, next
+  title, created, updated, updateCount, updateHistory, stage, validity, category, tags, type, project, confidence, source, reviewDate, summary, next
 - `stage` 可选值：草稿 / 已整理 / 已发布 / 已归档
 - `validity` 可选值：有效 / 部分有效 / 待验证 / 已过时
 - `type` 可选值：结论 / 过程 / 资产 / 观察
 - `confidence` 可选值：低 / 中 / 高
 - `source` 可选值：实测 / 阅读 / 观察 / 二手信息 / 复盘
+- 新文章只填写 created；updated 初始留空。
+- updateCount 初始为 0，updateHistory 初始为空数组。
+- reviewDate 初始留空，除非我明确要求某个复查日期。
 - 如果无法确定日期，使用今天日期，并把不确定处写入正文的“待补充”部分。
 
 正文结构规则：
@@ -126,6 +133,8 @@ next: 用一篇真实经验描述测试输出结构是否足够自然。
 - confidence
 - source
 - reviewDate
+- updateCount
+- updateHistory
 - summary
 - next
 
@@ -142,6 +151,8 @@ AI 应输出一篇完整 Markdown，格式如下：
 title:
 created:
 updated:
+updateCount: 0
+updateHistory: []
 stage:
 validity:
 category:
@@ -177,7 +188,9 @@ next:
 ---
 title: 豆包录音总结为什么暂时适合我的课堂复习场景
 created: 2026-06-02
-updated: 2026-06-02
+updated:
+updateCount: 0
+updateHistory: []
 stage: 草稿
 validity: 待验证
 category: 工具评测
@@ -186,7 +199,7 @@ type: 过程
 project: AI 辅助学习工作流
 confidence: 低
 source: 实测
-reviewDate: 2026-07-02
+reviewDate:
 summary: 豆包录音总结暂时满足中文课堂复习场景，但仍需要更多课程测试来确认稳定性。
 next: 再测试几节不同课程，观察长录音和不同老师说话方式下的总结质量。
 ---
