@@ -1,4 +1,4 @@
-FROM node:24.13-bookworm-slim
+FROM docker.m.daocloud.io/library/node:24.13-bookworm-slim
 
 WORKDIR /app
 ENV NODE_ENV=production
