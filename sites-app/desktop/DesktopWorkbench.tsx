@@ -5,61 +5,90 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type FormEvent,
+  type ReactNode,
 } from "react";
 import type { ArticleRepository } from "../app/data/article-repository";
+import { isInboxArticle } from "../app/article-helpers";
+import type { ProjectRepository } from "../app/data/project-repository";
+import type { WorkRepository } from "../app/data/work-repository";
+import type { ProjectDetail, ProjectProposal, ProjectSummary, ProjectTask } from "../app/project-types";
 import type { Article, StoredArticle } from "../app/types";
+import type { DailyCloseout, FocusSession, TaskPlan, WeeklyFocus } from "../app/work-types";
+import { MarkdownDocument } from "./MarkdownDocument";
+import { ProjectWorkspace } from "./ProjectWorkspace";
+import { WorkbenchIcon, type WorkbenchIconName } from "./WorkbenchIcon";
+import {
+  ExplorePage,
+  HomeDashboard,
+  InboxPage,
+  ReviewPage,
+  TasksPage,
+  type NewActionInput,
+  type WorkspaceTask,
+} from "./WorkPages";
 
-type DeskSection = "today" | "inbox" | "library" | "review" | "experiments";
-type ReviewAction = "agree" | "changed" | "experiment";
+export type ThemeMode = "minimal" | "magic" | "immersive";
+
+type DeskSection = "home" | "tasks" | "projects" | "notes" | "explore" | "inbox" | "review";
+type NoteView = "all" | "thoughts" | "experience" | "research" | "creative";
+type UndoOffer = { message: string; run: () => Promise<void> };
 
 type DesktopWorkbenchProps = {
   repository: ArticleRepository;
+  projectRepository: ProjectRepository;
+  workRepository: WorkRepository;
   onRepositoryChange?: () => void;
+  accountDock: ReactNode;
+  themeMode: ThemeMode;
 };
 
 const sections: Array<{
   id: DeskSection;
   label: string;
-  symbol: string;
-  description: string;
+  icon: WorkbenchIconName;
+  group: "action" | "knowledge";
 }> = [
-  { id: "today", label: "今日", symbol: "◫", description: "回到正在发生的事情" },
-  { id: "inbox", label: "收集箱", symbol: "⌄", description: "还没来得及整理的念头" },
-  { id: "library", label: "全部内容", symbol: "▤", description: "搜索与浏览全部记录" },
-  { id: "review", label: "待复盘", symbol: "↻", description: "重新遇见过去的判断" },
-  { id: "experiments", label: "实验", symbol: "△", description: "准备拿到现实里验证" },
+  { id: "home", label: "首页", icon: "home", group: "action" },
+  { id: "tasks", label: "今日行动", icon: "today", group: "action" },
+  { id: "projects", label: "项目", icon: "projects", group: "action" },
+  { id: "notes", label: "笔记", icon: "notes", group: "knowledge" },
+  { id: "explore", label: "探索库", icon: "explore", group: "knowledge" },
+  { id: "inbox", label: "待整理", icon: "inbox", group: "knowledge" },
+  { id: "review", label: "回顾", icon: "review", group: "knowledge" },
 ];
 
-const collectionOptions = [
-  ["thoughts", "想法与随笔"],
-  ["learning", "学习与知识"],
-  ["tools", "工具与工作流"],
-  ["templates", "模板"],
-  ["reviews", "复盘"],
-  ["projects", "项目"],
-] as const;
+const noteViews: Array<{ id: NoteView; label: string }> = [
+  { id: "all", label: "全部笔记" },
+  { id: "thoughts", label: "思考与灵感" },
+  { id: "experience", label: "经验与方法" },
+  { id: "research", label: "科研相关" },
+  { id: "creative", label: "创作相关" },
+];
 
-const stageOptions = ["种子", "幼苗", "实验", "常青", "标本", "作品"] as const;
+const natureOptions = ["思考", "经验", "方法", "问题", "灵感", "复盘"];
+const sourceOptions = ["自写", "文章", "视频", "书籍", "对话", "其他"];
 
 const emptyDraft: Article = {
   id: "",
   slug: "",
-  collection: "thoughts",
-  collectionLabel: "想法与随笔",
+  collection: "notes",
+  collectionLabel: "笔记",
   title: "",
   created: "",
   updated: "",
-  branch: "待分类",
-  subbranch: "待分类",
-  stage: "种子",
-  validity: "待验证",
-  category: "想法与随笔",
+  branch: "未整理",
+  subbranch: "",
+  stage: "常青",
+  validity: "",
+  category: "笔记",
   tags: [],
-  type: "记录",
+  type: "思考",
   project: "",
-  confidence: "低",
-  source: ["私人记录"],
+  projectId: "",
+  confidence: "",
+  source: ["自写"],
   reviewDate: "",
   summary: "",
   next: "",
@@ -68,10 +97,23 @@ const emptyDraft: Article = {
 
 export function DesktopWorkbench({
   repository,
+  projectRepository,
+  workRepository,
   onRepositoryChange,
+  accountDock,
+  themeMode,
 }: DesktopWorkbenchProps) {
   const [articles, setArticles] = useState<StoredArticle[]>([]);
-  const [section, setSection] = useState<DeskSection>("today");
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectDetails, setProjectDetails] = useState<ProjectDetail[]>([]);
+  const [plans, setPlans] = useState<TaskPlan[]>([]);
+  const [sessions, setSessions] = useState<FocusSession[]>([]);
+  const [activeSession, setActiveSession] = useState<FocusSession | null>(null);
+  const [weeklyFocus, setWeeklyFocus] = useState<WeeklyFocus | null>(null);
+  const [closeouts, setCloseouts] = useState<DailyCloseout[]>([]);
+  const [section, setSection] = useState<DeskSection>("home");
+  const [noteView, setNoteView] = useState<NoteView>("all");
+  const [requestedProjectId, setRequestedProjectId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
@@ -81,42 +123,97 @@ export function DesktopWorkbench({
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
   const [quickText, setQuickText] = useState("");
   const [message, setMessage] = useState("");
+  const [undoOffer, setUndoOffer] = useState<UndoOffer | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem("life-strategy.sidebar-collapsed") === "true",
+  );
   const messageTimer = useRef<number | null>(null);
-
+  const undoTimer = useRef<number | null>(null);
   const today = useMemo(() => localDate(), []);
 
-  const refresh = useCallback(async () => {
+  const showMessage = useCallback((text: string) => {
+    setUndoOffer(null);
+    setMessage(text);
+    if (messageTimer.current) window.clearTimeout(messageTimer.current);
+    messageTimer.current = window.setTimeout(() => setMessage(""), 3200);
+  }, []);
+
+  const offerUndo = useCallback((message: string, run: () => Promise<void>) => {
+    setMessage("");
+    setUndoOffer({ message, run });
+    if (undoTimer.current) window.clearTimeout(undoTimer.current);
+    undoTimer.current = window.setTimeout(() => setUndoOffer(null), 8000);
+  }, []);
+
+  async function runUndo() {
+    if (!undoOffer) return;
+    const action = undoOffer.run;
+    setUndoOffer(null);
+    try {
+      await action();
+      showMessage("操作已经撤销。 ");
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "撤销失败");
+    }
+  }
+
+  function toggleSidebar() {
+    setSidebarCollapsed((current) => {
+      const next = !current;
+      localStorage.setItem("life-strategy.sidebar-collapsed", String(next));
+      return next;
+    });
+  }
+
+  const refreshArticles = useCallback(async () => {
     const next = await repository.list();
     setArticles(next);
     return next;
   }, [repository]);
 
+  const refreshProjects = useCallback(async () => {
+    const next = await projectRepository.list();
+    const details = (await Promise.all(next.map((project) => projectRepository.get(project.id))))
+      .filter((detail): detail is ProjectDetail => Boolean(detail));
+    setProjects(next);
+    setProjectDetails(details);
+    return next;
+  }, [projectRepository]);
+
+  const refreshWork = useCallback(async () => {
+    const weekStart = startOfLocalWeekDate();
+    const [nextPlans, nextSessions, nextActive, nextFocus, nextCloseouts] = await Promise.all([
+      workRepository.listPlans(),
+      workRepository.listSessions(startOfMonth()),
+      workRepository.getActiveSession(),
+      workRepository.getWeeklyFocus(weekStart),
+      workRepository.listDailyCloseouts(weekStart),
+    ]);
+    setPlans(nextPlans);
+    setSessions(nextSessions);
+    setActiveSession(nextActive);
+    setWeeklyFocus(nextFocus);
+    setCloseouts(nextCloseouts);
+  }, [workRepository]);
+
   useEffect(() => {
     let active = true;
     setLoading(true);
-    repository
-      .list()
-      .then((next) => {
-        if (active) setArticles(next);
-      })
+    Promise.all([refreshArticles(), refreshProjects(), refreshWork()])
       .catch((error) => {
-        if (active) showMessage(error instanceof Error ? error.message : "无法读取本地内容");
+        if (active) showMessage(error instanceof Error ? error.message : "无法读取本地工作台");
       })
       .finally(() => {
         if (active) setLoading(false);
       });
-    return () => {
-      active = false;
-    };
-  }, [repository]);
+    return () => { active = false; };
+  }, [refreshArticles, refreshProjects, refreshWork, showMessage]);
 
   useEffect(() => {
     const openCapture = () => setQuickCaptureOpen(true);
     let unlisten: UnlistenFn | undefined;
     window.addEventListener("mind-garden:quick-capture", openCapture);
-    void listen("open-quick-capture", openCapture).then((dispose) => {
-      unlisten = dispose;
-    });
+    void listen("open-quick-capture", openCapture).then((dispose) => { unlisten = dispose; });
     return () => {
       window.removeEventListener("mind-garden:quick-capture", openCapture);
       unlisten?.();
@@ -125,8 +222,9 @@ export function DesktopWorkbench({
 
   useEffect(() => {
     function handleKeyboard(event: KeyboardEvent) {
-      if (event.key === "Escape" && quickCaptureOpen) {
-        setQuickCaptureOpen(false);
+      if (event.key === "Escape") {
+        if (quickCaptureOpen) setQuickCaptureOpen(false);
+        else if (selectedId || editing) closeDocument();
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && editing) {
@@ -138,66 +236,62 @@ export function DesktopWorkbench({
     return () => window.removeEventListener("keydown", handleKeyboard);
   });
 
-  const counts = useMemo(() => {
-    const inbox = articles.filter(isInboxArticle).length;
-    const review = articles.filter((article) => isReviewArticle(article, today)).length;
-    const experiments = articles.filter(isExperimentArticle).length;
-    const changedToday = articles.filter(
-      (article) => article.updated.slice(0, 10) === today || article.created.slice(0, 10) === today,
-    ).length;
-    return {
-      today: changedToday,
-      inbox,
-      library: articles.length,
-      review,
-      experiments,
-    };
-  }, [articles, today]);
-
-  const visibleArticles = useMemo(() => {
-    let next = articles;
-    if (section === "today") {
-      const current = articles.filter(
-        (article) => article.updated.slice(0, 10) === today || article.created.slice(0, 10) === today,
-      );
-      next = current.length ? current : articles.slice(0, 12);
-    } else if (section === "inbox") {
-      next = articles.filter(isInboxArticle);
-    } else if (section === "review") {
-      next = articles.filter((article) => isReviewArticle(article, today));
-    } else if (section === "experiments") {
-      next = articles.filter(isExperimentArticle);
-    }
-
-    const needle = query.trim().toLocaleLowerCase("zh-CN");
-    if (!needle) return next;
-    return next.filter((article) => articleSearchText(article).includes(needle));
-  }, [articles, query, section, today]);
+  const workspaceTasks = useMemo<WorkspaceTask[]>(() => projectDetails.flatMap((detail) =>
+    detail.tasks.map((task) => {
+      const milestone = detail.milestones.find((item) => item.id === task.milestoneId) ?? null;
+      const stageTasks = detail.tasks.filter((item) => item.milestoneId === task.milestoneId);
+      const stageIndex = milestone ? detail.milestones.findIndex((item) => item.id === milestone.id) + 1 : 0;
+      return {
+        ...task,
+        projectTitle: detail.project.title,
+        projectStatus: detail.project.status,
+        projectReviewDate: detail.project.reviewDate,
+        stageTitle: milestone?.title ?? "",
+        stageDueDate: milestone?.dueDate ?? "",
+        stageIndex,
+        stageCount: detail.milestones.length,
+        stageCompletedTasks: stageTasks.filter((item) => item.status === "done").length,
+        stageTaskCount: stageTasks.length,
+        plan: plans.find((plan) => plan.taskId === task.id) ?? null,
+      };
+    }),
+  ), [plans, projectDetails]);
 
   const selected = useMemo(
     () => articles.find((article) => article.id === selectedId) ?? null,
     [articles, selectedId],
   );
 
-  const dailyEcho = useMemo(() => {
-    const candidates = articles.filter(
-      (article) => article.created.slice(0, 10) < today && article.reviewDate !== today,
-    );
-    if (!candidates.length) return articles[0] ?? null;
-    return candidates[hashText(today) % candidates.length];
-  }, [articles, today]);
+  const inboxCount = useMemo(() => articles.filter(isInboxArticle).length, [articles]);
+  const noteArticles = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase("zh-CN");
+    return articles.filter((article) => {
+      if (article.collection === "sources" || article.type === "外部资料") return false;
+      if (!matchesNoteView(article, noteView)) return false;
+      return !needle || articleSearchText(article).includes(needle);
+    });
+  }, [articles, noteView, query]);
 
-  function showMessage(text: string) {
-    setMessage(text);
-    if (messageTimer.current) window.clearTimeout(messageTimer.current);
-    messageTimer.current = window.setTimeout(() => setMessage(""), 3200);
-  }
+  const counts: Record<DeskSection, number | null> = {
+    home: null,
+    tasks: workspaceTasks.filter((task) => task.status !== "done" && task.plan?.plannedDate === today).length,
+    projects: projects.filter((project) => project.status === "active" || project.status === "waiting").length,
+    notes: articles.filter((article) => article.collection !== "sources" && article.type !== "外部资料").length,
+    explore: articles.filter((article) => article.collection === "sources" || article.type === "外部资料").length,
+    inbox: inboxCount,
+    review: sessions.length,
+  };
 
   function switchSection(next: DeskSection) {
     setSection(next);
     setSelectedId(null);
     setEditing(false);
     setQuery("");
+  }
+
+  function openProject(projectId: string) {
+    setRequestedProjectId(projectId);
+    switchSection("projects");
   }
 
   function openArticle(article: StoredArticle) {
@@ -208,20 +302,28 @@ export function DesktopWorkbench({
 
   function startNewArticle() {
     setSelectedId(null);
-    setDraft({ ...emptyDraft, tags: [], source: ["私人记录"], created: localDate() });
+    setDraft({ ...emptyDraft, tags: [], source: ["自写"], created: today });
     setEditing(true);
   }
 
-  function startEditing(article: StoredArticle) {
-    setDraft(toEditableArticle(article));
+  function startEditing(article: StoredArticle, append = false) {
+    const next = toEditableArticle(article);
+    if (append) next.body = `${next.body.trim()}\n\n## ${today} · 追加想法\n\n`;
+    setDraft(next);
     setEditing(true);
+  }
+
+  function closeDocument() {
+    setEditing(false);
+    setSelectedId(null);
+    setDraft({ ...emptyDraft });
   }
 
   async function persist(article: Article, success: string) {
     setSaving(true);
     try {
       const saved = await repository.save(article);
-      await refresh();
+      await refreshArticles();
       setSelectedId(saved.id);
       onRepositoryChange?.();
       showMessage(success);
@@ -241,15 +343,21 @@ export function DesktopWorkbench({
       showMessage("请先填写标题和正文。");
       return;
     }
-    const saved = await persist(
-      {
-        ...draft,
-        title,
-        body,
-        summary: draft.summary.trim() || body.replace(/\s+/g, " ").slice(0, 88),
-      },
-      draft.id ? "修改已经保存。" : "已经放进本地资料库。",
-    );
+    const linkedProject = projects.find((project) => project.id === draft.projectId)
+      ?? projects.find((project) => project.title === draft.project);
+    const saved = await persist({
+      ...draft,
+      projectId: linkedProject?.id || "",
+      project: linkedProject?.title || "",
+      title,
+      body,
+      collection: draft.collection === "sources" ? "sources" : "notes",
+      collectionLabel: draft.collection === "sources" ? "探索资料" : "笔记",
+      category: draft.collection === "sources" ? "探索资料" : "笔记",
+      branch: draft.branch === "待分类" ? "已整理" : draft.branch || "已整理",
+      summary: plainExcerpt(body),
+      next: "",
+    }, draft.id ? "修改已经保存。" : "笔记已经保存。 ");
     if (saved) {
       setDraft(toEditableArticle(saved));
       setEditing(false);
@@ -260,54 +368,53 @@ export function DesktopWorkbench({
     event.preventDefault();
     const body = quickText.trim();
     if (!body) return;
-    const saved = await persist(
-      {
-        ...emptyDraft,
-        tags: [],
-        source: ["快速记录"],
-        title: captureTitle(body),
-        body,
-        summary: body.replace(/\s+/g, " ").slice(0, 88),
-        created: localDate(),
-      },
-      "已经收进收集箱，之后再慢慢整理。",
-    );
+    const saved = await persist({
+      ...emptyDraft,
+      tags: [],
+      source: ["快速记录"],
+      title: captureTitle(body),
+      body,
+      type: "灵感",
+      branch: "待分类",
+      stage: "种子",
+      summary: plainExcerpt(body),
+      created: today,
+    }, "已经放进待整理内容。 ");
     if (saved) {
       setQuickText("");
       setQuickCaptureOpen(false);
-      setSection("inbox");
+      switchSection("inbox");
     }
   }
 
-  async function recordReview(article: StoredArticle, action: ReviewAction) {
-    const copy: Record<ReviewAction, string> = {
-      agree: "再次读到这条记录，我仍然认同当时的判断。",
-      changed: "现在的想法已经发生变化，值得重新补充。",
-      experiment: "把这条内容带回当前生活或项目中，实际验证一次。",
-    };
-    const nextStage = action === "changed" ? "标本" : action === "experiment" ? "实验" : normalizeStage(article.stage);
-    const updated: Article = {
-      ...toEditableArticle(article),
-      stage: nextStage,
-      validity: action === "agree" ? "仍然认同" : action === "changed" ? "观点已变化" : "验证中",
-      reviewDate: today,
-      next: action === "experiment" ? copy[action] : article.next,
-      source: Array.from(new Set([...article.source, "回声回顾"])),
-      body: `${article.body.trim()}\n\n## ${today} · 回看\n\n${copy[action]}`,
-    };
-    await persist(updated, action === "experiment" ? "已经加入实验，等待实际验证。" : "这次回看已经写回原记录。 ");
+  async function saveExternalLink(url: string, note: string) {
+    const platform = linkPlatform(url);
+    const title = note ? captureTitle(note) : `${platform} · 待看内容`;
+    await persist({
+      ...emptyDraft,
+      collection: "sources",
+      collectionLabel: "探索资料",
+      category: "探索资料",
+      type: "外部资料",
+      title,
+      body: `${note ? `${note}\n\n` : ""}[打开原内容](${url})`,
+      source: [platform, url],
+      branch: "待分类",
+      stage: "种子",
+      summary: note || `来自 ${platform} 的待处理链接`,
+      created: today,
+    }, "链接已经收进探索库。 ");
   }
 
   async function removeArticle(article: StoredArticle) {
-    if (!window.confirm(`确认移除《${article.title}》吗？本次删除会进入同步队列。`)) return;
+    if (!window.confirm(`确认移除《${article.title}》吗？`)) return;
     setSaving(true);
     try {
       await repository.remove(article.id);
-      await refresh();
-      setSelectedId(null);
-      setEditing(false);
+      await refreshArticles();
+      closeDocument();
       onRepositoryChange?.();
-      showMessage("内容已经移除。");
+      showMessage("内容已经移除。 ");
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "移除失败");
     } finally {
@@ -315,469 +422,499 @@ export function DesktopWorkbench({
     }
   }
 
-  const activeSection = sections.find((item) => item.id === section) ?? sections[0];
+  async function planToday(task: WorkspaceTask) {
+    await workRepository.savePlan({
+      taskId: task.id,
+      plannedDate: today,
+      priority: task.plan?.priority || "normal",
+      estimateMinutes: task.plan?.estimateMinutes || 0,
+      sortOrder: task.plan?.sortOrder || workspaceTasks.filter((item) => item.plan?.plannedDate === today).length,
+      updatedAt: "",
+    });
+    await refreshWork();
+    offerUndo("已安排到今天", async () => {
+      await workRepository.removePlan(task.id);
+      await refreshWork();
+    });
+  }
+
+  async function removeFromToday(task: WorkspaceTask) {
+    const previous = task.plan;
+    if (!previous) return;
+    await workRepository.removePlan(task.id);
+    await refreshWork();
+    offerUndo("已移出今天", async () => {
+      await workRepository.savePlan(previous);
+      await refreshWork();
+    });
+  }
+
+  async function startFocus(task: WorkspaceTask) {
+    try {
+      const session = await workRepository.startSession({ taskId: task.id, projectId: task.projectId, label: task.title });
+      setActiveSession(session);
+      setSessions((current) => [session, ...current]);
+      showMessage("专注计时已经开始。 ");
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "无法开始专注");
+    }
+  }
+
+  async function stopFocus() {
+    if (!activeSession) return;
+    try {
+      await workRepository.stopSession(activeSession.id);
+      await refreshWork();
+      showMessage("本次投入已经记录。 ");
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "无法结束专注");
+    }
+  }
+
+  async function completeTask(task: WorkspaceTask) {
+    try {
+      if (activeSession?.taskId === task.id) await workRepository.stopSession(activeSession.id);
+      await projectRepository.completeTask(task.id, `完成行动：${task.title}`);
+      await Promise.all([refreshProjects(), refreshWork()]);
+      offerUndo("任务已完成", async () => {
+        await projectRepository.updateTaskStatus(task.id, task.status);
+        await refreshProjects();
+      });
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "无法完成任务");
+    }
+  }
+
+  async function restoreTask(task: WorkspaceTask) {
+    try {
+      await projectRepository.updateTaskStatus(task.id, "later");
+      await refreshProjects();
+      offerUndo("任务已经恢复", async () => {
+        await projectRepository.updateTaskStatus(task.id, "done");
+        await refreshProjects();
+      });
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "无法恢复任务");
+    }
+  }
+
+  async function addTask(input: NewActionInput) {
+    const now = new Date().toISOString();
+    const task: ProjectTask = {
+      id: "",
+      projectId: input.projectId,
+      milestoneId: input.milestoneId,
+      title: input.title,
+      actionType: input.actionType,
+      details: input.details,
+      benefit: input.benefit,
+      dueDate: input.dueDate,
+      status: "later",
+      waitingFor: "",
+      resumeAction: "",
+      context: "anywhere",
+      sortOrder: workspaceTasks.filter((item) => item.projectId === input.projectId).length,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+    };
+    try {
+      const saved = await projectRepository.saveTask(task);
+      if (input.plannedToday) {
+        await workRepository.savePlan({ taskId: saved.id, plannedDate: today, priority: "normal", estimateMinutes: 0, sortOrder: 99, updatedAt: "" });
+      }
+      await Promise.all([refreshProjects(), refreshWork()]);
+      showMessage("任务已经添加。 ");
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "无法添加任务");
+    }
+  }
+
+  async function saveWeeklyFocus(primaryOutcome: string, secondaryOutcome: string) {
+    try {
+      await workRepository.saveWeeklyFocus({
+        weekStart: startOfLocalWeekDate(),
+        primaryOutcome,
+        secondaryOutcome,
+        updatedAt: "",
+      });
+      await refreshWork();
+      showMessage("本周聚焦已经保存。");
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "本周聚焦保存失败");
+    }
+  }
+
+  async function saveCloseout(result: string, lesson: string, tomorrow: string) {
+    try {
+      await workRepository.saveDailyCloseout({ date: today, result, lesson, tomorrow, updatedAt: "" });
+      await refreshWork();
+      showMessage("今日收尾已经保存。");
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "今日收尾保存失败");
+    }
+  }
+
+  async function moveInboxArticle(article: StoredArticle, destination: "note" | "explore") {
+    const saved = await persist({
+      ...article,
+      collection: destination === "explore" ? "sources" : "notes",
+      collectionLabel: destination === "explore" ? "探索资料" : "笔记",
+      category: destination === "explore" ? "探索资料" : "笔记",
+      type: destination === "explore" ? "外部资料" : article.type === "外部资料" ? "思考" : article.type,
+      branch: "已整理",
+    }, destination === "explore" ? "已转入探索库。" : "已整理为笔记。");
+    if (saved) closeDocument();
+  }
+
+  async function convertInboxToAction(article: StoredArticle, projectId: string) {
+    const project = projectDetails.find((item) => item.project.id === projectId);
+    if (!project) return;
+    await addTask({
+      projectId,
+      milestoneId: project.milestones.find((item) => item.status === "current")?.id ?? null,
+      title: article.title,
+      actionType: "organize",
+      details: article.body,
+      benefit: "由待整理内容转化，保留原始上下文。",
+      dueDate: "",
+      plannedToday: false,
+    });
+    await moveInboxArticle(article, "note");
+  }
+
+  async function convertInboxToProposal(article: StoredArticle, projectId: string) {
+    const now = new Date().toISOString();
+    const proposal: ProjectProposal = {
+      id: "",
+      projectId,
+      title: article.title,
+      problem: plainExcerpt(article.body),
+      expectedValue: "",
+      cost: "",
+      status: "pending",
+      reviewNote: "由待整理内容转化",
+      createdAt: now,
+      updatedAt: now,
+    };
+    try {
+      await projectRepository.saveProposal(proposal);
+      await refreshProjects();
+      await moveInboxArticle(article, "note");
+      showMessage("已转为项目提案并保留原始笔记。");
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "转为提案失败");
+    }
+  }
+
+  const documentMode = Boolean(selected || editing);
+  const rootClass = [
+    "desktop-workbench",
+    "workbench-v2",
+    documentMode ? "document-mode" : "",
+    section === "projects" && !documentMode ? "projects-mode" : "",
+    section === "notes" && !documentMode ? "notes-mode" : "",
+    sidebarCollapsed && !documentMode ? "sidebar-collapsed" : "",
+    `theme-${themeMode}`,
+  ].filter(Boolean).join(" ");
+  const taskActions = {
+    onCompleteTask: completeTask,
+    onPlanToday: planToday,
+    onRemoveFromToday: removeFromToday,
+    onStartFocus: startFocus,
+    onStopFocus: stopFocus,
+    activeSession,
+  };
 
   return (
-    <main className="desktop-workbench">
-      <aside className="workbench-sidebar">
-        <div className="sidebar-brand">
-          <span className="sidebar-brand-mark">思</span>
-          <span>
-            <strong>人生攻略库</strong>
-            <small>PRIVATE MIND GARDEN</small>
-          </span>
-        </div>
+    <main className={rootClass}>
+      {!documentMode && (
+        <WorkbenchSidebar
+          section={section}
+          counts={counts}
+          inboxCount={inboxCount}
+          collapsed={sidebarCollapsed}
+          onSwitch={switchSection}
+          onToggle={toggleSidebar}
+          accountDock={accountDock}
+        />
+      )}
 
-        <nav className="sidebar-navigation" aria-label="资料库导航">
-          <span className="sidebar-caption">工作台</span>
-          {sections.map((item) => (
-            <button
-              className={section === item.id ? "active" : ""}
-              key={item.id}
-              onClick={() => switchSection(item.id)}
-            >
-              <i>{item.symbol}</i>
-              <span>{item.label}</span>
-              <small>{counts[item.id]}</small>
-            </button>
-          ))}
-        </nav>
+      {!documentMode && themeMode !== "minimal" && <MagicParticles intensity={themeMode === "immersive" ? 24 : 14} />}
 
-        <div className="sidebar-foot">
-          <button className="capture-entry" onClick={() => setQuickCaptureOpen(true)}>
-            <span>＋</span>
-            快速记录
-          </button>
-          <p><kbd>Ctrl</kbd><i>+</i><kbd>Shift</kbd><i>+</i><kbd>Space</kbd></p>
-          <small>本地优先 · 自动进入同步队列</small>
-        </div>
-      </aside>
-
-      <section className="workbench-list-pane">
-        <header className="list-pane-head">
-          <div>
-            <span>{activeSection.symbol}</span>
-            <strong>{activeSection.label}</strong>
-          </div>
-          <button onClick={startNewArticle} aria-label="新建内容">＋</button>
-          <p>{activeSection.description}</p>
-        </header>
-
-        <label className="desktop-search">
-          <span>⌕</span>
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索标题、正文、标签…"
-          />
-          {query && <button onClick={() => setQuery("")} aria-label="清空搜索">×</button>}
-        </label>
-
-        <div className="article-list" aria-live="polite">
-          {loading ? (
-            <div className="list-empty"><span>正在整理书桌…</span></div>
-          ) : visibleArticles.length ? (
-            visibleArticles.map((article) => (
-              <button
-                className={selectedId === article.id ? "article-list-item active" : "article-list-item"}
-                key={article.id}
-                onClick={() => openArticle(article)}
-              >
-                <span className={`sync-dot ${article.storage.syncStatus}`} />
-                <span className="list-item-main">
-                  <strong>{article.title}</strong>
-                  <p>{article.summary || plainExcerpt(article.body)}</p>
-                  <small>
-                    <i>{normalizeStage(article.stage)}</i>
-                    <span>{formatRelativeDate(article.updated || article.created)}</span>
-                  </small>
-                </span>
-              </button>
-            ))
-          ) : (
-            <div className="list-empty">
-              <span>{query ? "没有找到相关内容" : "这里暂时是空的"}</span>
-              <button onClick={startNewArticle}>写下第一条</button>
-            </div>
-          )}
-        </div>
-
-        <footer className="list-pane-foot">
-          <span>{visibleArticles.length} 条内容</span>
-          <span>● 本地资料库</span>
-        </footer>
-      </section>
-
-      <section className="workbench-main-pane">
-        {editing ? (
-          <ArticleEditor
-            draft={draft}
-            saving={saving}
-            onChange={setDraft}
-            onCancel={() => {
-              setEditing(false);
-              if (!selectedId) setDraft({ ...emptyDraft });
-            }}
-            onSave={() => void saveDraft()}
-          />
-        ) : selected ? (
-          <ArticleReader
-            article={selected}
-            saving={saving}
-            onBack={() => setSelectedId(null)}
-            onEdit={() => startEditing(selected)}
-            onRemove={() => void removeArticle(selected)}
-            onReview={(action) => void recordReview(selected, action)}
-          />
-        ) : (
-          <TodayDashboard
-            articles={articles}
-            dailyEcho={dailyEcho}
-            counts={counts}
-            today={today}
-            onCapture={() => setQuickCaptureOpen(true)}
-            onNew={startNewArticle}
-            onOpen={openArticle}
-            onReview={(article, action) => void recordReview(article, action)}
-          />
-        )}
-      </section>
+      {documentMode ? (
+        <section className="document-stage">
+          {editing ? (
+            <ArticleEditor
+              draft={draft}
+              projects={projects}
+              saving={saving}
+              onChange={setDraft}
+              onCancel={() => selected ? setEditing(false) : closeDocument()}
+              onSave={() => void saveDraft()}
+            />
+          ) : selected ? (
+            <ArticleReader
+              article={selected}
+              saving={saving}
+              onBack={closeDocument}
+              onEdit={() => startEditing(selected)}
+              onAppend={() => startEditing(selected, true)}
+              onRemove={() => void removeArticle(selected)}
+            />
+          ) : null}
+        </section>
+      ) : section === "projects" ? (
+        <ProjectWorkspace
+          repository={projectRepository}
+          projects={projects}
+          initialProjectId={requestedProjectId}
+          onProjectsChange={refreshProjects}
+        />
+      ) : section === "notes" ? (
+        <NotesWorkspace
+          articles={noteArticles}
+          loading={loading}
+          query={query}
+          view={noteView}
+          onQuery={setQuery}
+          onView={setNoteView}
+          onOpen={openArticle}
+          onNew={startNewArticle}
+        />
+      ) : (
+        <section className="workspace-main-stage">
+          {section === "home" && <HomeDashboard today={today} tasks={workspaceTasks} articles={articles} weeklyFocus={weeklyFocus} onSaveWeeklyFocus={saveWeeklyFocus} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
+          {section === "tasks" && <TasksPage today={today} tasks={workspaceTasks} projects={projects} projectDetails={projectDetails} onAddTask={addTask} onRestoreTask={restoreTask} onOpenProject={openProject} {...taskActions} />}
+          {section === "explore" && <ExplorePage articles={articles} onSaveLink={saveExternalLink} onOpenArticle={openArticle} />}
+          {section === "inbox" && <InboxPage articles={articles} projects={projects} onOpenArticle={openArticle} onNewCapture={() => setQuickCaptureOpen(true)} onMoveArticle={moveInboxArticle} onConvertToAction={convertInboxToAction} onConvertToProposal={convertInboxToProposal} />}
+          {section === "review" && <ReviewPage projects={projects} articles={articles} tasks={workspaceTasks} weeklyFocus={weeklyFocus} closeouts={closeouts} today={today} onSaveCloseout={saveCloseout} />}
+        </section>
+      )}
 
       {quickCaptureOpen && (
         <div className="capture-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.currentTarget === event.target) setQuickCaptureOpen(false);
         }}>
           <form className="capture-dialog" onSubmit={quickCapture}>
-            <header>
-              <span>QUICK CAPTURE</span>
-              <button type="button" onClick={() => setQuickCaptureOpen(false)} aria-label="关闭快速记录">×</button>
-            </header>
+            <header><span>随手记录</span><button type="button" onClick={() => setQuickCaptureOpen(false)} aria-label="关闭快速记录">×</button></header>
             <h2>先把它留下来</h2>
-            <p>不必分类、不必写完整，稍后会在收集箱里等你。</p>
-            <textarea
-              autoFocus
-              value={quickText}
-              onChange={(event) => setQuickText(event.target.value)}
-              onKeyDown={(event) => {
-                if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                  event.preventDefault();
-                  event.currentTarget.form?.requestSubmit();
-                }
-              }}
-              placeholder="一句念头、一段感受，或突然想写下的东西……"
-            />
-            <footer>
-              <span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 保存</span>
-              <button disabled={saving || !quickText.trim()} type="submit">
-                {saving ? "正在收好…" : "放进收集箱"}
-              </button>
-            </footer>
+            <p>不必分类、不必写完整，保存后会进入独立的待整理清单。</p>
+            <textarea autoFocus value={quickText} onChange={(event) => setQuickText(event.target.value)} onKeyDown={(event) => {
+              if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
+            }} placeholder="一句念头、一段感受，或突然想写下的东西……" />
+            <footer><span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 保存</span><button disabled={saving || !quickText.trim()} type="submit">{saving ? "正在保存…" : "放进待整理"}</button></footer>
           </form>
         </div>
       )}
 
       {message && <div className="desktop-toast" role="status">{message}</div>}
+      {undoOffer && <div className="desktop-toast undo-toast" role="status"><span>{undoOffer.message}</span><button onClick={() => void runUndo()}>撤销</button></div>}
     </main>
   );
 }
 
-function TodayDashboard({
-  articles,
-  dailyEcho,
+function WorkbenchSidebar({
+  section,
   counts,
-  today,
-  onCapture,
-  onNew,
-  onOpen,
-  onReview,
+  inboxCount,
+  collapsed,
+  onSwitch,
+  onToggle,
+  accountDock,
 }: {
-  articles: StoredArticle[];
-  dailyEcho: StoredArticle | null;
-  counts: Record<DeskSection, number>;
-  today: string;
-  onCapture: () => void;
-  onNew: () => void;
-  onOpen: (article: StoredArticle) => void;
-  onReview: (article: StoredArticle, action: ReviewAction) => void;
+  section: DeskSection;
+  counts: Record<DeskSection, number | null>;
+  inboxCount: number;
+  collapsed: boolean;
+  onSwitch: (section: DeskSection) => void;
+  onToggle: () => void;
+  accountDock: ReactNode;
 }) {
   return (
-    <div className="today-dashboard">
-      <header className="dashboard-heading">
-        <div>
-          <span>{formatLongDate(today)}</span>
-          <h1>{greeting()}，今天想留下些什么？</h1>
-          <p>这里不是档案终点，而是让旧想法重新参与今天。</p>
-        </div>
-        <button onClick={onNew}>新建长文</button>
-      </header>
-
-      <button className="dashboard-capture" onClick={onCapture}>
-        <span>＋</span>
-        <span><strong>快速记下一闪而过的念头</strong><small>不用整理，先让它存在</small></span>
-        <kbd>Ctrl ⇧ Space</kbd>
-      </button>
-
-      <div className="dashboard-stats">
-        <div><span>今日触碰</span><strong>{counts.today}</strong><small>条内容</small></div>
-        <div><span>等待整理</span><strong>{counts.inbox}</strong><small>个念头</small></div>
-        <div><span>正在验证</span><strong>{counts.experiments}</strong><small>项实验</small></div>
-        <div><span>全部积累</span><strong>{articles.length}</strong><small>条记录</small></div>
+    <aside className="workbench-sidebar">
+      <button className="sidebar-collapse-toggle" onClick={onToggle} aria-label={collapsed ? "展开侧栏" : "收起侧栏"} title={collapsed ? "展开侧栏" : "收起侧栏"}>{collapsed ? "›" : "‹"}</button>
+      <div className="sidebar-brand"><span className="sidebar-brand-mark"><WorkbenchIcon name="brand" /></span><span><strong>人生攻略库</strong><small>理清方向，留下成长</small></span></div>
+      <nav className="sidebar-navigation" aria-label="工作台导航">
+        {(["action", "knowledge"] as const).map((group) => (
+          <div className="sidebar-group" key={group}>
+            <span className="sidebar-caption">{group === "action" ? "行动" : "积累"}</span>
+            {sections.filter((item) => item.group === group).map((item) => (
+              <button className={section === item.id ? "active" : ""} key={item.id} onClick={() => onSwitch(item.id)} title={collapsed ? item.label : undefined} aria-label={item.label}>
+                <i><WorkbenchIcon name={item.icon} /></i><span>{item.label}</span>{counts[item.id] !== null && <small>{counts[item.id]}</small>}
+              </button>
+            ))}
+          </div>
+        ))}
+      </nav>
+      <div className="sidebar-foot">
+        {accountDock}
       </div>
-
-      <section className="daily-echo">
-        <header>
-          <span>今日回声</span>
-          <small>从过去随机捞起一条</small>
-        </header>
-        {dailyEcho ? (
-          <div className="daily-echo-content">
-            <button className="echo-open" onClick={() => onOpen(dailyEcho)}>
-              <small>{formatDate(dailyEcho.created)} · {normalizeStage(dailyEcho.stage)}</small>
-              <strong>{dailyEcho.title}</strong>
-              <p>{dailyEcho.summary || plainExcerpt(dailyEcho.body)}</p>
-            </button>
-            <footer>
-              <span>现在再看，它还成立吗？</span>
-              <div>
-                <button onClick={() => onReview(dailyEcho, "agree")}>仍然认同</button>
-                <button onClick={() => onReview(dailyEcho, "changed")}>想法变了</button>
-                <button onClick={() => onReview(dailyEcho, "experiment")}>拿去试试</button>
-              </div>
-            </footer>
-          </div>
-        ) : (
-          <div className="echo-empty">
-            <p>等你留下一些内容后，过去的想法会在这里重新出现。</p>
-            <button onClick={onCapture}>写下第一条</button>
-          </div>
-        )}
-      </section>
-    </div>
+    </aside>
   );
 }
 
-function ArticleReader({
-  article,
-  saving,
-  onBack,
-  onEdit,
-  onRemove,
-  onReview,
-}: {
+function MagicParticles({ intensity }: { intensity: number }) {
+  return <div className="magic-particles" aria-hidden="true">{Array.from({ length: intensity }, (_, index) => {
+    const style = {
+      "--particle-x": `${(index * 37 + 11) % 96}%`,
+      "--particle-y": `${(index * 53 + 7) % 92}%`,
+      "--particle-delay": `${-(index % 9) * 1.7}s`,
+      "--particle-duration": `${12 + index % 8}s`,
+      "--particle-size": `${2 + index % 4}px`,
+    } as CSSProperties;
+    return <i key={index} style={style} />;
+  })}</div>;
+}
+
+function NotesWorkspace({ articles, loading, query, view, onQuery, onView, onOpen, onNew }: {
+  articles: StoredArticle[];
+  loading: boolean;
+  query: string;
+  view: NoteView;
+  onQuery: (value: string) => void;
+  onView: (view: NoteView) => void;
+  onOpen: (article: StoredArticle) => void;
+  onNew: () => void;
+}) {
+  return (
+    <>
+      <section className="notes-filter-pane">
+        <header><span>知识积累</span><h1>笔记</h1><p>一条内容可以同时属于思考、经验与多个主题。</p></header>
+        <nav>{noteViews.map((item) => <button className={view === item.id ? "active" : ""} key={item.id} onClick={() => onView(item.id)}><span>{item.label}</span><small>{item.id === "all" ? articles.length : ""}</small></button>)}</nav>
+        <div><strong>分类原则</strong><p>不使用互斥文件夹。性质说明内容是什么，主题说明它在谈什么。</p></div>
+      </section>
+      <section className="notes-list-stage">
+        <header className="notes-list-header"><div><strong>{noteViews.find((item) => item.id === view)?.label}</strong><span>{articles.length} 条</span></div><button onClick={onNew}>＋ 新建</button></header>
+        <label className="desktop-search"><span>⌕</span><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="搜索标题、正文、主题…" />{query && <button onClick={() => onQuery("")} aria-label="清空搜索">×</button>}</label>
+        <div className="notes-card-list">
+          {loading ? <div className="list-empty"><span>正在读取笔记…</span></div> : articles.length ? articles.map((article) => (
+            <button key={article.id} onClick={() => onOpen(article)}>
+              <span className="note-natures">{getNatures(article).slice(0, 2).map((nature) => <i key={nature}>{nature}</i>)}</span>
+              <strong>{article.title}</strong>
+              <p>{article.summary || plainExcerpt(article.body)}</p>
+              <footer><span>{article.project || article.tags.slice(0, 2).join(" · ") || "未关联主题"}</span><time>{formatRelativeDate(article.updated || article.created)}</time></footer>
+            </button>
+          )) : <div className="list-empty"><span>{query ? "没有找到相关笔记" : "这个视图还没有内容"}</span><button onClick={onNew}>写下第一条</button></div>}
+        </div>
+      </section>
+    </>
+  );
+}
+
+function ArticleReader({ article, saving, onBack, onEdit, onAppend, onRemove }: {
   article: StoredArticle;
   saving: boolean;
   onBack: () => void;
   onEdit: () => void;
+  onAppend: () => void;
   onRemove: () => void;
-  onReview: (action: ReviewAction) => void;
 }) {
+  const sourceUrl = article.source.find((item) => /^https?:\/\//i.test(item));
   return (
-    <article className="desktop-reader">
+    <article className="desktop-reader immersive-reader">
       <header className="reader-toolbar">
-        <button className="reader-back" onClick={onBack}>← 今日工作台</button>
-        <div>
-          <button disabled={saving} onClick={onRemove}>移除</button>
-          <button className="primary" onClick={onEdit}>编辑</button>
-        </div>
+        <button className="reader-back" onClick={onBack}>← 返回笔记</button>
+        <div><span>最后修改于 {formatDate(article.updated || article.created)}</span><button disabled={saving} onClick={onRemove}>移除</button><button onClick={onAppend}>追加想法</button><button className="primary" onClick={onEdit}>编辑</button></div>
       </header>
       <div className="reader-scroll">
         <div className="reader-document">
-          <div className="reader-kicker">
-            <span>{article.collectionLabel}</span>
-            <i>{normalizeStage(article.stage)}</i>
-            <small>{formatDate(article.updated || article.created)}</small>
-          </div>
+          <div className="reader-kicker"><span>{article.collection === "sources" ? "探索资料" : "个人笔记"}</span><small>{formatDate(article.created)}</small></div>
           <h1>{article.title}</h1>
-          {article.summary && <p className="reader-summary">{article.summary}</p>}
           <div className="reader-tags">
+            {getNatures(article).map((nature) => <span className="nature" key={nature}>{nature}</span>)}
             {article.tags.map((tag) => <span key={tag}>#{tag}</span>)}
-            {article.branch && <span>{article.branch}</span>}
-            <span className={`reader-sync ${article.storage.syncStatus}`}>
-              {article.storage.syncStatus === "synced" ? "已同步" : article.storage.syncStatus === "conflict" ? "冲突副本" : "等待同步"}
-            </span>
+            {article.project && <span>关联：{article.project}</span>}
           </div>
-          <MarkdownBody body={article.body} />
-          {article.next && (
-            <aside className="reader-next">
-              <span>下一步</span>
-              <p>{article.next}</p>
-            </aside>
-          )}
-          <section className="reader-review">
-            <span>重新遇见这条记录</span>
-            <h2>现在的你怎么看？</h2>
-            <div>
-              <button disabled={saving} onClick={() => onReview("agree")}>仍然认同</button>
-              <button disabled={saving} onClick={() => onReview("changed")}>想法变了</button>
-              <button disabled={saving} onClick={() => onReview("experiment")}>拿去试试</button>
-            </div>
-          </section>
+          <MarkdownDocument body={article.body} title={article.title} />
+          <footer className="reader-history"><div><strong>这篇内容仍可继续生长</strong><span>直接编辑会更新修改时间；“追加想法”会保留原文并增加带日期的新段落。</span></div>{sourceUrl && <a href={sourceUrl} target="_blank" rel="noreferrer">打开原始来源 ↗</a>}</footer>
         </div>
       </div>
     </article>
   );
 }
 
-function ArticleEditor({
-  draft,
-  saving,
-  onChange,
-  onCancel,
-  onSave,
-}: {
+function ArticleEditor({ draft, projects, saving, onChange, onCancel, onSave }: {
   draft: Article;
+  projects: ProjectSummary[];
   saving: boolean;
   onChange: (article: Article) => void;
   onCancel: () => void;
   onSave: () => void;
 }) {
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const natures = getNatures(draft);
+  const sourceUrl = draft.source.find((item) => /^https?:\/\//i.test(item)) || "";
+  const sourceKind = draft.source.find((item) => !/^https?:\/\//i.test(item)) || "自写";
+
   function update<Key extends keyof Article>(key: Key, value: Article[Key]) {
     onChange({ ...draft, [key]: value });
   }
 
-  return (
-    <div className="workbench-editor">
-      <header className="editor-toolbar">
-        <div>
-          <button onClick={onCancel}>取消</button>
-          <span>{draft.id ? "编辑记录" : "新建记录"}</span>
-        </div>
-        <div>
-          <small><kbd>Ctrl</kbd> + <kbd>S</kbd></small>
-          <button className="primary" disabled={saving} onClick={onSave}>
-            {saving ? "保存中…" : "保存"}
-          </button>
-        </div>
-      </header>
-      <div className="editor-scroll">
-        <div className="editor-paper">
-          <input
-            className="editor-title"
-            autoFocus
-            value={draft.title}
-            onChange={(event) => update("title", event.target.value)}
-            placeholder="这条记录的标题"
-          />
-          <textarea
-            className="editor-body"
-            value={draft.body}
-            onChange={(event) => update("body", event.target.value)}
-            placeholder="从这里开始写。支持使用 Markdown 标题、引用和列表……"
-          />
+  function toggleNature(nature: string) {
+    const next = natures.includes(nature) ? natures.filter((item) => item !== nature) : [...natures, nature];
+    update("type", (next.length ? next : ["思考"]).join("，"));
+  }
 
-          <section className="editor-metadata">
-            <header>
-              <strong>整理信息</strong>
-              <span>现在不想分类也没关系</span>
-            </header>
-            <div className="metadata-grid">
-              <label>
-                <span>归档位置</span>
-                <select
-                  value={draft.collection}
-                  onChange={(event) => {
-                    const option = collectionOptions.find(([value]) => value === event.target.value) ?? collectionOptions[0];
-                    onChange({ ...draft, collection: option[0], collectionLabel: option[1], category: option[1] });
-                  }}
-                >
-                  {collectionOptions.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
-                </select>
-              </label>
-              <label>
-                <span>生长阶段</span>
-                <select value={normalizeStage(draft.stage)} onChange={(event) => update("stage", event.target.value)}>
-                  {stageOptions.map((stage) => <option key={stage}>{stage}</option>)}
-                </select>
-              </label>
-              <label>
-                <span>分支</span>
-                <input value={draft.branch} onChange={(event) => update("branch", event.target.value)} />
-              </label>
-              <label>
-                <span>标签</span>
-                <input
-                  value={draft.tags.join("，")}
-                  onChange={(event) => update("tags", splitTags(event.target.value))}
-                  placeholder="用逗号分隔"
-                />
-              </label>
-            </div>
-            <label>
-              <span>一句摘要</span>
-              <input value={draft.summary} onChange={(event) => update("summary", event.target.value)} placeholder="留空时会从正文自动提取" />
-            </label>
-            <label>
-              <span>下一步行动</span>
-              <input value={draft.next} onChange={(event) => update("next", event.target.value)} placeholder="如果它值得行动，就留一个最小的下一步" />
-            </label>
-          </section>
-        </div>
-      </div>
+  function updateSource(kind: string, url = sourceUrl) {
+    update("source", [kind, ...(url.trim() ? [url.trim()] : [])]);
+  }
+
+  function insertMarkdown(before: string, after = "") {
+    const input = bodyRef.current;
+    if (!input) return;
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    const selected = draft.body.slice(start, end);
+    update("body", `${draft.body.slice(0, start)}${before}${selected}${after}${draft.body.slice(end)}`);
+    window.setTimeout(() => { input.focus(); input.setSelectionRange(start + before.length, end + before.length); }, 0);
+  }
+
+  return (
+    <div className="workbench-editor immersive-editor">
+      <header className="editor-toolbar"><div><button onClick={onCancel}>← 取消</button><span>{draft.id ? "编辑笔记" : "新建笔记"}</span></div><div><small><kbd>Ctrl</kbd> + <kbd>S</kbd></small><button className="primary" disabled={saving} onClick={onSave}>{saving ? "保存中…" : "保存"}</button></div></header>
+      <div className="editor-scroll"><div className="editor-paper">
+        <input className="editor-title" autoFocus value={draft.title} onChange={(event) => update("title", event.target.value)} placeholder="这篇笔记的标题" />
+        <div className="markdown-toolbar" aria-label="Markdown 格式工具"><button onClick={() => insertMarkdown("## ")}>标题</button><button onClick={() => insertMarkdown("**", "**")}>加粗</button><button onClick={() => insertMarkdown("> ")}>引用</button><button onClick={() => insertMarkdown("- ")}>列表</button><button onClick={() => insertMarkdown("[", "](https://)")}>链接</button><span>Markdown 会在阅读时完整排版</span></div>
+        <textarea ref={bodyRef} className="editor-body" value={draft.body} onChange={(event) => update("body", event.target.value)} placeholder="从这里开始写。可以直接使用标题、列表、引用、链接、表格和任务清单……" />
+        <section className="editor-metadata new-note-metadata">
+          <header><div><strong>笔记关系</strong><span>都可以留空，保存不会被分类打断</span></div></header>
+          <fieldset><legend>内容性质 · 可多选</legend><div className="nature-picker">{natureOptions.map((nature) => <button className={natures.includes(nature) ? "active" : ""} type="button" key={nature} onClick={() => toggleNature(nature)}>{nature}</button>)}</div></fieldset>
+          <div className="metadata-grid">
+            <label><span>主题</span><input value={draft.tags.join("，")} onChange={(event) => update("tags", splitTags(event.target.value))} placeholder="科研，创作，工具……" /></label>
+            <label><span>关联项目</span><select value={draft.projectId || projects.find((project) => project.title === draft.project)?.id || ""} onChange={(event) => { const project = projects.find((item) => item.id === event.target.value); onChange({ ...draft, projectId: project?.id || "", project: project?.title || "" }); }}><option value="">不关联项目</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></label>
+            <label><span>来源</span><select value={sourceKind} onChange={(event) => updateSource(event.target.value)}>{sourceOptions.map((source) => <option key={source}>{source}</option>)}</select></label>
+            <label><span>来源链接</span><input type="url" value={sourceUrl} onChange={(event) => updateSource(sourceKind, event.target.value)} placeholder="可选" /></label>
+          </div>
+          <small className="metadata-auto-note">摘要、创建时间、修改时间和版本信息由系统自动维护。</small>
+        </section>
+      </div></div>
     </div>
   );
 }
 
-function MarkdownBody({ body }: { body: string }) {
-  const blocks = body.split(/\n{2,}/).filter(Boolean);
-  return (
-    <div className="desktop-markdown">
-      {blocks.map((block, index) => {
-        const text = block.trim();
-        if (text.startsWith("### ")) return <h3 key={index}>{text.slice(4)}</h3>;
-        if (text.startsWith("## ")) return <h2 key={index}>{text.slice(3)}</h2>;
-        if (text.startsWith("# ")) return <h1 key={index}>{text.slice(2)}</h1>;
-        if (text.startsWith("> ")) return <blockquote key={index}>{text.replace(/^> ?/gm, "")}</blockquote>;
-        if (text.startsWith("```") && text.endsWith("```")) {
-          return <pre key={index}><code>{text.replace(/^```[^\n]*\n?/, "").replace(/\n?```$/, "")}</code></pre>;
-        }
-        if (text.split("\n").every((line) => /^[-*] /.test(line))) {
-          return <ul key={index}>{text.split("\n").map((line, lineIndex) => <li key={lineIndex}>{line.slice(2)}</li>)}</ul>;
-        }
-        return <p key={index}>{text}</p>;
-      })}
-    </div>
-  );
+function matchesNoteView(article: StoredArticle, view: NoteView) {
+  if (view === "all") return true;
+  const natures = getNatures(article);
+  const topics = article.tags.join(" ") + article.project;
+  if (view === "thoughts") return natures.some((item) => ["思考", "灵感", "问题"].includes(item));
+  if (view === "experience") return natures.some((item) => ["经验", "方法", "复盘"].includes(item));
+  if (view === "research") return /科研|研究|论文|学习|学术/.test(topics + article.collectionLabel);
+  return /创作|小说|视频|写作|术途异道/.test(topics + article.body);
 }
 
-function isInboxArticle(article: StoredArticle) {
-  const stage = normalizeStage(article.stage);
-  return stage === "种子" || stage === "幼苗" || article.branch === "待分类";
-}
-
-function isReviewArticle(article: StoredArticle, today: string) {
-  const date = (article.updated || article.created).slice(0, 10);
-  return Boolean(date && date < today && article.reviewDate !== today);
-}
-
-function isExperimentArticle(article: StoredArticle) {
-  return normalizeStage(article.stage) === "实验" || Boolean(article.next.trim());
+function getNatures(article: Pick<Article, "type">) {
+  const values = article.type.split(/[，,]/).map((item) => item.trim()).filter(Boolean);
+  if (!values.length || values.every((item) => item === "记录" || item === "文章")) return ["思考"];
+  return values.filter((item) => item !== "记录" && item !== "文章");
 }
 
 function articleSearchText(article: StoredArticle) {
-  return [
-    article.title,
-    article.summary,
-    article.body,
-    article.branch,
-    article.subbranch,
-    article.project,
-    article.tags.join(" "),
-  ].join(" ").toLocaleLowerCase("zh-CN");
+  return [article.title, article.summary, article.body, article.project, article.type, article.tags.join(" ")].join(" ").toLocaleLowerCase("zh-CN");
 }
 
 function toEditableArticle(article: StoredArticle): Article {
-  return {
-    ...article,
-    tags: [...article.tags],
-    source: [...article.source],
-  };
-}
-
-function normalizeStage(stage: string) {
-  if (stage === "草稿") return "种子";
-  if (stage === "已整理") return "常青";
-  if (stage === "已发布") return "作品";
-  return stage || "种子";
+  return { ...article, tags: [...article.tags], source: [...article.source] };
 }
 
 function splitTags(value: string) {
@@ -790,7 +927,20 @@ function captureTitle(text: string) {
 }
 
 function plainExcerpt(text: string) {
-  return text.replace(/[#>*`\-]/g, "").replace(/\s+/g, " ").trim().slice(0, 82);
+  return text.replace(/[#>*`\-\[\]()]/g, "").replace(/\s+/g, " ").trim().slice(0, 92);
+}
+
+function linkPlatform(value: string) {
+  try {
+    const host = new URL(value).hostname.toLocaleLowerCase();
+    if (host.includes("bilibili")) return "哔哩哔哩";
+    if (host.includes("douyin")) return "抖音";
+    if (host.includes("zhihu")) return "知乎";
+    if (host.includes("github")) return "GitHub";
+    return host.replace(/^www\./, "");
+  } catch {
+    return "外部链接";
+  }
 }
 
 function localDate(value = new Date()) {
@@ -798,17 +948,20 @@ function localDate(value = new Date()) {
   return new Date(value.getTime() - offset).toISOString().slice(0, 10);
 }
 
-function formatDate(value: string) {
-  return value ? value.slice(0, 10).replaceAll("-", ".") : "未记录日期";
+function startOfMonth() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
 }
 
-function formatLongDate(value: string) {
-  return new Date(`${value}T12:00:00`).toLocaleDateString("zh-CN", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    weekday: "long",
-  });
+function startOfLocalWeekDate() {
+  const date = new Date();
+  const day = date.getDay() || 7;
+  date.setDate(date.getDate() - day + 1);
+  return localDate(date);
+}
+
+function formatDate(value: string) {
+  return value ? value.slice(0, 10).replaceAll("-", ".") : "未记录日期";
 }
 
 function formatRelativeDate(value: string) {
@@ -819,21 +972,4 @@ function formatRelativeDate(value: string) {
   if (diff === 1) return "昨天";
   if (diff < 7) return `${diff} 天前`;
   return formatDate(value);
-}
-
-function greeting() {
-  const hour = new Date().getHours();
-  if (hour < 6) return "夜深了";
-  if (hour < 11) return "早上好";
-  if (hour < 14) return "中午好";
-  if (hour < 18) return "下午好";
-  return "晚上好";
-}
-
-function hashText(value: string) {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
-  }
-  return hash;
 }

@@ -1,16 +1,21 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { isRegistered, register } from "@tauri-apps/plugin-global-shortcut";
 import Database from "@tauri-apps/plugin-sql";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppUpdater } from "./AppUpdater";
-import { DesktopWorkbench } from "./DesktopWorkbench";
+import { DesktopWorkbench, type ThemeMode } from "./DesktopWorkbench";
+import { WorkbenchIcon } from "./WorkbenchIcon";
 import {
   CloudSyncClient,
   CloudSyncError,
   type LoginResult,
   type SyncResult,
 } from "../app/data/cloud-sync-client";
+import { initialProjectSeeds } from "../app/data/project-seeds";
 import { SqliteArticleRepository } from "../app/data/sqlite-article-repository";
+import { SqliteProjectRepository } from "../app/data/sqlite-project-repository";
+import { SqliteWorkRepository } from "../app/data/sqlite-work-repository";
 import seedArticles from "../app/generated/articles.json";
 import type { Article } from "../app/types";
 
@@ -23,8 +28,23 @@ type BackupPath = {
 };
 
 type DesktopRuntime = {
-  repository: SqliteArticleRepository;
+  articleRepository: SqliteArticleRepository;
+  projectRepository: SqliteProjectRepository;
+  workRepository: SqliteWorkRepository;
+  database: Database;
 };
+
+type TauriSqliteDatabase = Database & {
+  transaction(statements: Array<{ sql: string; bindValues?: Array<string | number | null | Uint8Array> }>): Promise<void>;
+};
+
+function describeStartupError(error: unknown) {
+  if (!(error instanceof Error)) return "无法打开本地资料库";
+  const cause = (error as Error & { cause?: unknown }).cause;
+  if (cause instanceof Error) return `${error.message}：${cause.message}`;
+  if (cause) return `${error.message}：${String(cause)}`;
+  return error.message;
+}
 
 type SyncNotice = {
   tone: "quiet" | "success" | "warning";
@@ -51,6 +71,10 @@ export function DesktopApp() {
   const [notice, setNotice] = useState<SyncNotice>({
     tone: "quiet",
     text: "本地资料库准备中…",
+  });
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    const stored = localStorage.getItem("life-strategy.theme-mode");
+    return stored === "minimal" || stored === "immersive" ? stored : "magic";
   });
   const autoSyncTimer = useRef<number | null>(null);
   const syncInFlight = useRef(false);
@@ -79,26 +103,31 @@ export function DesktopApp() {
     let active = true;
     Database.load("sqlite:mind-garden.db")
       .then(async (database) => {
-        const repository = new SqliteArticleRepository(database, {
+        const transactionalDatabase = database as TauriSqliteDatabase;
+        transactionalDatabase.transaction = async (statements) => {
+          await invoke("execute_sqlite_transaction", { statements });
+        };
+        const articleRepository = new SqliteArticleRepository(transactionalDatabase, {
           seedArticles: seedArticles as Article[],
         });
-        await repository.list();
-        const pending = await repository.listPendingChanges();
-        if (!active) return;
-        setRuntime({ repository });
-        setPendingCount(pending.length);
-        setNotice({
-          tone: "quiet",
-          text: pending.length
-            ? `${pending.length} 条内容等待同步`
-            : "本地内容已经就绪",
+        const projectRepository = new SqliteProjectRepository(transactionalDatabase, {
+          seedProjects: initialProjectSeeds,
         });
+        const workRepository = new SqliteWorkRepository(transactionalDatabase);
+        await Promise.all([
+          articleRepository.list(),
+          projectRepository.list(),
+          workRepository.listPlans(),
+        ]);
+        const pending = await articleRepository.listPendingChanges();
+        if (!active) return;
+        setRuntime({ articleRepository, projectRepository, workRepository, database });
+        setPendingCount(pending.length);
+        setNotice({ tone: "quiet", text: "" });
       })
       .catch((error) => {
         if (!active) return;
-        setStartupError(
-          error instanceof Error ? error.message : "无法打开本地资料库",
-        );
+        setStartupError(describeStartupError(error));
       });
     return () => {
       active = false;
@@ -108,14 +137,14 @@ export function DesktopApp() {
   const syncClient = useMemo(
     () =>
       runtime
-        ? new CloudSyncClient(runtime.repository, serverUrl)
+        ? new CloudSyncClient(runtime.articleRepository, serverUrl)
         : null,
     [runtime, serverUrl],
   );
 
   const updatePendingCount = useCallback(async () => {
     if (!runtime) return;
-    const pending = await runtime.repository.listPendingChanges();
+    const pending = await runtime.articleRepository.listPendingChanges();
     setPendingCount(pending.length);
   }, [runtime]);
 
@@ -191,7 +220,7 @@ export function DesktopApp() {
     setNotice({ tone: "quiet", text: "正在整理本地备份…" });
     try {
       const target = await invoke<BackupPath>("reserve_backup_path");
-      await runtime.repository.createBackup(target.path);
+      await runtime.articleRepository.createBackup(target.path);
       setNotice({
         tone: "success",
         text: `备份已保存到：${target.path}`,
@@ -204,6 +233,31 @@ export function DesktopApp() {
     } finally {
       setBackingUp(false);
     }
+  }
+
+  async function restoreLatestBackup() {
+    if (!runtime || backingUp) return;
+    const latest = await invoke<BackupPath | null>("latest_backup_path").catch(() => null);
+    if (!latest) {
+      setNotice({ tone: "warning", text: "还没有可恢复的本地备份。" });
+      return;
+    }
+    if (!window.confirm(`确认恢复最近备份吗？\n\n${latest.path}\n\n当前资料库会先自动保存一个安全副本，随后应用将重启。`)) return;
+    setBackingUp(true);
+    setNotice({ tone: "quiet", text: "正在安全恢复本地备份…" });
+    try {
+      await runtime.database.close();
+      await invoke("restore_backup", { sourcePath: latest.path });
+      await relaunch();
+    } catch (error) {
+      setNotice({ tone: "warning", text: error instanceof Error ? error.message : "恢复备份失败" });
+      setBackingUp(false);
+    }
+  }
+
+  function changeTheme(next: ThemeMode) {
+    setThemeMode(next);
+    localStorage.setItem("life-strategy.theme-mode", next);
   }
 
   if (startupError) {
@@ -219,7 +273,7 @@ export function DesktopApp() {
   if (!runtime) {
     return (
       <main className="desktop-startup">
-        <span>PRIVATE MIND GARDEN</span>
+        <span>人生攻略库</span>
         <h1>正在打开你的书桌</h1>
         <p>内容只会先保存在这台设备上。</p>
       </main>
@@ -228,46 +282,28 @@ export function DesktopApp() {
 
   return (
     <div className="desktop-app">
-      <header className="desktop-statusbar">
-        <div>
-          <i className={notice.tone} />
-          <span>{notice.text}</span>
-        </div>
-        <nav aria-label="桌面资料库">
-          <button disabled={backingUp} onClick={createBackup}>
-            {backingUp ? "备份中…" : "本地备份"}
-          </button>
-          <AppUpdater />
-          {session ? (
-            <>
-              <span className="sync-account">{session.username}</span>
-              <button
-                className="sync-primary"
-                disabled={syncing}
-                onClick={() => void syncNow()}
-              >
-                {syncing
-                  ? "同步中…"
-                  : pendingCount
-                    ? `同步 ${pendingCount}`
-                    : "立即同步"}
-              </button>
-              <button onClick={() => setShowAccount(true)}>账户</button>
-            </>
-          ) : (
-            <button
-              className="sync-primary"
-              onClick={() => setShowAccount(true)}
-            >
-              登录同步
-            </button>
-          )}
-        </nav>
-      </header>
+      {notice.text && notice.tone !== "quiet" && <div className="floating-system-alert system-alert visible"><i className={notice.tone} /><span>{notice.text}</span></div>}
 
       <DesktopWorkbench
         key={revision}
-        repository={runtime.repository}
+        repository={runtime.articleRepository}
+        projectRepository={runtime.projectRepository}
+        workRepository={runtime.workRepository}
+        themeMode={themeMode}
+        accountDock={
+          <AccountDock
+            session={session}
+            pendingCount={pendingCount}
+            syncing={syncing}
+            backingUp={backingUp}
+            themeMode={themeMode}
+            onTheme={changeTheme}
+            onBackup={() => void createBackup()}
+            onRestore={() => void restoreLatestBackup()}
+            onSync={() => session ? void syncNow() : setShowAccount(true)}
+            onAccount={() => setShowAccount(true)}
+          />
+        }
         onRepositoryChange={() => {
           void updatePendingCount();
           setMutationRevision((value) => value + 1);
@@ -289,7 +325,7 @@ export function DesktopApp() {
             >
               ×
             </button>
-            <span>PRIVATE SYNC</span>
+            <span>个人同步</span>
             <h2 id="account-title">
               {session ? "同步账户" : "登录后同步"}
             </h2>
@@ -367,16 +403,55 @@ function syncMessage(
       text: `同步完成，并保留了 ${result.conflicts} 条冲突副本。`,
     };
   }
-  if (!showSuccess && !result.uploaded && !result.downloaded) {
-    return { tone: "quiet", text: "本地内容已自动同步" };
-  }
+  if (!showSuccess || (!result.uploaded && !result.downloaded)) return { tone: "quiet", text: "" };
   return {
-    tone: "success",
-    text:
-      result.uploaded || result.downloaded
-        ? `同步完成：上传 ${result.uploaded} 条，接收 ${result.downloaded} 条。`
-        : "所有内容都已同步。",
+    tone: "quiet",
+    text: "",
   };
+}
+
+function AccountDock({
+  session,
+  pendingCount,
+  syncing,
+  backingUp,
+  themeMode,
+  onTheme,
+  onBackup,
+  onRestore,
+  onSync,
+  onAccount,
+}: {
+  session: LoginResult | null;
+  pendingCount: number;
+  syncing: boolean;
+  backingUp: boolean;
+  themeMode: ThemeMode;
+  onTheme: (mode: ThemeMode) => void;
+  onBackup: () => void;
+  onRestore: () => void;
+  onSync: () => void;
+  onAccount: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="sidebar-account-dock">
+      <button className="account-dock-trigger" onClick={() => setOpen((value) => !value)} title="账户与数据">
+        <i><WorkbenchIcon name="account" /></i><span><strong>{session?.username || "本地工作台"}</strong><small>{session ? pendingCount ? `${pendingCount} 条待同步` : "已连接同步" : "账户与数据"}</small></span><b>{open ? "×" : "⌃"}</b>
+      </button>
+      {open && <section className="account-dock-menu">
+        <header><span>账户与数据</span><strong>{session ? session.username : "仅保存在本机"}</strong></header>
+        <nav>
+          <button disabled={backingUp} onClick={onBackup}><i>⇩</i><span><strong>{backingUp ? "正在备份" : "本地备份"}</strong><small>导出资料库副本</small></span></button>
+          <button disabled={backingUp} onClick={onRestore}><i>↺</i><span><strong>恢复最近备份</strong><small>恢复前会自动保留当前资料库</small></span></button>
+          <button disabled={syncing} onClick={onSync}><i>↻</i><span><strong>{session ? syncing ? "正在同步" : "立即同步" : "登录同步"}</strong><small>{session ? pendingCount ? `${pendingCount} 条本地变更` : "当前没有待同步变更" : "连接自己的服务器"}</small></span></button>
+          <button onClick={onAccount}><i>◉</i><span><strong>账户设置</strong><small>云同步目前覆盖笔记；完整工作台请使用本地备份</small></span></button>
+          <div className="account-update-entry"><AppUpdater /></div>
+        </nav>
+        <div className="theme-mode-control"><span>主题强度</span><div>{([ ["minimal", "简洁"], ["magic", "魔法"], ["immersive", "沉浸"] ] as const).map(([value, label]) => <button className={themeMode === value ? "active" : ""} key={value} onClick={() => onTheme(value)}>{label}</button>)}</div></div>
+      </section>}
+    </div>
+  );
 }
 
 function formatTime(value: string) {

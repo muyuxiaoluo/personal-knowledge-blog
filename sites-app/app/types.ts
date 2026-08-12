@@ -14,6 +14,7 @@ export type Article = {
   tags: string[];
   type: string;
   project: string;
+  projectId?: string;
   confidence: string;
   source: string[];
   reviewDate: string;

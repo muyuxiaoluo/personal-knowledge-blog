@@ -21,7 +21,7 @@ type AvailableUpdate = {
 };
 
 export function AppUpdater() {
-  const [currentVersion, setCurrentVersion] = useState("0.3.0");
+  const [currentVersion, setCurrentVersion] = useState("0.4.0");
   const [phase, setPhase] = useState<UpdatePhase>("idle");
   const [available, setAvailable] = useState<AvailableUpdate | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -171,7 +171,7 @@ export function AppUpdater() {
               >
                 ×
               </button>
-              <span>APP UPDATE</span>
+              <span>应用更新</span>
               <h2 id="update-title">{updateTitle(phase)}</h2>
               <p>{updateDescription(phase, currentVersion, available, errorMessage)}</p>
 

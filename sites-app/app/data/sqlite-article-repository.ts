@@ -19,6 +19,11 @@ export type SqliteExecuteResult = {
   lastInsertId?: number;
 };
 
+export type SqliteStatement = {
+  sql: string;
+  bindValues?: SqliteValue[];
+};
+
 /**
  * Matches the small execute/select surface exposed by @tauri-apps/plugin-sql.
  * A Tauri Database instance can be passed directly without coupling this
@@ -27,6 +32,27 @@ export type SqliteExecuteResult = {
 export interface SqliteDatabase {
   execute(sql: string, bindValues?: SqliteValue[]): Promise<SqliteExecuteResult>;
   select<T>(sql: string, bindValues?: SqliteValue[]): Promise<T[]>;
+  transaction?(statements: SqliteStatement[]): Promise<void>;
+}
+
+export async function executeSqliteTransaction(
+  database: SqliteDatabase,
+  statements: SqliteStatement[],
+) {
+  if (database.transaction) {
+    await database.transaction(statements);
+    return;
+  }
+  await database.execute("BEGIN IMMEDIATE");
+  try {
+    for (const statement of statements) {
+      await database.execute(statement.sql, statement.bindValues ?? []);
+    }
+    await database.execute("COMMIT");
+  } catch (error) {
+    await database.execute("ROLLBACK").catch(() => undefined);
+    throw error;
+  }
 }
 
 type ArticleRow = {
@@ -45,6 +71,7 @@ type ArticleRow = {
   tags_json: string;
   type: string;
   project: string;
+  project_id: string;
   confidence: string;
   source_json: string;
   review_date: string;
@@ -78,6 +105,7 @@ const migrations = [
     tags_json TEXT NOT NULL,
     type TEXT NOT NULL,
     project TEXT NOT NULL,
+    project_id TEXT NOT NULL DEFAULT '',
     confidence TEXT NOT NULL,
     source_json TEXT NOT NULL,
     review_date TEXT NOT NULL,
@@ -96,7 +124,7 @@ const migrations = [
 
 const articleColumns = `
   id, slug, collection, collection_label, title, created_at, updated_at,
-  branch, subbranch, stage, validity, category, tags_json, type, project,
+  branch, subbranch, stage, validity, category, tags_json, type, project, project_id,
   confidence, source_json, review_date, summary, next_action, body,
   version, device_id, sync_status, deleted_at
 `;
@@ -137,6 +165,7 @@ function rowToArticle(row: ArticleRow): StoredArticle {
     tags: parseStringList(row.tags_json),
     type: row.type,
     project: row.project,
+    projectId: row.project_id || "",
     confidence: row.confidence,
     source: parseStringList(row.source_json),
     reviewDate: row.review_date,
@@ -185,6 +214,10 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
     for (const statement of migrations) {
       await this.database.execute(statement);
     }
+    const articleColumns = await this.database.select<{ name: string }>("PRAGMA table_info(articles)");
+    if (!articleColumns.some((column) => column.name === "project_id")) {
+      await this.database.execute("ALTER TABLE articles ADD COLUMN project_id TEXT NOT NULL DEFAULT ''");
+    }
     await this.database.execute(
       `INSERT INTO app_meta(key, value) VALUES('schema_version', '1')
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -213,7 +246,7 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
     const updated = article.updated || created;
     await this.database.execute(
       `INSERT INTO articles (${articleColumns})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'pending', NULL)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'pending', NULL)
        ON CONFLICT(id) DO NOTHING`,
       [
         article.id,
@@ -231,6 +264,7 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
         JSON.stringify(article.tags),
         article.type,
         article.project,
+        article.projectId || "",
         article.confidence,
         JSON.stringify(article.source),
         article.reviewDate,
@@ -280,7 +314,7 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
 
       await this.database.execute(
         `INSERT INTO articles (${articleColumns})
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'pending', NULL)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'pending', NULL)
          ON CONFLICT(id) DO UPDATE SET
            slug = excluded.slug,
            collection = excluded.collection,
@@ -293,8 +327,9 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
            validity = excluded.validity,
            category = excluded.category,
            tags_json = excluded.tags_json,
-           type = excluded.type,
-           project = excluded.project,
+          type = excluded.type,
+          project = excluded.project,
+          project_id = excluded.project_id,
            confidence = excluded.confidence,
            source_json = excluded.source_json,
            review_date = excluded.review_date,
@@ -321,6 +356,7 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
           JSON.stringify(article.tags || []),
           article.type || "记录",
           article.project || "",
+          article.projectId || "",
           article.confidence || "低",
           JSON.stringify(article.source || ["私人记录"]),
           article.reviewDate || "",
@@ -434,7 +470,7 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
     const conflictId = `${article.id}#conflict-${stamp}`;
     await this.database.execute(
       `INSERT INTO articles (${articleColumns})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'conflict', NULL)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'conflict', NULL)
        ON CONFLICT(id) DO NOTHING`,
       [
         conflictId,
@@ -452,6 +488,7 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
         JSON.stringify(article.tags),
         article.type,
         article.project,
+        article.projectId || "",
         article.confidence,
         JSON.stringify([...article.source, "同步冲突保护"]),
         article.reviewDate,
@@ -466,7 +503,7 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
   private async writeRemoteArticle(article: StoredArticle) {
     await this.database.execute(
       `INSERT INTO articles (${articleColumns})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', ?)
        ON CONFLICT(id) DO UPDATE SET
          slug = excluded.slug,
          collection = excluded.collection,
@@ -482,6 +519,7 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
          tags_json = excluded.tags_json,
          type = excluded.type,
          project = excluded.project,
+         project_id = excluded.project_id,
          confidence = excluded.confidence,
          source_json = excluded.source_json,
          review_date = excluded.review_date,
@@ -508,6 +546,7 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
         JSON.stringify(article.tags),
         article.type,
         article.project,
+        article.projectId || "",
         article.confidence,
         JSON.stringify(article.source),
         article.reviewDate,

@@ -21,7 +21,7 @@ export function createSyncServer({ database, authSecret, logger = console }) {
         sendJson(response, 200, {
           status: "ok",
           service: "mind-garden-sync",
-          version: "0.2.0",
+          version: "0.4.0",
         });
         return;
       }
