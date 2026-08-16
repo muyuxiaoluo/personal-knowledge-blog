@@ -4,6 +4,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { updateProxyUrl } from "./updateProxy";
 import { WorkbenchIcon } from "./WorkbenchIcon";
 
 type UpdatePhase =
@@ -21,8 +22,30 @@ type AvailableUpdate = {
   date?: string;
 };
 
+const UPDATE_CHECK_TIMEOUT = 20_000;
+
+async function checkWithPreferredProxy() {
+  const proxy = updateProxyUrl();
+  if (!proxy) return check({ timeout: UPDATE_CHECK_TIMEOUT });
+
+  try {
+    return await check({
+      timeout: UPDATE_CHECK_TIMEOUT,
+      proxy,
+    });
+  } catch (proxyError) {
+    try {
+      return await check({ timeout: UPDATE_CHECK_TIMEOUT });
+    } catch (systemError) {
+      throw new Error(
+        `本地代理（${proxy}）和系统网络均无法连接更新服务。代理：${errorText(proxyError)}；系统网络：${errorText(systemError)}`,
+      );
+    }
+  }
+}
+
 export function AppUpdater() {
-  const [currentVersion, setCurrentVersion] = useState("0.5.1");
+  const [currentVersion, setCurrentVersion] = useState("0.5.2");
   const [phase, setPhase] = useState<UpdatePhase>("idle");
   const [available, setAvailable] = useState<AvailableUpdate | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -52,7 +75,7 @@ export function AppUpdater() {
         updateRef.current = null;
       }
 
-      const update = await check({ timeout: 20_000 });
+      const update = await checkWithPreferredProxy();
       if (!update) {
         setAvailable(null);
         setPhase("latest");
@@ -69,9 +92,7 @@ export function AppUpdater() {
     } catch (error) {
       if (showDialog) {
         setPhase("error");
-        setErrorMessage(
-          error instanceof Error ? error.message : "暂时无法连接更新服务。",
-        );
+        setErrorMessage(errorText(error, "暂时无法连接更新服务。"));
       } else {
         setPhase("idle");
       }
@@ -121,9 +142,7 @@ export function AppUpdater() {
       await relaunch();
     } catch (error) {
       setPhase("error");
-      setErrorMessage(
-        error instanceof Error ? error.message : "更新下载或安装失败。",
-      );
+      setErrorMessage(errorText(error, "更新下载或安装失败。"));
     }
   }
 
@@ -256,6 +275,12 @@ function friendlyUpdateError(message: string) {
     return "还没有可用的正式发布版本，或 GitHub 仓库暂时不允许匿名访问。";
   }
   return message || "暂时无法连接更新服务，请稍后再试。";
+}
+
+function errorText(error: unknown, fallback = "未知错误") {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  return fallback;
 }
 
 function formatUpdateDate(value: string) {

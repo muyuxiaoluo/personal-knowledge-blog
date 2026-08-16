@@ -21,6 +21,12 @@ import type { Article, StoredArticle } from "../app/types";
 import type { DailyCloseout, FocusSession, TaskPlan, WeeklyFocus } from "../app/work-types";
 import { MarkdownDocument } from "./MarkdownDocument";
 import { ProjectWorkspace } from "./ProjectWorkspace";
+import {
+  DEFAULT_UPDATE_PROXY_PORT,
+  loadUpdateProxyPort,
+  saveUpdateProxyPort,
+  validateUpdateProxyPort,
+} from "./updateProxy";
 import { WorkbenchIcon, type WorkbenchIconName } from "./WorkbenchIcon";
 import {
   ExplorePage,
@@ -880,6 +886,27 @@ function SettingsPage({ themeMode, backingUp, onThemeChange, onCreateBackup, onR
   onCreateBackup: () => void;
   onRestoreBackup: () => void;
 }) {
+  const [updateProxyPort, setUpdateProxyPort] = useState(loadUpdateProxyPort);
+  const [proxyMessage, setProxyMessage] = useState("");
+
+  function saveProxySettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const error = validateUpdateProxyPort(updateProxyPort);
+    if (error) {
+      setProxyMessage(error);
+      return;
+    }
+
+    const normalized = updateProxyPort.trim();
+    try {
+      saveUpdateProxyPort(normalized);
+      setUpdateProxyPort(normalized);
+      setProxyMessage(normalized ? "已保存，下次检查更新时生效。" : "已关闭指定代理，将使用系统网络。");
+    } catch {
+      setProxyMessage("保存失败，请稍后重试。");
+    }
+  }
+
   return (
     <div className="settings-page workspace-scroll">
       <header className="workspace-page-heading"><div><h1>设置</h1><p>统一管理外观、数据与以后新增的工作台偏好。</p></div></header>
@@ -895,6 +922,31 @@ function SettingsPage({ themeMode, backingUp, onThemeChange, onCreateBackup, onR
             <button disabled={backingUp} onClick={onRestoreBackup}><i>↺</i><span><strong>恢复最近备份</strong><small>恢复前会自动保留当前资料库</small></span></button>
           </div>
           <aside><strong>数据边界</strong><p>云同步目前覆盖笔记；跨设备迁移完整工作台时，请使用这里的本地备份。</p></aside>
+        </section>
+        <section className="workspace-card settings-section settings-network-section">
+          <header><span>更新网络</span><h2>本地代理端口</h2><p>仅用于检查和下载应用更新，不影响同步与其他网络请求。</p></header>
+          <form className="settings-proxy-form" onSubmit={saveProxySettings}>
+            <label htmlFor="update-proxy-port">HTTP 代理端口</label>
+            <div>
+              <span>127.0.0.1</span>
+              <input
+                id="update-proxy-port"
+                type="text"
+                inputMode="numeric"
+                autoComplete="off"
+                value={updateProxyPort}
+                onChange={(event) => {
+                  setUpdateProxyPort(event.target.value);
+                  setProxyMessage("");
+                }}
+                placeholder={DEFAULT_UPDATE_PROXY_PORT}
+                aria-describedby="update-proxy-help update-proxy-message"
+              />
+              <button type="submit">保存</button>
+            </div>
+            <small id="update-proxy-help">默认 {DEFAULT_UPDATE_PROXY_PORT}；留空后仅使用系统网络。代理连接失败时也会自动回退到系统网络。</small>
+            <p id="update-proxy-message" role="status">{proxyMessage}</p>
+          </form>
         </section>
       </div>
     </div>

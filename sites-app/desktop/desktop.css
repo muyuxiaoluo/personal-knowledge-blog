@@ -7581,6 +7581,77 @@ body {
   line-height: 1.6;
 }
 
+.settings-proxy-form {
+  display: grid;
+  gap: 9px;
+  padding: 18px 20px 0;
+}
+
+.settings-proxy-form > label {
+  color: #59617f;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.settings-proxy-form > div {
+  display: grid;
+  grid-template-columns: auto minmax(84px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-proxy-form > div > span,
+.settings-proxy-form input,
+.settings-proxy-form button {
+  min-height: 42px;
+  border: 1px solid rgba(74, 83, 140, 0.16);
+  border-radius: 10px;
+}
+
+.settings-proxy-form > div > span {
+  display: grid;
+  place-items: center;
+  padding: 0 12px;
+  background: rgba(236, 238, 247, 0.72);
+  color: #6b718b;
+  font-size: 13px;
+}
+
+.settings-proxy-form input {
+  width: 100%;
+  min-width: 0;
+  padding: 0 12px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #454b68;
+  font: inherit;
+}
+
+.settings-proxy-form input:focus {
+  border-color: rgba(84, 103, 168, 0.58);
+  outline: 3px solid rgba(84, 103, 168, 0.1);
+}
+
+.settings-proxy-form button {
+  padding: 0 17px;
+  background: #5d68a4;
+  color: #fff;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.settings-proxy-form > small {
+  color: #85899e;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.settings-proxy-form > p {
+  min-height: 18px;
+  margin: 0;
+  color: #6976a6;
+  font-size: 12px;
+}
+
 .notes-domain-filter {
   display: grid;
   gap: 6px;
