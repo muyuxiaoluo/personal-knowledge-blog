@@ -35,6 +35,65 @@ jobs:
         working-directory: sites-app
         run: npm test
 
+      - name: 提取 CHANGELOG 对应版本条目
+        id: changelog
+        shell: pwsh
+        run: |
+          # 从 Git 标签 vX.Y.Z 提取应用版本号
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $content = Get-Content CHANGELOG.md -Raw
+
+          # 匹配 `## vX.Y.Z — YYYY-MM-DD` 到下一个 `## v` 或文末之间的全部内容
+          $escapedVersion = [regex]::Escape($version)
+          $pattern = "(?s)##\s+v$escapedVersion\b.*?(?=##\s+v|\z)"
+          $match = [regex]::Match($content, $pattern)
+          if ($match.Success) {
+            $section = $match.Value.Trim()
+          } else {
+            $section = "（CHANGELOG.md 未找到 v$version 对应条目，请参考下方自动生成的发布记录。）"
+          }
+
+          # 写入多行到 step output：使用 base64 避免 GitHub Actions 对换行符的截断
+          $bytes = [Text.Encoding]::UTF8.GetBytes($section)
+          $base64 = [Convert]::ToBase64String($bytes)
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "section_b64=$base64"
+          Write-Host "CHANGELOG 提取完成，长度 $($section.Length) 字符"
+
+      - name: 解码 CHANGELOG 条目并准备 Release 正文
+        id: release-body
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $sectionBytes = [Convert]::FromBase64String("${{ steps.changelog.outputs.section_b64 }}")
+          $section = [Text.Encoding]::UTF8.GetString($sectionBytes)
+
+          # 用 Git 标签寻找语义化版本比当前小的最近正式标签，生成对比链接；找不到就省略
+          $prevTag = git tag --list 'v*' --sort=-version:refname `
+            | Where-Object { $_ -ne "${{ github.ref_name }}" -and $_ -match '^v\d+\.\d+\.\d+$' } `
+            | Select-Object -First 1
+          if ($prevTag) {
+            $compareUrl = "https://github.com/$env:GITHUB_REPOSITORY/compare/$prevTag...v$version"
+            $compareLine = "Full Changelog: $compareUrl"
+          } else {
+            $compareLine = ""
+          }
+
+          $lines = @(
+            "---",
+            "",
+            "已安装支持自动更新的版本时，可直接在应用内检查并安装更新。"
+          )
+          if ($compareLine) { $lines += $compareLine }
+          $footer = $lines -join "`n"
+
+          $body = "$section`n`n$footer"
+
+          # 写到临时文件，供 gh release edit 消费；避免把多行内容塞进 GitHub Actions 变量导致换行丢失
+          $tmp = Join-Path $env:RUNNER_TEMP "release-body.txt"
+          Set-Content -Path $tmp -Value $body -NoNewline
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "path=$tmp"
+          Write-Host "Release 正文已写入 $tmp，大小 $($body.Length) 字符，上一版本标签 $( if ($prevTag) { $prevTag } else { '未找到' } )"
+
       - name: 构建并发布
         uses: tauri-apps/tauri-action@v1
         env:
@@ -45,11 +104,16 @@ jobs:
           tauriScript: npm run tauri
           tagName: v__VERSION__
           releaseName: 人生攻略库 v__VERSION__
-          releaseBody: |
-            本版本的具体改动与升级说明见下方自动生成的发布记录。
-
-            已安装支持自动更新的版本时，可直接在应用内检查并安装更新。
+          # 先由 tauri-action 创建一个最小 Release（带安装包与自动更新元数据），接下来的步骤会覆盖正文
+          releaseBody: "（本版本的详细改动即将自动填充完成……）"
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true
           updaterJsonPreferNsis: true
+
+      - name: 用 CHANGELOG 条目覆盖 Release 正文
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ github.ref_name }}" --repo $env:GITHUB_REPOSITORY --notes-file "${{ steps.release-body.outputs.path }}"
