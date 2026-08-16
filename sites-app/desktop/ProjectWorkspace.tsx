@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import type { ProjectRepository } from "../app/data/project-repository";
 import { LIFE_DOMAIN_LABELS, LIFE_DOMAIN_OPTIONS, normalizeLifeDomain } from "../app/domain-taxonomy";
 import type {
@@ -11,6 +11,7 @@ import type {
   ProjectSummary,
   ProjectTask,
   ProjectTaskStatus,
+  ProjectType,
   ProposalStatus,
 } from "../app/project-types";
 
@@ -27,6 +28,7 @@ type WorkspaceDraft = {
   project: Project;
   milestones: Milestone[];
   task: ProjectTask;
+  branches: Project[];
 };
 
 const categoryLabels = LIFE_DOMAIN_LABELS;
@@ -54,6 +56,12 @@ const proposalStatusLabels: Record<ProposalStatus, string> = {
   rejected: "不采纳",
 };
 
+const projectTypeLabels: Record<ProjectType, string> = {
+  main: "主线项目",
+  side: "支线项目",
+  experiment: "实验支线",
+};
+
 export function ProjectWorkspace({
   repository,
   projects,
@@ -76,16 +84,18 @@ export function ProjectWorkspace({
 
   const visibleProjects = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase("zh-CN");
-    return projects.filter((project) => {
+    return projects.filter((project) => !project.parentProjectId).filter((project) => {
       if (project.status !== statusFilter) return false;
       if (domainFilter !== "all" && normalizeLifeDomain(project.category) !== domainFilter) return false;
       if (!needle) return true;
+      const branches = projects.filter((candidate) => candidate.parentProjectId === project.id);
       return [
-      project.title,
-      project.outcome,
-      project.motivation,
-      project.currentMilestone?.title ?? "",
-      project.nextTask?.title ?? "",
+        project.title,
+        project.outcome,
+        project.motivation,
+        project.currentMilestone?.title ?? "",
+        project.nextTask?.title ?? "",
+        ...branches.flatMap((branch) => [branch.title, branch.outcome, branch.motivation]),
       ].join(" ").toLocaleLowerCase("zh-CN").includes(needle);
     });
   }, [domainFilter, projects, query, statusFilter]);
@@ -152,6 +162,9 @@ export function ProjectWorkspace({
         title: "",
         outcome: "",
         motivation: "",
+        projectType: "main",
+        parentProjectId: null,
+        supportsMilestoneId: null,
         status: "active",
         category: "uncategorized",
         sortOrder: (projects.length + 1) * 10,
@@ -163,6 +176,7 @@ export function ProjectWorkspace({
       },
       milestones: [emptyMilestone("", now)],
       task: emptyTask("", "", now),
+      branches: [],
     });
     setEditing(true);
   }
@@ -180,6 +194,9 @@ export function ProjectWorkspace({
       project: { ...detail.project, category: normalizeProjectCategory(detail.project.category) },
       milestones: detail.milestones.length ? detail.milestones.map((item) => ({ ...item })) : [{ ...milestone }],
       task: { ...task, status: task.status === "later" ? "next" : task.status },
+      branches: detail.project.parentProjectId
+        ? []
+        : projects.filter((project) => project.parentProjectId === detail.project.id).map((project) => ({ ...project })),
     });
     setEditing(true);
   }
@@ -189,12 +206,18 @@ export function ProjectWorkspace({
       showMessage("请先填写项目名称和期望结果。");
       return;
     }
+    const incompleteBranch = draft.branches.find((branch) => branch.projectType !== "main" && (!branch.title.trim() || !branch.outcome.trim()));
+    if (incompleteBranch) {
+      showMessage("请补全支线名称和完成标准，或先移除这条新支线。");
+      return;
+    }
     setSaving(true);
     try {
       const project = await repository.saveWorkspace(
         draft.project,
         draft.milestones,
         draft.task.title.trim() ? draft.task : null,
+        draft.branches,
       );
       setEditing(false);
       await reload(project.id);
@@ -325,6 +348,7 @@ export function ProjectWorkspace({
         {editing && draft ? (
           <ProjectEditor
             draft={draft}
+            parentProject={draft.project.parentProjectId ? projects.find((project) => project.id === draft.project.parentProjectId) ?? null : null}
             saving={saving}
             onChange={setDraft}
             onCancel={() => setEditing(false)}
@@ -335,6 +359,8 @@ export function ProjectWorkspace({
         ) : detail ? (
           <ProjectPage
             detail={detail}
+            branches={projects.filter((project) => project.parentProjectId === detail.project.id)}
+            parentProject={detail.project.parentProjectId ? projects.find((project) => project.id === detail.project.parentProjectId) ?? null : null}
             saving={saving}
             tab={tab}
             onTabChange={setTab}
@@ -343,6 +369,7 @@ export function ProjectWorkspace({
             onAddProgress={addProgress}
             onConfirm={() => void confirmProject()}
             onEdit={startEditing}
+            onOpenProject={(projectId) => { setSelectedId(projectId); setEditing(false); setTab("overview"); }}
             onBack={() => {
               lastInitialProjectId.current = null;
               setSelectedId(null);
@@ -357,7 +384,7 @@ export function ProjectWorkspace({
         ) : (
           <div className="project-gallery workspace-scroll">
             <header className="workspace-page-heading project-gallery-heading">
-              <div><h1>项目大厅</h1><p>{projects.filter((project) => project.status === "active").length} 个正在推进 · {projects.length} 个项目</p></div>
+              <div><h1>项目大厅</h1><p>{projects.filter((project) => !project.parentProjectId && project.status === "active").length} 条主线正在推进 · {projects.filter((project) => !project.parentProjectId).length} 个主项目</p></div>
               <button onClick={startNewProject}>＋ 新建项目</button>
             </header>
             <div className="project-gallery-controls">
@@ -374,11 +401,12 @@ export function ProjectWorkspace({
                 const total = project.milestoneCount;
                 const progress = total ? Math.round(project.completedMilestoneCount / total * 100) : 0;
                 const category = normalizeLifeDomain(project.category);
+                const branchCount = projects.filter((candidate) => candidate.parentProjectId === project.id).length;
                 return <button className={`project-gallery-card category-${category}`} key={project.id} onClick={() => { setSelectedId(project.id); setEditing(false); }}>
                   <header><span className="project-domain">{categoryLabels[category]}</span><span className={`project-status ${project.status}`}>{statusLabels[project.status]}</span></header>
                   <div>{project.isDraft && <small>待确认</small>}<h2>{project.title}</h2><p>{project.outcome}</p></div>
                   <section><span>当前阶段</span><strong>{project.currentMilestone?.title || "尚未设置当前阶段"}</strong>{project.currentMilestone?.dueDate && <small>{formatDueDate(project.currentMilestone.dueDate)}</small>}</section>
-                  <footer><i><b style={{ width: `${progress}%` }} /></i><span>{project.completedMilestoneCount}/{total || 0} 个阶段完成</span><em>进入项目 →</em></footer>
+                  <footer><i><b style={{ width: `${progress}%` }} /></i><span>{project.completedMilestoneCount}/{total || 0} 个阶段完成{branchCount ? ` · ${branchCount} 条支线` : ""}</span><em>进入项目 →</em></footer>
                 </button>;
               })}
               {!visibleProjects.length && <div className="project-gallery-empty"><strong>{query ? "没有找到相关项目" : "这个分组还没有项目"}</strong><button onClick={startNewProject}>创建项目</button></div>}
@@ -392,6 +420,8 @@ export function ProjectWorkspace({
 
 function ProjectPage({
   detail,
+  branches,
+  parentProject,
   saving,
   tab,
   onTabChange,
@@ -400,6 +430,7 @@ function ProjectPage({
   onAddProgress,
   onConfirm,
   onEdit,
+  onOpenProject,
   onBack,
   onTaskStatus,
   onSaveMilestone,
@@ -408,6 +439,8 @@ function ProjectPage({
   onReviewProposal,
 }: {
   detail: ProjectDetail;
+  branches: ProjectSummary[];
+  parentProject: ProjectSummary | null;
   saving: boolean;
   tab: ProjectTab;
   onTabChange: (tab: ProjectTab) => void;
@@ -416,6 +449,7 @@ function ProjectPage({
   onAddProgress: (event: FormEvent, kind?: "continuation" | "general") => void;
   onConfirm: () => void;
   onEdit: () => void;
+  onOpenProject: (projectId: string) => void;
   onBack: () => void;
   onTaskStatus: (task: ProjectTask, status: ProjectTaskStatus) => void;
   onSaveMilestone: (milestone: Milestone) => void;
@@ -437,8 +471,9 @@ function ProjectPage({
     <article className="project-page">
       <header className="project-toolbar">
         <div>
-          <button className="project-back" onClick={onBack}>← 项目大厅</button>
+          <button className="project-back" onClick={parentProject ? () => onOpenProject(parentProject.id) : onBack}>{parentProject ? `← 主线：${parentProject.title}` : "← 项目大厅"}</button>
           <span className={`project-status ${project.status}`}>{statusLabels[project.status]}</span>
+          {project.parentProjectId && <span className="project-branch-badge">{projectTypeLabels[project.projectType]}</span>}
           {normalizeLifeDomain(project.category) !== "uncategorized" && <span>{categoryLabels[normalizeLifeDomain(project.category)]}</span>}
           <span className="project-local-badge">仅本机</span>
         </div>
@@ -451,6 +486,7 @@ function ProjectPage({
       <div className="project-page-scroll">
         <header className="project-hero">
           {project.isDraft && <span>待确认草稿 · 根据 Codex 对话整理</span>}
+          {parentProject && <span>{projectTypeLabels[project.projectType]} · 服务于 {parentProject.title}</span>}
           <h1>{project.title}</h1>
           <p>{project.outcome}</p>
         </header>
@@ -473,7 +509,7 @@ function ProjectPage({
             onTaskStatus={onTaskStatus}
             onEdit={onEdit}
           />
-          <StageTimelinePreview milestones={milestones} completedStages={completedStages} onOpen={() => onTabChange("stages")} />
+          <StageTimelinePreview branches={branches} milestones={milestones} completedStages={completedStages} onOpen={() => onTabChange("stages")} onOpenProject={onOpenProject} />
           <div className="project-secondary-grid">
             <section className="project-section project-history-preview">
               <header><div><span>最近发生</span></div><button onClick={() => onTabChange("history")}>查看全部 →</button></header>
@@ -483,7 +519,7 @@ function ProjectPage({
           </div>
         </>}
 
-        {tab === "stages" && <StageRouteEditor projectId={project.id} milestones={milestones} tasks={tasks} saving={saving} onSave={onSaveMilestone} onRemove={onRemoveMilestone} />}
+        {tab === "stages" && <StageRouteEditor projectId={project.id} milestones={milestones} tasks={tasks} branches={branches} saving={saving} onSave={onSaveMilestone} onRemove={onRemoveMilestone} onOpenProject={onOpenProject} />}
 
         {tab === "proposals" && <ProposalBoard projectId={project.id} proposals={proposals} saving={saving} onSave={onSaveProposal} onReview={onReviewProposal} />}
 
@@ -535,11 +571,38 @@ function ProjectCurrentProgress({ currentMilestone, nextTask, otherTasks, doneTa
   </section>;
 }
 
-function StageTimelinePreview({ milestones, completedStages, onOpen }: { milestones: Milestone[]; completedStages: number; onOpen: () => void }) {
+function StageTimelinePreview({ milestones, branches, completedStages, onOpen, onOpenProject }: { milestones: Milestone[]; branches: ProjectSummary[]; completedStages: number; onOpen: () => void; onOpenProject: (projectId: string) => void }) {
+  const stageCount = Math.max(milestones.length, 1);
+  const treeStyle = { "--route-stage-count": stageCount } as CSSProperties;
   return <section className="project-route-preview">
-    <header><div><span>阶段路线</span><small>{completedStages}/{milestones.length || 0} 个阶段完成</small></div><button onClick={onOpen}>调整路线 →</button></header>
-    {milestones.length ? <div className="project-route-line">{milestones.map((milestone, index) => <div className={milestone.status} key={milestone.id || index}><i>{milestone.status === "completed" ? "✓" : index + 1}</i><span>{milestone.title}</span></div>)}</div> : <p className="project-empty-copy">还没有阶段路线。</p>}
+    <header><div><span>项目路线</span><small>{completedStages}/{milestones.length || 0} 个主线阶段完成{branches.length ? ` · ${branches.length} 条支线` : ""}</small></div><button onClick={onOpen}>调整路线 →</button></header>
+    {milestones.length ? <div className="project-route-tree-scroll"><div className="project-route-tree" style={treeStyle}>
+      <div className="project-route-line">{milestones.map((milestone, index) => <div className={milestone.status} key={milestone.id || index}><i>{milestone.status === "completed" ? "✓" : index + 1}</i><span>{milestone.title}</span></div>)}</div>
+      {branches.length > 0 && <div className="project-route-branch-grid">{milestones.map((milestone, index) => {
+        const stageBranches = branchesForStage(branches, milestones, index);
+        return <div className={`project-route-branch-column ${stageBranches.length ? "has-branches" : ""}`} key={milestone.id || index}>{stageBranches.map((branch) => <RouteBranchCard branch={branch} key={branch.id} onOpen={() => onOpenProject(branch.id)} />)}</div>;
+      })}</div>}
+    </div></div> : <p className="project-empty-copy">还没有主线阶段。先添加阶段，支线会从对应阶段向下生长。</p>}
   </section>;
+}
+
+function RouteBranchCard({ branch, onOpen, compact = false }: { branch: ProjectSummary; onOpen: () => void; compact?: boolean }) {
+  const total = branch.milestoneCount;
+  const progress = total ? Math.round(branch.completedMilestoneCount / total * 100) : 0;
+  return <button className={`route-branch-card ${branch.projectType} ${compact ? "compact" : ""}`} onClick={onOpen}>
+    <header><span>↳ {projectTypeLabels[branch.projectType]}</span><i className={`project-status ${branch.status}`}>{statusLabels[branch.status]}</i></header>
+    <strong>{branch.title}</strong>
+    <p>{branch.nextTask?.title || branch.currentMilestone?.title || "等待补充下一步"}</p>
+    <footer><i><b style={{ width: `${progress}%` }} /></i><em>{branch.completedMilestoneCount}/{total || 0} 阶段 · 进入 →</em></footer>
+  </button>;
+}
+
+function branchesForStage(branches: ProjectSummary[], milestones: Milestone[], stageIndex: number) {
+  const currentIndex = Math.max(0, milestones.findIndex((milestone) => milestone.status === "current"));
+  return branches.filter((branch) => {
+    const linkedIndex = milestones.findIndex((milestone) => milestone.id === branch.supportsMilestoneId);
+    return (linkedIndex >= 0 ? linkedIndex : currentIndex) === stageIndex;
+  });
 }
 
 function ProjectContext({ detail }: { detail: ProjectDetail }) {
@@ -551,12 +614,24 @@ function ProjectTimeline({ logs }: { logs: ProjectDetail["logs"] }) {
   return <div className="project-timeline">{logs.length ? logs.map((log) => { const continuation = decodeContinuationLog(log.body); return <div key={log.id}><time>{formatProjectDate(log.createdAt)}</time><p>{continuation ? <><strong>接续点 · {continuation.label}</strong>{continuation.text}</> : log.body}</p></div>; }) : <p className="project-empty-copy">项目发生变化后，轨迹会自动出现在这里。</p>}</div>;
 }
 
-function StageRouteEditor({ projectId, milestones, tasks, saving, onSave, onRemove }: { projectId: string; milestones: Milestone[]; tasks: ProjectTask[]; saving: boolean; onSave: (milestone: Milestone) => void; onRemove: (milestone: Milestone) => void }) {
+function StageRouteEditor({ projectId, milestones, tasks, branches, saving, onSave, onRemove, onOpenProject }: { projectId: string; milestones: Milestone[]; tasks: ProjectTask[]; branches: ProjectSummary[]; saving: boolean; onSave: (milestone: Milestone) => void; onRemove: (milestone: Milestone) => void; onOpenProject: (projectId: string) => void }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Milestone | null>(null);
   function edit(item?: Milestone) { const now = new Date().toISOString(); const next = item ? { ...item } : { ...emptyMilestone(projectId, now), status: milestones.length ? "planned" as const : "current" as const, sortOrder: (milestones.length + 1) * 10 }; setDraft(next); setEditingId(item?.id || "new"); }
   function submit(event: FormEvent) { event.preventDefault(); if (!draft?.title.trim()) return; onSave(draft); setDraft(null); setEditingId(null); }
-  return <section className="project-stage-overview stage-route-page"><header><div><h2>阶段路线</h2><p>沿着连线查看已经走过、正在推进和之后再处理的阶段。</p></div><button onClick={() => edit()}>＋ 添加阶段</button></header><div className="project-stage-path">{milestones.map((milestone, index) => { const stageTasks = tasks.filter((task) => task.milestoneId === milestone.id); return <article className={`project-stage-node ${milestone.status}`} key={milestone.id}><button className="stage-node-button" onClick={() => edit(milestone)}><i>{milestone.status === "completed" ? "✓" : index + 1}</i><span><small>{milestone.status === "current" ? "当前阶段" : milestone.status === "completed" ? "已完成" : "待开始"}</small><strong>{milestone.title}</strong><em>{stageTasks.filter((task) => task.status === "done").length}/{stageTasks.length} 行动</em></span></button>{editingId === milestone.id && draft && <StageInlineForm draft={draft} saving={saving} onChange={setDraft} onCancel={() => { setDraft(null); setEditingId(null); }} onRemove={() => { onRemove(milestone); setDraft(null); setEditingId(null); }} onSubmit={submit} />}</article>; })}{editingId === "new" && draft && <article className="project-stage-node current new"><StageInlineForm draft={draft} saving={saving} onChange={setDraft} onCancel={() => { setDraft(null); setEditingId(null); }} onSubmit={submit} /></article>}</div></section>;
+  return <section className="project-stage-overview stage-route-page">
+    <header><div><h2>项目路线</h2><p>主线阶段横向前进，支线从它服务的阶段向下生长。</p></div><button onClick={() => edit()}>＋ 添加阶段</button></header>
+    <div className="project-stage-tree-scroll"><div className="project-stage-path" style={{ "--route-stage-count": Math.max(milestones.length, 1) } as CSSProperties}>{milestones.map((milestone, index) => {
+      const stageTasks = tasks.filter((task) => task.milestoneId === milestone.id);
+      const stageBranches = branchesForStage(branches, milestones, index);
+      return <article className={`project-stage-node ${milestone.status}`} key={milestone.id}>
+        <button className="stage-node-button" onClick={() => edit(milestone)}><i>{milestone.status === "completed" ? "✓" : index + 1}</i><span><small>{milestone.status === "current" ? "当前阶段" : milestone.status === "completed" ? "已完成" : "待开始"}</small><strong>{milestone.title}</strong><em>{stageTasks.filter((task) => task.status === "done").length}/{stageTasks.length} 行动</em></span></button>
+        {editingId === milestone.id && draft && <StageInlineForm draft={draft} saving={saving} onChange={setDraft} onCancel={() => { setDraft(null); setEditingId(null); }} onRemove={() => { onRemove(milestone); setDraft(null); setEditingId(null); }} onSubmit={submit} />}
+        {stageBranches.length > 0 && <div className="stage-node-branches"><span>从这里向下生长</span>{stageBranches.map((branch) => <RouteBranchCard branch={branch} compact key={branch.id} onOpen={() => onOpenProject(branch.id)} />)}</div>}
+      </article>;
+    })}{editingId === "new" && draft && <article className="project-stage-node current new"><StageInlineForm draft={draft} saving={saving} onChange={setDraft} onCancel={() => { setDraft(null); setEditingId(null); }} onSubmit={submit} /></article>}</div></div>
+    {!milestones.length && <p className="project-empty-copy">还没有主线阶段。添加第一个阶段后，就可以把支线挂到路线树上。</p>}
+  </section>;
 }
 
 function StageInlineForm({ draft, saving, onChange, onCancel, onRemove, onSubmit }: { draft: Milestone; saving: boolean; onChange: (draft: Milestone) => void; onCancel: () => void; onRemove?: () => void; onSubmit: (event: FormEvent) => void }) {
@@ -577,12 +652,14 @@ function ProposalCard({ proposal, saving, onReview }: { proposal: ProjectProposa
 
 function ProjectEditor({
   draft,
+  parentProject,
   saving,
   onChange,
   onCancel,
   onSave,
 }: {
   draft: WorkspaceDraft;
+  parentProject: ProjectSummary | null;
   saving: boolean;
   onChange: (draft: WorkspaceDraft) => void;
   onCancel: () => void;
@@ -601,6 +678,21 @@ function ProjectEditor({
   };
   const updateTask = <Key extends keyof ProjectTask>(key: Key, value: ProjectTask[Key]) => {
     onChange({ ...draft, task: { ...draft.task, [key]: value } });
+  };
+  const updateBranch = <Key extends keyof Project>(index: number, key: Key, value: Project[Key]) => {
+    onChange({ ...draft, branches: draft.branches.map((branch, branchIndex) => branchIndex === index ? { ...branch, [key]: value } : branch) });
+  };
+  const addBranch = () => {
+    onChange({ ...draft, branches: [...draft.branches, emptyBranch(draft.project, draft.branches.length)] });
+  };
+  const removeOrDetachBranch = (index: number) => {
+    const branch = draft.branches[index];
+    if (!branch.id) {
+      onChange({ ...draft, branches: draft.branches.filter((_, branchIndex) => branchIndex !== index) });
+      return;
+    }
+    if (!window.confirm(`将支线「${branch.title}」转为独立项目吗？它的阶段、行动和记录都会保留。`)) return;
+    updateBranch(index, "projectType", "main");
   };
   const moveMilestone = (index: number, direction: -1 | 1) => {
     const target = index + direction;
@@ -663,6 +755,33 @@ function ProjectEditor({
             </label>
           </div>
 
+          {parentProject && <section className="project-editor-parent">
+            <span>{projectTypeLabels[draft.project.projectType]}</span>
+            <strong>所属主线 · {parentProject.title}</strong>
+            <p>{draft.project.motivation || "补充这条支线如何帮助主线，之后回看时会更容易判断是否值得继续。"}</p>
+          </section>}
+
+          {!draft.project.parentProjectId && <section className="project-editor-block project-branch-editor">
+            <header><div><strong>关联支线</strong><span>适合需要多次推进、可独立验收，但服务于当前主线的短期项目</span></div><button type="button" onClick={addBranch}>＋ 添加支线</button></header>
+            {draft.branches.length ? <div className="project-branch-editor-list">{draft.branches.map((branch, index) => <details key={branch.id || `new-branch-${index}`} open={!branch.id || branch.projectType === "main"}>
+              <summary><span><small>{branch.projectType === "main" ? "待解除关联" : projectTypeLabels[branch.projectType]}</small><strong>{branch.title || `新支线 ${index + 1}`}</strong></span><em>{branch.projectType === "main" ? "保存后转为独立项目" : statusLabels[branch.status]}</em></summary>
+              <div>
+                {branch.projectType !== "main" && <div className="project-editor-grid">
+                  <label><span>支线类型</span><select value={branch.projectType} onChange={(event) => updateBranch(index, "projectType", event.target.value as ProjectType)}><option value="side">支线项目</option><option value="experiment">实验支线</option></select></label>
+                  <label><span>当前状态</span><select value={branch.status} onChange={(event) => updateBranch(index, "status", event.target.value as ProjectStatus)}>{Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+                </div>}
+                <label><span>支线名称</span><input disabled={branch.projectType === "main"} value={branch.title} onChange={(event) => updateBranch(index, "title", event.target.value)} placeholder="例如：补充深度学习基础课程" /></label>
+                <label><span>完成标准</span><textarea disabled={branch.projectType === "main"} value={branch.outcome} onChange={(event) => updateBranch(index, "outcome", event.target.value)} placeholder="学到什么程度、产出什么，才算支线结束？" /></label>
+                <label><span>怎样帮助主线</span><textarea disabled={branch.projectType === "main"} value={branch.motivation} onChange={(event) => updateBranch(index, "motivation", event.target.value)} placeholder="它具体解决主线中的哪项能力或阻塞？" /></label>
+                {branch.projectType !== "main" && <div className="project-editor-grid">
+                  <label><span>关联主线阶段 · 可选</span><select value={branch.supportsMilestoneId || ""} onChange={(event) => updateBranch(index, "supportsMilestoneId", event.target.value || null)}><option value="">不限定阶段</option>{draft.milestones.filter((milestone) => milestone.id).map((milestone) => <option key={milestone.id} value={milestone.id}>{milestone.title || "未命名阶段"}</option>)}</select></label>
+                  <label><span>复查日期 · 可选</span><input type="date" value={branch.reviewDate} onChange={(event) => updateBranch(index, "reviewDate", event.target.value)} /></label>
+                </div>}
+                <footer><span>{branch.id ? "解除后会作为独立项目出现在项目大厅" : "保存主项目后，即可进入支线补充阶段和下一步"}</span><button className="danger" type="button" onClick={() => removeOrDetachBranch(index)}>{branch.id ? "转为独立项目" : "移除"}</button></footer>
+              </div>
+            </details>)}</div> : <p className="project-editor-empty">当前没有支线。单次能完成的内容仍建议放在“下一步”中。</p>}
+          </section>}
+
           <section className="project-editor-block">
             <header><strong>阶段路线</strong><button type="button" onClick={() => onChange({ ...draft, milestones: [...draft.milestones, { ...emptyMilestone(draft.project.id, new Date().toISOString()), status: "planned", sortOrder: (draft.milestones.length + 1) * 10 }] })}>＋ 添加阶段</button></header>
             <div className="project-stage-editor-list">
@@ -708,6 +827,27 @@ function emptyMilestone(projectId: string, now: string): Milestone {
     status: "current",
     dueDate: "",
     sortOrder: 10,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function emptyBranch(parent: Project, index: number): Project {
+  const now = new Date().toISOString();
+  return {
+    id: "",
+    title: "",
+    outcome: "",
+    motivation: "",
+    projectType: "side",
+    parentProjectId: parent.id || null,
+    supportsMilestoneId: null,
+    status: "active",
+    category: parent.category,
+    sortOrder: (index + 1) * 10,
+    isDraft: false,
+    sourceNote: "从主项目编辑器创建",
+    reviewDate: "",
     createdAt: now,
     updatedAt: now,
   };

@@ -11,6 +11,7 @@ import type {
   ProjectSummary,
   ProjectTask,
   ProjectTaskStatus,
+  ProjectType,
   ProposalStatus,
 } from "../project-types";
 import { normalizeLifeDomain } from "../domain-taxonomy";
@@ -25,6 +26,9 @@ type ProjectRow = {
   title: string;
   outcome: string;
   motivation: string;
+  project_type: ProjectType;
+  parent_project_id: string | null;
+  supports_milestone_id: string | null;
   status: ProjectStatus;
   category: ProjectCategory;
   sort_order: number;
@@ -96,6 +100,9 @@ const migrations = [
     title TEXT NOT NULL,
     outcome TEXT NOT NULL,
     motivation TEXT NOT NULL,
+    project_type TEXT NOT NULL DEFAULT 'main',
+    parent_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    supports_milestone_id TEXT REFERENCES project_milestones(id) ON DELETE SET NULL,
     status TEXT NOT NULL,
     category TEXT NOT NULL,
     sort_order INTEGER NOT NULL DEFAULT 0,
@@ -186,6 +193,9 @@ export class SqliteProjectRepository implements ProjectRepository {
     await this.database.execute("PRAGMA foreign_keys = ON");
     for (const statement of migrations) await this.database.execute(statement);
     await this.ensureColumn("projects", "review_date", "TEXT NOT NULL DEFAULT ''");
+    await this.ensureColumn("projects", "project_type", "TEXT NOT NULL DEFAULT 'main'");
+    await this.ensureColumn("projects", "parent_project_id", "TEXT");
+    await this.ensureColumn("projects", "supports_milestone_id", "TEXT");
     await this.ensureColumn("project_milestones", "due_date", "TEXT NOT NULL DEFAULT ''");
     await this.ensureColumn("project_tasks", "action_type", "TEXT NOT NULL DEFAULT 'organize'");
     await this.ensureColumn("project_tasks", "details", "TEXT NOT NULL DEFAULT ''");
@@ -206,6 +216,7 @@ export class SqliteProjectRepository implements ProjectRepository {
          ELSE category
        END`,
     );
+    await this.database.execute("CREATE INDEX IF NOT EXISTS idx_projects_parent_status ON projects(parent_project_id, status, sort_order)");
     await this.database.execute("PRAGMA optimize");
 
     const seeded = await this.database.select<{ value: string }>(
@@ -301,8 +312,9 @@ export class SqliteProjectRepository implements ProjectRepository {
     try {
       await this.initialize();
       const now = this.now();
+      const relationship = await this.normalizeRelationship(project);
       const saved: Project = {
-        ...project,
+        ...relationship,
         id: project.id || `project-${slugify(project.title)}-${Date.now()}`,
         title: project.title.trim(),
         outcome: project.outcome.trim(),
@@ -318,15 +330,16 @@ export class SqliteProjectRepository implements ProjectRepository {
     }
   }
 
-  async saveWorkspace(project: Project, milestones: Milestone[], task: ProjectTask | null): Promise<Project> {
+  async saveWorkspace(project: Project, milestones: Milestone[], task: ProjectTask | null, branches: Project[] = []): Promise<Project> {
     try {
       await this.initialize();
       if (!project.title.trim() || !project.outcome.trim()) {
         throw new ProjectRepositoryError("项目名称和期望结果不能为空", "invalid_data");
       }
       const now = this.now();
+      const relationship = await this.normalizeRelationship(project);
       const savedProject: Project = {
-        ...project,
+        ...relationship,
         id: project.id || `project-${slugify(project.title)}-${Date.now()}`,
         title: project.title.trim(),
         outcome: project.outcome.trim(),
@@ -365,13 +378,39 @@ export class SqliteProjectRepository implements ProjectRepository {
         updatedAt: now,
         completedAt: task.status === "done" ? task.completedAt || now : null,
       } : null;
+      if (savedProject.parentProjectId && branches.length) {
+        throw new ProjectRepositoryError("支线只允许一层，不能继续创建下级支线", "invalid_data");
+      }
+      const savedBranches = branches.map((branch, index): Project => {
+        if (branch.projectType !== "main" && (!branch.title.trim() || !branch.outcome.trim())) {
+          throw new ProjectRepositoryError("支线名称和完成标准不能为空", "invalid_data");
+        }
+        const detached = branch.projectType === "main";
+        const supportsMilestoneId = detached ? null : branch.supportsMilestoneId?.trim() || null;
+        if (supportsMilestoneId && !savedMilestones.some((milestone) => milestone.id === supportsMilestoneId)) {
+          throw new ProjectRepositoryError("支线关联的阶段不属于这个主项目", "invalid_data");
+        }
+        return {
+          ...branch,
+          id: branch.id || `${savedProject.id}-branch-${slugify(branch.title)}-${Date.now()}-${index}`,
+          title: branch.title.trim(),
+          outcome: branch.outcome.trim(),
+          motivation: branch.motivation.trim(),
+          projectType: detached ? "main" : branch.projectType === "experiment" ? "experiment" : "side",
+          parentProjectId: detached ? null : savedProject.id,
+          supportsMilestoneId,
+          category: savedProject.category,
+          createdAt: branch.createdAt || now,
+          updatedAt: now,
+        };
+      });
 
       const existingMilestones = project.id
         ? await this.database.select<{ id: string }>("SELECT id FROM project_milestones WHERE project_id = ?", [project.id])
         : [];
       const savedMilestoneIds = new Set(savedMilestones.map((milestone) => milestone.id));
       const removedMilestones = existingMilestones.filter((milestone) => !savedMilestoneIds.has(milestone.id));
-      const statements: SqliteStatement[] = [projectWriteStatement(savedProject)];
+      const statements: SqliteStatement[] = [projectWriteStatement(savedProject), ...savedBranches.map(projectWriteStatement)];
       for (const milestone of removedMilestones) {
         statements.push({ sql: "DELETE FROM project_milestones WHERE id = ?", bindValues: [milestone.id] });
       }
@@ -680,16 +719,58 @@ export class SqliteProjectRepository implements ProjectRepository {
     );
   }
 
+  private async normalizeRelationship(project: Project): Promise<Project> {
+    const parentProjectId = project.parentProjectId?.trim() || null;
+    if (!parentProjectId) {
+      return {
+        ...project,
+        projectType: "main",
+        parentProjectId: null,
+        supportsMilestoneId: null,
+      };
+    }
+    if (project.id && parentProjectId === project.id) {
+      throw new ProjectRepositoryError("项目不能成为自己的支线", "invalid_data");
+    }
+    const parents = await this.database.select<{ parent_project_id: string | null }>(
+      "SELECT parent_project_id FROM projects WHERE id = ? LIMIT 1",
+      [parentProjectId],
+    );
+    if (!parents[0]) throw new ProjectRepositoryError("没有找到支线所属的主项目", "invalid_data");
+    if (parents[0].parent_project_id) {
+      throw new ProjectRepositoryError("支线只允许一层，不能继续创建下级支线", "invalid_data");
+    }
+    const supportsMilestoneId = project.supportsMilestoneId?.trim() || null;
+    if (supportsMilestoneId) {
+      const milestones = await this.database.select<{ id: string }>(
+        "SELECT id FROM project_milestones WHERE id = ? AND project_id = ? LIMIT 1",
+        [supportsMilestoneId, parentProjectId],
+      );
+      if (!milestones[0]) {
+        throw new ProjectRepositoryError("支线关联的阶段不属于这个主项目", "invalid_data");
+      }
+    }
+    return {
+      ...project,
+      projectType: project.projectType === "experiment" ? "experiment" : "side",
+      parentProjectId,
+      supportsMilestoneId,
+    };
+  }
+
   private async writeProject(project: Project, seed: boolean) {
     await this.database.execute(
       `INSERT INTO projects(
-        id, title, outcome, motivation, status, category, sort_order,
-        is_draft, source_note, review_date, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, title, outcome, motivation, project_type, parent_project_id, supports_milestone_id,
+        status, category, sort_order, is_draft, source_note, review_date, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO ${seed ? "NOTHING" : `UPDATE SET
         title = excluded.title,
         outcome = excluded.outcome,
         motivation = excluded.motivation,
+        project_type = excluded.project_type,
+        parent_project_id = excluded.parent_project_id,
+        supports_milestone_id = excluded.supports_milestone_id,
         status = excluded.status,
         category = excluded.category,
         sort_order = excluded.sort_order,
@@ -702,6 +783,9 @@ export class SqliteProjectRepository implements ProjectRepository {
         project.title,
         project.outcome,
         project.motivation,
+        project.projectType,
+        project.parentProjectId,
+        project.supportsMilestoneId,
         project.status,
         project.category,
         project.sortOrder,
@@ -816,6 +900,9 @@ function rowToProject(row: ProjectRow): Project {
     title: row.title,
     outcome: row.outcome,
     motivation: row.motivation,
+    projectType: row.project_type || "main",
+    parentProjectId: row.parent_project_id || null,
+    supportsMilestoneId: row.supports_milestone_id || null,
     status: row.status,
     category: normalizeLifeDomain(row.category),
     sortOrder: Number(row.sort_order),
@@ -889,17 +976,20 @@ function rowToProposal(row: ProjectProposalRow): ProjectProposal {
 function projectWriteStatement(project: Project): SqliteStatement {
   return {
     sql: `INSERT INTO projects(
-      id, title, outcome, motivation, status, category, sort_order,
-      is_draft, source_note, review_date, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, title, outcome, motivation, project_type, parent_project_id, supports_milestone_id,
+      status, category, sort_order, is_draft, source_note, review_date, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title, outcome = excluded.outcome, motivation = excluded.motivation,
+      project_type = excluded.project_type, parent_project_id = excluded.parent_project_id,
+      supports_milestone_id = excluded.supports_milestone_id,
       status = excluded.status, category = excluded.category, sort_order = excluded.sort_order,
       is_draft = excluded.is_draft, source_note = excluded.source_note,
       review_date = excluded.review_date, updated_at = excluded.updated_at`,
-    bindValues: [project.id, project.title, project.outcome, project.motivation, project.status,
-      project.category, project.sortOrder, project.isDraft ? 1 : 0, project.sourceNote,
-      project.reviewDate, project.createdAt, project.updatedAt],
+    bindValues: [project.id, project.title, project.outcome, project.motivation, project.projectType,
+      project.parentProjectId, project.supportsMilestoneId, project.status, project.category,
+      project.sortOrder, project.isDraft ? 1 : 0, project.sourceNote, project.reviewDate,
+      project.createdAt, project.updatedAt],
   };
 }
 

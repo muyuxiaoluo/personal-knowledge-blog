@@ -4,6 +4,8 @@ export type ProjectStatus = "active" | "waiting" | "paused" | "completed";
 
 export type ProjectCategory = LifeDomain;
 
+export type ProjectType = "main" | "side" | "experiment";
+
 export type MilestoneStatus = "current" | "planned" | "completed";
 
 export type ProjectTaskStatus = "next" | "later" | "waiting" | "done";
@@ -29,6 +31,9 @@ export type Project = {
   title: string;
   outcome: string;
   motivation: string;
+  projectType: ProjectType;
+  parentProjectId: string | null;
+  supportsMilestoneId: string | null;
   status: ProjectStatus;
   category: ProjectCategory;
   sortOrder: number;

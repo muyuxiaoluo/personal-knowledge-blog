@@ -6650,6 +6650,485 @@ body {
   }
 }
 
+/* Project route tree and stronger section hierarchy -------------------- */
+
+.project-current-progress {
+  border-top: 4px solid #6075b7;
+  background: rgba(249, 251, 255, 0.94);
+}
+
+.project-current-stage > div > span {
+  color: #435b9e;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+
+.project-next-action > header span,
+.project-continuation > header span {
+  color: #566ba9;
+  font-size: 13px;
+}
+
+.project-route-preview {
+  overflow: hidden;
+  border: 1px solid rgba(118, 91, 151, 0.22);
+  border-top: 4px solid #8469a8;
+  padding: 21px 24px 24px;
+  background: linear-gradient(145deg, rgba(251, 248, 255, 0.96), rgba(245, 242, 251, 0.91));
+  box-shadow: 0 14px 38px rgba(76, 55, 109, 0.11);
+}
+
+.project-route-preview > header {
+  align-items: flex-start;
+}
+
+.project-route-preview > header > div {
+  gap: 5px;
+}
+
+.project-route-preview > header span {
+  color: #624b83;
+  font-family: Georgia, "Microsoft YaHei UI", serif;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.project-route-preview > header small {
+  color: #81758f;
+  font-size: 12px;
+}
+
+.project-route-preview > header > button {
+  border: 1px solid rgba(116, 88, 149, 0.2);
+  border-radius: 9px;
+  padding: 8px 11px;
+  background: rgba(255, 255, 255, 0.7);
+  color: #674f87;
+  font-size: 12px;
+}
+
+.project-route-tree-scroll {
+  overflow-x: auto;
+  margin: 18px -4px -4px;
+  padding: 0 4px 8px;
+}
+
+.project-route-tree {
+  width: max(100%, calc(var(--route-stage-count) * 190px));
+}
+
+.project-route-tree .project-route-line {
+  overflow: visible;
+  margin-top: 0;
+  padding-top: 4px;
+}
+
+.project-route-tree .project-route-line i {
+  border-color: #f3eff8;
+}
+
+.project-route-tree .project-route-line > div:not(:last-child)::after {
+  background: #d7cce2;
+}
+
+.project-route-tree .project-route-line > div.completed:not(:last-child)::after {
+  background: #9b83b7;
+}
+
+.project-route-tree .project-route-line > div.current:not(:last-child)::after {
+  background: linear-gradient(90deg, #8268a5, #d7cce2);
+}
+
+.project-route-tree .project-route-line .completed i {
+  background: #9279b0;
+}
+
+.project-route-tree .project-route-line .current i {
+  background: #745b98;
+  box-shadow: 0 0 0 5px rgba(116, 91, 152, 0.14);
+}
+
+.project-route-tree .project-route-line span {
+  color: #61566d;
+  font-size: 12px;
+}
+
+.project-route-tree .project-route-line .current span {
+  color: #513d70;
+}
+
+.project-route-branch-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--route-stage-count), minmax(0, 1fr));
+  align-items: start;
+  margin-top: 3px;
+}
+
+.project-route-branch-column {
+  position: relative;
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  padding: 31px 9px 0;
+}
+
+.project-route-branch-column.has-branches::before {
+  position: absolute;
+  top: -3px;
+  bottom: 16px;
+  left: 50%;
+  width: 2px;
+  border-radius: 2px;
+  background: linear-gradient(#a995bd, #8eb3a4);
+  content: "";
+}
+
+.route-branch-card {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid rgba(83, 139, 114, 0.32);
+  border-left: 4px solid #5e9a7d;
+  border-radius: 12px;
+  padding: 12px 13px;
+  background: rgba(244, 252, 248, 0.97);
+  box-shadow: 0 8px 22px rgba(46, 91, 71, 0.1);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.route-branch-card.experiment {
+  border-color: rgba(171, 124, 53, 0.3);
+  border-left-color: #c18a3e;
+  background: rgba(255, 249, 237, 0.97);
+  box-shadow: 0 8px 22px rgba(119, 80, 28, 0.09);
+}
+
+.route-branch-card:hover {
+  border-color: rgba(64, 126, 98, 0.52);
+  box-shadow: 0 11px 28px rgba(45, 91, 70, 0.15);
+  transform: translateY(-1px);
+}
+
+.route-branch-card > header,
+.route-branch-card > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+}
+
+.route-branch-card > header > span {
+  color: #39765c;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.03em;
+}
+
+.route-branch-card.experiment > header > span {
+  color: #986b2e;
+}
+
+.route-branch-card > header > i {
+  font-size: 8px;
+  font-style: normal;
+}
+
+.route-branch-card > strong {
+  overflow: hidden;
+  color: #334f42;
+  font-size: 14px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-branch-card.experiment > strong {
+  color: #624b2d;
+}
+
+.route-branch-card > p {
+  overflow: hidden;
+  margin: 0;
+  color: #687b72;
+  font-size: 10px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-branch-card > footer {
+  border-top: 1px solid rgba(62, 116, 91, 0.12);
+  padding-top: 7px;
+}
+
+.route-branch-card > footer > i {
+  overflow: hidden;
+  width: 42px;
+  height: 4px;
+  border-radius: 99px;
+  background: rgba(79, 130, 106, 0.17);
+}
+
+.route-branch-card > footer b {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #65a184;
+}
+
+.route-branch-card > footer em {
+  color: #39765c;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 750;
+}
+
+.route-branch-card.compact {
+  gap: 6px;
+  padding: 10px 11px;
+}
+
+.route-branch-card.compact > p {
+  white-space: normal;
+}
+
+.project-stage-tree-scroll {
+  overflow-x: auto;
+  padding: 4px 2px 14px;
+}
+
+.project-stage-tree-scroll .project-stage-path {
+  overflow: visible;
+  min-width: max(100%, calc(var(--route-stage-count, 3) * 210px));
+  padding-bottom: 20px;
+}
+
+.stage-route-page > header h2 {
+  color: #513d70;
+  font-size: 25px;
+}
+
+.stage-route-page > header p {
+  color: #776a84;
+}
+
+.stage-node-branches {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  margin-right: 28px;
+  padding: 34px 4px 0 16px;
+}
+
+.stage-node-branches::before {
+  position: absolute;
+  top: 0;
+  bottom: 18px;
+  left: 15px;
+  width: 2px;
+  border-radius: 2px;
+  background: linear-gradient(#9c84b5, #76aa91);
+  content: "";
+}
+
+.stage-node-branches > span {
+  position: absolute;
+  top: 9px;
+  left: 25px;
+  color: #527d68;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.project-history-preview {
+  border: 1px solid rgba(170, 124, 60, 0.2);
+  border-top: 4px solid #bc8844;
+  background: rgba(255, 250, 241, 0.93);
+}
+
+.project-history-preview > header span {
+  color: #855d27;
+  font-family: Georgia, "Microsoft YaHei UI", serif;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.project-history-preview > header > button {
+  color: #92672d;
+}
+
+.project-context-panel {
+  border: 1px solid rgba(69, 135, 122, 0.2);
+  border-top: 4px solid #4f9386;
+  background: rgba(243, 252, 249, 0.92);
+}
+
+.project-context-panel > summary > span {
+  color: #326d62;
+  font-family: Georgia, "Microsoft YaHei UI", serif;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.project-context-panel > summary small {
+  color: #66877f;
+  font-size: 11px;
+}
+
+@media (max-width: 720px) {
+  .project-route-preview {
+    padding-inline: 18px;
+  }
+
+  .project-route-preview > header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .project-route-preview > header > button {
+    align-self: flex-start;
+  }
+}
+
+/* Project branch editor ------------------------------------------------- */
+
+.project-branch-badge {
+  color: #687bb8;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.project-editor-parent {
+  display: grid;
+  gap: 5px;
+  margin: 0 0 18px;
+  border: 1px solid rgba(84, 98, 158, 0.17);
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: linear-gradient(120deg, rgba(231, 235, 249, 0.72), rgba(250, 250, 253, 0.7));
+}
+
+.project-editor-parent span,
+.project-editor-parent p {
+  color: #747d9b;
+  font-size: 11px;
+}
+
+.project-editor-parent strong {
+  color: #4f5d91;
+  font-size: 13px;
+}
+
+.project-editor-parent p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.project-branch-editor > header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.project-branch-editor-list {
+  display: grid;
+  gap: 10px;
+}
+
+.project-branch-editor-list > details {
+  overflow: hidden;
+  border: 1px solid rgba(76, 85, 143, 0.13);
+  border-radius: 12px;
+  background: rgba(248, 249, 252, 0.72);
+}
+
+.project-branch-editor-list > details > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.project-branch-editor-list > details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.project-branch-editor-list > details > summary span {
+  display: grid;
+  gap: 3px;
+}
+
+.project-branch-editor-list > details > summary small,
+.project-branch-editor-list > details > summary em {
+  color: #81879e;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.project-branch-editor-list > details > summary strong {
+  color: #4b526f;
+  font-size: 13px;
+}
+
+.project-branch-editor-list > details > div {
+  border-top: 1px solid rgba(76, 85, 143, 0.1);
+  padding: 14px;
+}
+
+.project-branch-editor-list label {
+  margin-bottom: 12px;
+}
+
+.project-branch-editor-list footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px dashed rgba(76, 85, 143, 0.12);
+  padding-top: 12px;
+}
+
+.project-branch-editor-list footer span,
+.project-editor-empty {
+  color: #858a9e;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.project-branch-editor-list footer button.danger {
+  flex: 0 0 auto;
+  border: 1px solid rgba(160, 80, 94, 0.18);
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: rgba(255, 250, 250, 0.75);
+  color: #a0505e;
+  cursor: pointer;
+}
+
+.project-editor-empty {
+  margin: 0;
+  border: 1px dashed rgba(76, 85, 143, 0.13);
+  border-radius: 10px;
+  padding: 14px;
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .project-branch-editor-list footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 /* Note editor readability and history controls --------------------------- */
 
 .document-stage .workbench-editor {
@@ -8067,5 +8546,75 @@ body {
   .action-row .action-row-actions {
     grid-template-columns: minmax(0, 1fr);
     grid-column: 1;
+  }
+}
+
+/* Final project module palette overrides ------------------------------- */
+
+.project-current-progress {
+  border: 1px solid rgba(75, 99, 170, 0.23);
+  border-top: 4px solid #6075b7;
+  background: rgba(249, 251, 255, 0.94);
+}
+
+.project-route-preview {
+  overflow: hidden;
+  border: 1px solid rgba(118, 91, 151, 0.22);
+  border-top: 4px solid #8469a8;
+  padding: 21px 24px 24px;
+  background: linear-gradient(145deg, rgba(251, 248, 255, 0.96), rgba(245, 242, 251, 0.91));
+  box-shadow: 0 14px 38px rgba(76, 55, 109, 0.11);
+}
+
+.project-route-preview > header span {
+  color: #624b83;
+  font-family: Georgia, "Microsoft YaHei UI", serif;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.project-route-preview > header small {
+  color: #81758f;
+  font-size: 12px;
+}
+
+.project-route-preview > header > button {
+  border: 1px solid rgba(116, 88, 149, 0.2);
+  border-radius: 9px;
+  padding: 8px 11px;
+  background: rgba(255, 255, 255, 0.7);
+  color: #674f87;
+}
+
+.project-history-preview {
+  border: 1px solid rgba(170, 124, 60, 0.2);
+  border-top: 4px solid #bc8844;
+  background: rgba(255, 250, 241, 0.93);
+}
+
+.project-history-preview > header span {
+  color: #855d27;
+  font-family: Georgia, "Microsoft YaHei UI", serif;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.project-context-panel {
+  border: 1px solid rgba(69, 135, 122, 0.2);
+  border-top: 4px solid #4f9386;
+  background: rgba(243, 252, 249, 0.92);
+}
+
+.project-context-panel > summary > span {
+  color: #326d62;
+  font-family: Georgia, "Microsoft YaHei UI", serif;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+@media (max-width: 720px) {
+  .project-route-preview {
+    padding-inline: 18px;
   }
 }

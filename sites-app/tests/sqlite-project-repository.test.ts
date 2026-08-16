@@ -143,6 +143,58 @@ test("rolls back task completion when the progress log cannot be written", async
   database.close();
 });
 
+test("stores one-level project branches and can detach them without losing content", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-08-16T10:00:00.000Z"),
+  });
+  const parent = await repository.get("project-research-direction");
+  assert.ok(parent);
+  const currentMilestone = parent.milestones.find((milestone) => milestone.status === "current");
+  assert.ok(currentMilestone);
+
+  const branch = await repository.saveProject({
+    ...parent.project,
+    id: "project-deep-learning-course",
+    title: "补充深度学习基础课程",
+    outcome: "完成核心章节，并能解释三维检测综述中的主要网络结构。",
+    motivation: "补足阅读三维目标检测论文所需的模型基础。",
+    projectType: "side",
+    parentProjectId: parent.project.id,
+    supportsMilestoneId: currentMilestone.id,
+    sourceNote: "测试创建",
+    createdAt: "",
+    updatedAt: "",
+  });
+  assert.equal(branch.projectType, "side");
+  assert.equal(branch.parentProjectId, parent.project.id);
+  assert.equal(branch.supportsMilestoneId, currentMilestone.id);
+  assert.equal((await repository.list()).find((project) => project.id === branch.id)?.parentProjectId, parent.project.id);
+
+  await assert.rejects(
+    () => repository.saveProject({
+      ...branch,
+      id: "project-nested-branch",
+      title: "不应创建的二级支线",
+      parentProjectId: branch.id,
+      supportsMilestoneId: null,
+    }),
+    /支线只允许一层/,
+  );
+
+  const detached = await repository.saveProject({
+    ...branch,
+    projectType: "main",
+    parentProjectId: null,
+  });
+  assert.equal(detached.projectType, "main");
+  assert.equal(detached.parentProjectId, null);
+  assert.equal(detached.supportsMilestoneId, null);
+  assert.equal(detached.outcome, branch.outcome);
+  database.close();
+});
+
 test("rolls back project workspace when a child record cannot be saved", async () => {
   const database = new DatabaseSync(":memory:");
   const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), {
@@ -161,6 +213,40 @@ test("rolls back project workspace when a child record cannot be saved", async (
     { ...detail.tasks[0], title: "触发失败" },
   ));
   assert.equal((await repository.get(detail.project.id))?.project.outcome, originalOutcome);
+  database.close();
+});
+
+test("rolls back the parent and its branches as one workspace", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-08-16T10:00:00.000Z"),
+  });
+  const detail = await repository.get("project-research-direction");
+  assert.ok(detail);
+  const originalOutcome = detail.project.outcome;
+  database.exec(`CREATE TRIGGER reject_workspace_branch BEFORE INSERT ON projects
+    WHEN NEW.project_type = 'side'
+    BEGIN SELECT RAISE(FAIL, 'test failure'); END;`);
+
+  await assert.rejects(() => repository.saveWorkspace(
+    { ...detail.project, outcome: "不应单独保存的主线修改" },
+    detail.milestones,
+    detail.tasks[0],
+    [{
+      ...detail.project,
+      id: "",
+      title: "不应留下的支线",
+      outcome: "支线保存失败时整体回滚。",
+      projectType: "side",
+      parentProjectId: detail.project.id,
+      supportsMilestoneId: detail.milestones[0].id,
+      createdAt: "",
+      updatedAt: "",
+    }],
+  ));
+  assert.equal((await repository.get(detail.project.id))?.project.outcome, originalOutcome);
+  assert.equal((await repository.list()).some((project) => project.title === "不应留下的支线"), false);
   database.close();
 });
 
@@ -230,6 +316,10 @@ test("adds proposal storage to an existing version 3 project database", async ()
     "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'project_proposals'",
   ).get();
   assert.ok(proposalTable);
+  const projectColumns = database.prepare("PRAGMA table_info(projects)").all();
+  assert.ok(projectColumns.some((column) => String(column.name) === "project_type"));
+  assert.ok(projectColumns.some((column) => String(column.name) === "parent_project_id"));
+  assert.ok(projectColumns.some((column) => String(column.name) === "supports_milestone_id"));
   database.close();
 });
 
