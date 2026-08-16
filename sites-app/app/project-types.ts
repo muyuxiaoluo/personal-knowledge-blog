@@ -1,12 +1,8 @@
+import type { LifeDomain } from "./domain-taxonomy";
+
 export type ProjectStatus = "active" | "waiting" | "paused" | "completed";
 
-export type ProjectCategory =
-  | "research"
-  | "creative"
-  | "product"
-  | "maintenance"
-  | "support"
-  | "personal";
+export type ProjectCategory = LifeDomain;
 
 export type MilestoneStatus = "current" | "planned" | "completed";
 

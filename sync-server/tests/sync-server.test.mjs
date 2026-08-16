@@ -32,6 +32,13 @@ test("authenticates and synchronizes article changes", async (context) => {
   );
   assert.equal(health.status, "ok");
 
+  const malformedLogin = await fetch(`${baseUrl}/v1/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: {}, password: [] }),
+  });
+  assert.equal(malformedLogin.status, 400);
+
   const loginResponse = await fetch(`${baseUrl}/v1/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -44,15 +51,52 @@ test("authenticates and synchronizes article changes", async (context) => {
   const login = await loginResponse.json();
   assert.ok(login.accessToken);
 
+  const malformedArticle = await fetch(`${baseUrl}/v1/sync`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${login.accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      cursor: "",
+      deviceId: "windows-device",
+      changes: [
+        {
+          article: { ...createArticle("thoughts/bad", 1, "windows-device"), tags: "bad" },
+          operation: "upsert",
+          changeId: "windows-device:thoughts/bad:1",
+        },
+      ],
+    }),
+  });
+  assert.equal(malformedArticle.status, 400);
+
   const article = createArticle("thoughts/test", 1, "windows-device");
   const firstSync = await sync(baseUrl, login.accessToken, {
     cursor: "",
     deviceId: "windows-device",
-    changes: [{ article, operation: "upsert" }],
+    changes: [
+      { article, operation: "upsert", changeId: "windows-device:thoughts/test:1" },
+    ],
   });
+  assert.equal(firstSync.protocolVersion, 2);
+  assert.equal(firstSync.hasMore, false);
   assert.deepEqual(firstSync.accepted, [{ id: article.id, version: 1 }]);
-  assert.equal(firstSync.changes.length, 1);
-  assert.equal(firstSync.changes[0].article.storage.syncStatus, "synced");
+  assert.equal(firstSync.changes.length, 0);
+
+  const retry = await sync(baseUrl, login.accessToken, {
+    cursor: "",
+    deviceId: "windows-device",
+    changes: [
+      { article, operation: "upsert", changeId: "windows-device:thoughts/test:1" },
+    ],
+  });
+  assert.deepEqual(retry.accepted, [{ id: article.id, version: 1 }]);
+  assert.equal(retry.changes.length, 0);
+  assert.equal(
+    database.database.prepare("SELECT COUNT(*) AS count FROM changes").get().count,
+    1,
+  );
 
   const pull = await sync(baseUrl, login.accessToken, {
     cursor: "",
@@ -61,6 +105,23 @@ test("authenticates and synchronizes article changes", async (context) => {
   });
   assert.equal(pull.changes.length, 1);
   assert.equal(pull.changes[0].article.title, "测试想法");
+
+  const equivalent = createArticle("thoughts/test", 1, "second-device");
+  const equivalentResult = await sync(baseUrl, login.accessToken, {
+    cursor: "",
+    deviceId: "second-device",
+    changes: [
+      {
+        article: equivalent,
+        operation: "upsert",
+        changeId: "second-device:thoughts/test:1:same-content",
+      },
+    ],
+  });
+  assert.deepEqual(equivalentResult.accepted, [
+    { id: equivalent.id, version: equivalent.storage.version },
+  ]);
+  assert.equal(equivalentResult.conflicts.length, 0);
 
   const conflicting = createArticle(
     "thoughts/test",
@@ -71,7 +132,13 @@ test("authenticates and synchronizes article changes", async (context) => {
   const conflictResult = await sync(baseUrl, login.accessToken, {
     cursor: firstSync.cursor,
     deviceId: "second-device",
-    changes: [{ article: conflicting, operation: "upsert" }],
+    changes: [
+      {
+        article: conflicting,
+        operation: "upsert",
+        changeId: "second-device:thoughts/test:1:different-content",
+      },
+    ],
   });
   assert.equal(conflictResult.accepted.length, 0);
   assert.equal(conflictResult.conflicts.length, 1);
@@ -86,12 +153,88 @@ test("authenticates and synchronizes article changes", async (context) => {
   const updateResult = await sync(baseUrl, login.accessToken, {
     cursor: firstSync.cursor,
     deviceId: "second-device",
-    changes: [{ article: newer, operation: "upsert" }],
+    changes: [
+      {
+        article: newer,
+        operation: "upsert",
+        changeId: "second-device:thoughts/test:2",
+      },
+    ],
   });
   assert.deepEqual(updateResult.accepted, [
     { id: newer.id, version: newer.storage.version },
   ]);
+  assert.equal(
+    database.database.prepare("SELECT COUNT(*) AS count FROM changes").get().count,
+    1,
+  );
+
+  const shortPassword = await fetch(`${baseUrl}/v1/auth/change-password`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${login.accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      currentPassword: "a-secure-test-password",
+      newPassword: "too-short",
+    }),
+  });
+  assert.equal(shortPassword.status, 400);
+
+  const passwordChange = await fetch(`${baseUrl}/v1/auth/change-password`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${login.accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      currentPassword: "a-secure-test-password",
+      newPassword: "a-different-secure-password",
+    }),
+  });
+  assert.equal(passwordChange.status, 200);
+
+  const revokedToken = await fetch(`${baseUrl}/v1/sync`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${login.accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ cursor: "", deviceId: "windows-device", changes: [] }),
+  });
+  assert.equal(revokedToken.status, 401);
+
+  const oldPasswordLogin = await loginRequest(
+    baseUrl,
+    "a-secure-test-password",
+  );
+  assert.equal(oldPasswordLogin.status, 401);
+  const newPasswordLogin = await loginRequest(
+    baseUrl,
+    "a-different-secure-password",
+  );
+  assert.equal(newPasswordLogin.status, 200);
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const failed = await loginRequest(baseUrl, "definitely-wrong", {
+      "X-Forwarded-For": `203.0.113.${attempt + 1}`,
+    });
+    assert.equal(failed.status, 401);
+  }
+  const limited = await loginRequest(baseUrl, "definitely-wrong", {
+    "X-Forwarded-For": "198.51.100.200",
+  });
+  assert.equal(limited.status, 429);
 });
+
+function loginRequest(baseUrl, password, headers = {}) {
+  return fetch(`${baseUrl}/v1/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers },
+    body: JSON.stringify({ username: "owner", password }),
+  });
+}
 
 async function sync(baseUrl, token, payload) {
   const response = await fetch(`${baseUrl}/v1/sync`, {

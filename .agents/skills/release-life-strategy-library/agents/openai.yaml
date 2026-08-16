@@ -1,0 +1,4 @@
+interface:
+  display_name: "发布人生攻略库"
+  short_description: "检查版本、提交、推送、构建并验证桌面端与同步服务发布"
+  default_prompt: "使用 $release-life-strategy-library 检查并发布本仓库的下一个版本。"

@@ -1,0 +1,61 @@
+name: 质量检查
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: 桌面端构建与测试
+    runs-on: windows-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sites-app/package-lock.json
+
+      - name: 准备 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: 安装前端依赖
+        working-directory: sites-app
+        run: npm ci
+
+      - name: 检查并测试前端
+        working-directory: sites-app
+        run: npm run check
+
+      - name: 检查 Rust 格式
+        working-directory: sites-app/src-tauri
+        run: cargo fmt --check
+
+      - name: 测试 Rust 后端
+        working-directory: sites-app/src-tauri
+        run: cargo test
+
+  sync-server:
+    name: 同步服务测试
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: 测试同步服务
+        working-directory: sync-server
+        run: npm test

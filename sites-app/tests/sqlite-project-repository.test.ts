@@ -39,6 +39,7 @@ test("seeds staged projects and persists project progress", async () => {
   const seeded = await repository.list();
   assert.equal(seeded.length, 5);
   assert.equal(seeded[0].title, "科研方向选择");
+  assert.equal(seeded[0].category, "learning");
   assert.equal(seeded[0].isDraft, true);
   assert.ok(seeded[0].currentMilestone);
   assert.ok(seeded[0].nextTask);
@@ -163,6 +164,61 @@ test("rolls back project workspace when a child record cannot be saved", async (
   database.close();
 });
 
+test("rolls back the previous next action when promoting another action fails", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-08-13T10:00:00.000Z"),
+  });
+  const detail = await repository.get("project-life-workbench-v01");
+  assert.ok(detail);
+  const currentNext = detail.tasks.find((task) => task.status === "next");
+  assert.ok(currentNext);
+  const later = await repository.saveTask({
+    ...currentNext,
+    id: `${currentNext.id}-later-test`,
+    title: "稍后再做的测试行动",
+    status: "later",
+    sortOrder: currentNext.sortOrder + 1,
+    createdAt: "",
+    updatedAt: "",
+    completedAt: null,
+  });
+  database.exec(`CREATE TRIGGER reject_next_promotion BEFORE UPDATE OF status ON project_tasks
+    WHEN NEW.id = '${later.id}' AND NEW.status = 'next'
+    BEGIN SELECT RAISE(FAIL, 'test failure'); END;`);
+
+  await assert.rejects(() => repository.updateTaskStatus(later.id, "next"));
+  const saved = await repository.get(detail.project.id);
+  assert.equal(saved?.tasks.find((task) => task.id === currentNext.id)?.status, "next");
+  assert.equal(saved?.tasks.find((task) => task.id === later.id)?.status, "later");
+  database.close();
+});
+
+test("project workspace removes deleted stages and detaches their actions", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-08-13T10:00:00.000Z"),
+  });
+  const detail = await repository.get("project-life-workbench-v01");
+  assert.ok(detail);
+  const currentStage = detail.milestones.find((milestone) => milestone.status === "current");
+  assert.ok(currentStage);
+  assert.equal(detail.tasks[0].milestoneId, currentStage.id);
+
+  await repository.saveWorkspace(
+    detail.project,
+    detail.milestones.filter((milestone) => milestone.id !== currentStage.id),
+    null,
+  );
+
+  const saved = await repository.get(detail.project.id);
+  assert.equal(saved?.milestones.some((milestone) => milestone.id === currentStage.id), false);
+  assert.equal(saved?.tasks[0].milestoneId, null);
+  database.close();
+});
+
 test("adds proposal storage to an existing version 3 project database", async () => {
   const database = new DatabaseSync(":memory:");
   database.exec("CREATE TABLE app_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)");
@@ -174,5 +230,76 @@ test("adds proposal storage to an existing version 3 project database", async ()
     "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'project_proposals'",
   ).get();
   assert.ok(proposalTable);
+  database.close();
+});
+
+test("maps legacy project categories into the shared life domains", async () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("CREATE TABLE app_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)");
+  database.prepare("INSERT INTO app_meta(key, value) VALUES(?, ?)").run("project_seed_version", "3");
+  database.exec(`CREATE TABLE projects (
+    id TEXT PRIMARY KEY NOT NULL,
+    title TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    motivation TEXT NOT NULL,
+    status TEXT NOT NULL,
+    category TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    is_draft INTEGER NOT NULL DEFAULT 1,
+    source_note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`);
+  database.prepare(`INSERT INTO projects(
+    id, title, outcome, motivation, status, category, sort_order, is_draft, source_note, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    "legacy-research",
+    "旧科研项目",
+    "保留原项目内容",
+    "",
+    "active",
+    "research",
+    10,
+    0,
+    "",
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-01T00:00:00.000Z",
+  );
+
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database));
+  const projects = await repository.list();
+  assert.equal(projects[0].category, "learning");
+  assert.equal(database.prepare("SELECT category FROM projects WHERE id = ?").get("legacy-research")?.category, "learning");
+  database.close();
+});
+
+test("seed upgrades add missing records without overwriting user edits", async () => {
+  const database = new DatabaseSync(":memory:");
+  const adapter = new NodeSqliteAdapter(database);
+  const firstRepository = new SqliteProjectRepository(adapter, {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-08-13T10:00:00.000Z"),
+  });
+  const detail = await firstRepository.get("project-life-workbench-v01");
+  assert.ok(detail?.tasks[0]);
+  const editedTaskId = detail.tasks[0].id;
+  database.prepare("UPDATE project_tasks SET title = ?, details = ? WHERE id = ?")
+    .run("用户自己修改的行动", "这段内容必须在升级后保留", editedTaskId);
+  database.prepare("UPDATE app_meta SET value = '1' WHERE key = 'project_seed_version'").run();
+
+  const upgradedRepository = new SqliteProjectRepository(adapter, {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-08-14T10:00:00.000Z"),
+  });
+  await upgradedRepository.list();
+
+  const editedTask = database.prepare("SELECT title, details FROM project_tasks WHERE id = ?")
+    .get(editedTaskId);
+  assert.equal(editedTask?.title, "用户自己修改的行动");
+  assert.equal(editedTask?.details, "这段内容必须在升级后保留");
+  assert.equal(
+    database.prepare("SELECT value FROM app_meta WHERE key = 'project_seed_version'").get()?.value,
+    "3",
+  );
   database.close();
 });

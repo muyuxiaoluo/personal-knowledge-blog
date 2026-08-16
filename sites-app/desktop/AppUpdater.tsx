@@ -4,6 +4,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { WorkbenchIcon } from "./WorkbenchIcon";
 
 type UpdatePhase =
   | "idle"
@@ -21,7 +22,7 @@ type AvailableUpdate = {
 };
 
 export function AppUpdater() {
-  const [currentVersion, setCurrentVersion] = useState("0.4.0");
+  const [currentVersion, setCurrentVersion] = useState("0.5.0");
   const [phase, setPhase] = useState<UpdatePhase>("idle");
   const [available, setAvailable] = useState<AvailableUpdate | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -150,7 +151,7 @@ export function AppUpdater() {
           }
         }}
       >
-        {buttonLabel}
+        <i><WorkbenchIcon name="update" /></i><span>{buttonLabel}</span>
       </button>
 
       {dialogOpen &&

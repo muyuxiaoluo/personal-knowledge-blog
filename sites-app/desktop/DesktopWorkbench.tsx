@@ -7,10 +7,13 @@ import {
   useState,
   type CSSProperties,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
 import type { ArticleRepository } from "../app/data/article-repository";
-import { isInboxArticle } from "../app/article-helpers";
+import { isSourceArticle, isThoughtInboxArticle } from "../app/article-helpers";
+import { localDate } from "../app/date-helpers";
+import { inferLifeDomain, LIFE_DOMAIN_LABELS, LIFE_DOMAIN_OPTIONS, type LifeDomain } from "../app/domain-taxonomy";
 import type { ProjectRepository } from "../app/data/project-repository";
 import type { WorkRepository } from "../app/data/work-repository";
 import type { ProjectDetail, ProjectProposal, ProjectSummary, ProjectTask } from "../app/project-types";
@@ -31,17 +34,23 @@ import {
 
 export type ThemeMode = "minimal" | "magic" | "immersive";
 
-type DeskSection = "home" | "tasks" | "projects" | "notes" | "explore" | "inbox" | "review";
-type NoteView = "all" | "thoughts" | "experience" | "research" | "creative";
+type DeskSection = "home" | "tasks" | "projects" | "notes" | "explore" | "inbox" | "review" | "settings";
+type NoteView = "recent" | "knowledge" | "ideas" | "methods" | "experience" | "decisions" | "review";
 type UndoOffer = { message: string; run: () => Promise<void> };
 
 type DesktopWorkbenchProps = {
   repository: ArticleRepository;
   projectRepository: ProjectRepository;
   workRepository: WorkRepository;
+  dataRevision: number;
   onRepositoryChange?: () => void;
+  onEditingStateChange?: (editing: boolean) => void;
   accountDock: ReactNode;
   themeMode: ThemeMode;
+  backingUp: boolean;
+  onThemeChange: (mode: ThemeMode) => void;
+  onCreateBackup: () => void;
+  onRestoreBackup: () => void;
 };
 
 const sections: Array<{
@@ -60,14 +69,16 @@ const sections: Array<{
 ];
 
 const noteViews: Array<{ id: NoteView; label: string }> = [
-  { id: "all", label: "全部笔记" },
-  { id: "thoughts", label: "思考与灵感" },
-  { id: "experience", label: "经验与方法" },
-  { id: "research", label: "科研相关" },
-  { id: "creative", label: "创作相关" },
+  { id: "recent", label: "最近更新" },
+  { id: "knowledge", label: "知识" },
+  { id: "ideas", label: "想法" },
+  { id: "methods", label: "方法" },
+  { id: "experience", label: "经验" },
+  { id: "decisions", label: "决策" },
+  { id: "review", label: "复盘" },
 ];
 
-const natureOptions = ["思考", "经验", "方法", "问题", "灵感", "复盘"];
+const natureOptions = ["知识", "想法", "方法", "经验", "决策", "复盘"];
 const sourceOptions = ["自写", "文章", "视频", "书籍", "对话", "其他"];
 
 const emptyDraft: Article = {
@@ -82,9 +93,9 @@ const emptyDraft: Article = {
   subbranch: "",
   stage: "常青",
   validity: "",
-  category: "笔记",
+  category: "uncategorized",
   tags: [],
-  type: "思考",
+  type: "想法",
   project: "",
   projectId: "",
   confidence: "",
@@ -99,26 +110,34 @@ export function DesktopWorkbench({
   repository,
   projectRepository,
   workRepository,
+  dataRevision,
   onRepositoryChange,
+  onEditingStateChange,
   accountDock,
   themeMode,
+  backingUp,
+  onThemeChange,
+  onCreateBackup,
+  onRestoreBackup,
 }: DesktopWorkbenchProps) {
   const [articles, setArticles] = useState<StoredArticle[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectDetails, setProjectDetails] = useState<ProjectDetail[]>([]);
   const [plans, setPlans] = useState<TaskPlan[]>([]);
-  const [sessions, setSessions] = useState<FocusSession[]>([]);
   const [activeSession, setActiveSession] = useState<FocusSession | null>(null);
   const [weeklyFocus, setWeeklyFocus] = useState<WeeklyFocus | null>(null);
   const [closeouts, setCloseouts] = useState<DailyCloseout[]>([]);
   const [section, setSection] = useState<DeskSection>("home");
-  const [noteView, setNoteView] = useState<NoteView>("all");
+  const [noteView, setNoteView] = useState<NoteView>("recent");
+  const [noteDomain, setNoteDomain] = useState<"all" | LifeDomain>("all");
   const [requestedProjectId, setRequestedProjectId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [draftDirty, setDraftDirty] = useState(false);
+  const [appending, setAppending] = useState(false);
   const [draft, setDraft] = useState<Article>({ ...emptyDraft });
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
   const [quickText, setQuickText] = useState("");
@@ -129,7 +148,39 @@ export function DesktopWorkbench({
   );
   const messageTimer = useRef<number | null>(null);
   const undoTimer = useRef<number | null>(null);
-  const today = useMemo(() => localDate(), []);
+  const [today, setToday] = useState(() => localDate());
+
+  useEffect(() => {
+    const refreshDate = () => setToday(localDate());
+    const timer = window.setInterval(refreshDate, 60_000);
+    window.addEventListener("focus", refreshDate);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshDate);
+    };
+  }, []);
+
+  useEffect(() => {
+    onEditingStateChange?.(editing || (quickCaptureOpen && Boolean(quickText.trim())));
+  }, [editing, onEditingStateChange, quickCaptureOpen, quickText]);
+
+  useEffect(() => () => onEditingStateChange?.(false), [onEditingStateChange]);
+
+  useEffect(() => {
+    const hasUnsavedInput = (editing && draftDirty) || (quickCaptureOpen && Boolean(quickText.trim()));
+    if (!hasUnsavedInput) return;
+    const preventClose = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", preventClose);
+    return () => window.removeEventListener("beforeunload", preventClose);
+  }, [draftDirty, editing, quickCaptureOpen, quickText]);
+
+  useEffect(() => () => {
+    if (messageTimer.current) window.clearTimeout(messageTimer.current);
+    if (undoTimer.current) window.clearTimeout(undoTimer.current);
+  }, []);
 
   const showMessage = useCallback((text: string) => {
     setUndoOffer(null);
@@ -182,15 +233,13 @@ export function DesktopWorkbench({
 
   const refreshWork = useCallback(async () => {
     const weekStart = startOfLocalWeekDate();
-    const [nextPlans, nextSessions, nextActive, nextFocus, nextCloseouts] = await Promise.all([
+    const [nextPlans, nextActive, nextFocus, nextCloseouts] = await Promise.all([
       workRepository.listPlans(),
-      workRepository.listSessions(startOfMonth()),
       workRepository.getActiveSession(),
       workRepository.getWeeklyFocus(weekStart),
       workRepository.listDailyCloseouts(weekStart),
     ]);
     setPlans(nextPlans);
-    setSessions(nextSessions);
     setActiveSession(nextActive);
     setWeeklyFocus(nextFocus);
     setCloseouts(nextCloseouts);
@@ -210,6 +259,13 @@ export function DesktopWorkbench({
   }, [refreshArticles, refreshProjects, refreshWork, showMessage]);
 
   useEffect(() => {
+    if (!dataRevision) return;
+    void refreshArticles().catch((error) => {
+      showMessage(error instanceof Error ? error.message : "同步后无法刷新笔记列表");
+    });
+  }, [dataRevision, refreshArticles, showMessage]);
+
+  useEffect(() => {
     const openCapture = () => setQuickCaptureOpen(true);
     let unlisten: UnlistenFn | undefined;
     window.addEventListener("mind-garden:quick-capture", openCapture);
@@ -223,8 +279,8 @@ export function DesktopWorkbench({
   useEffect(() => {
     function handleKeyboard(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        if (quickCaptureOpen) setQuickCaptureOpen(false);
-        else if (selectedId || editing) closeDocument();
+        if (quickCaptureOpen) closeQuickCapture();
+        else if (selectedId || editing) requestCloseDocument();
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && editing) {
@@ -245,7 +301,6 @@ export function DesktopWorkbench({
         ...task,
         projectTitle: detail.project.title,
         projectStatus: detail.project.status,
-        projectReviewDate: detail.project.reviewDate,
         stageTitle: milestone?.title ?? "",
         stageDueDate: milestone?.dueDate ?? "",
         stageIndex,
@@ -262,24 +317,26 @@ export function DesktopWorkbench({
     [articles, selectedId],
   );
 
-  const inboxCount = useMemo(() => articles.filter(isInboxArticle).length, [articles]);
+  const inboxCount = useMemo(() => articles.filter(isThoughtInboxArticle).length, [articles]);
   const noteArticles = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase("zh-CN");
     return articles.filter((article) => {
-      if (article.collection === "sources" || article.type === "外部资料") return false;
-      if (!matchesNoteView(article, noteView)) return false;
+      if (isSourceArticle(article) || isThoughtInboxArticle(article)) return false;
+      if (noteDomain !== "all" && articleLifeDomain(article) !== noteDomain) return false;
+      if (!needle && !matchesNoteView(article, noteView)) return false;
       return !needle || articleSearchText(article).includes(needle);
     });
-  }, [articles, noteView, query]);
+  }, [articles, noteDomain, noteView, query]);
 
   const counts: Record<DeskSection, number | null> = {
     home: null,
     tasks: workspaceTasks.filter((task) => task.status !== "done" && task.plan?.plannedDate === today).length,
     projects: projects.filter((project) => project.status === "active" || project.status === "waiting").length,
-    notes: articles.filter((article) => article.collection !== "sources" && article.type !== "外部资料").length,
-    explore: articles.filter((article) => article.collection === "sources" || article.type === "外部资料").length,
+    notes: articles.filter((article) => !isSourceArticle(article) && !isThoughtInboxArticle(article)).length,
+    explore: articles.filter(isSourceArticle).filter((article) => article.branch !== "已归档").length,
     inbox: inboxCount,
-    review: sessions.length,
+    review: null,
+    settings: null,
   };
 
   function switchSection(next: DeskSection) {
@@ -297,34 +354,55 @@ export function DesktopWorkbench({
   function openArticle(article: StoredArticle) {
     setSelectedId(article.id);
     setDraft(toEditableArticle(article));
+    setDraftDirty(false);
     setEditing(false);
+    setAppending(false);
   }
 
   function startNewArticle() {
     setSelectedId(null);
     setDraft({ ...emptyDraft, tags: [], source: ["自写"], created: today });
+    setDraftDirty(false);
     setEditing(true);
+    setAppending(false);
   }
 
   function startEditing(article: StoredArticle, append = false) {
     const next = toEditableArticle(article);
     if (append) next.body = `${next.body.trim()}\n\n## ${today} · 追加想法\n\n`;
     setDraft(next);
+    setDraftDirty(false);
     setEditing(true);
+    setAppending(append);
   }
 
   function closeDocument() {
+    setDraftDirty(false);
     setEditing(false);
+    setAppending(false);
     setSelectedId(null);
     setDraft({ ...emptyDraft });
   }
 
-  async function persist(article: Article, success: string) {
+  function requestCloseDocument() {
+    if (editing && draftDirty && !window.confirm("当前修改还没有保存，确认放弃吗？")) return false;
+    closeDocument();
+    return true;
+  }
+
+  function closeQuickCapture() {
+    if (quickText.trim() && !window.confirm("这条快速记录还没有保存，确认放弃吗？")) return false;
+    setQuickText("");
+    setQuickCaptureOpen(false);
+    return true;
+  }
+
+  async function persist(article: Article, success: string, selectAfterSave = true) {
     setSaving(true);
     try {
       const saved = await repository.save(article);
       await refreshArticles();
-      setSelectedId(saved.id);
+      if (selectAfterSave) setSelectedId(saved.id);
       onRepositoryChange?.();
       showMessage(success);
       return saved;
@@ -353,14 +431,16 @@ export function DesktopWorkbench({
       body,
       collection: draft.collection === "sources" ? "sources" : "notes",
       collectionLabel: draft.collection === "sources" ? "探索资料" : "笔记",
-      category: draft.collection === "sources" ? "探索资料" : "笔记",
+      category: draft.collection === "sources" ? "探索资料" : articleLifeDomain(draft),
       branch: draft.branch === "待分类" ? "已整理" : draft.branch || "已整理",
       summary: plainExcerpt(body),
       next: "",
     }, draft.id ? "修改已经保存。" : "笔记已经保存。 ");
     if (saved) {
       setDraft(toEditableArticle(saved));
+      setDraftDirty(false);
       setEditing(false);
+      setAppending(false);
     }
   }
 
@@ -374,7 +454,7 @@ export function DesktopWorkbench({
       source: ["快速记录"],
       title: captureTitle(body),
       body,
-      type: "灵感",
+      type: "想法",
       branch: "待分类",
       stage: "种子",
       summary: plainExcerpt(body),
@@ -390,7 +470,7 @@ export function DesktopWorkbench({
   async function saveExternalLink(url: string, note: string) {
     const platform = linkPlatform(url);
     const title = note ? captureTitle(note) : `${platform} · 待看内容`;
-    await persist({
+    const saved = await persist({
       ...emptyDraft,
       collection: "sources",
       collectionLabel: "探索资料",
@@ -399,22 +479,26 @@ export function DesktopWorkbench({
       title,
       body: `${note ? `${note}\n\n` : ""}[打开原内容](${url})`,
       source: [platform, url],
-      branch: "待分类",
-      stage: "种子",
-      summary: note || `来自 ${platform} 的待处理链接`,
+      branch: "收藏中",
+      stage: "已收藏",
+      summary: note || `来自 ${platform} 的收藏`,
       created: today,
-    }, "链接已经收进探索库。 ");
+    }, "链接已经收进探索库。 ", false);
+    return Boolean(saved);
   }
 
   async function removeArticle(article: StoredArticle) {
-    if (!window.confirm(`确认移除《${article.title}》吗？`)) return;
+    const source = isSourceArticle(article);
+    if (!window.confirm(source
+      ? `确认永久删除收藏《${article.title}》吗？此操作无法撤销。`
+      : `确认移除《${article.title}》吗？`)) return;
     setSaving(true);
     try {
       await repository.remove(article.id);
       await refreshArticles();
       closeDocument();
       onRepositoryChange?.();
-      showMessage("内容已经移除。 ");
+      showMessage(source ? "收藏已经删除。" : "内容已经移除。 ");
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "移除失败");
     } finally {
@@ -453,7 +537,6 @@ export function DesktopWorkbench({
     try {
       const session = await workRepository.startSession({ taskId: task.id, projectId: task.projectId, label: task.title });
       setActiveSession(session);
-      setSessions((current) => [session, ...current]);
       showMessage("专注计时已经开始。 ");
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "无法开始专注");
@@ -498,16 +581,16 @@ export function DesktopWorkbench({
     }
   }
 
-  async function addTask(input: NewActionInput) {
+  async function createTask(input: NewActionInput) {
     const now = new Date().toISOString();
     const task: ProjectTask = {
       id: "",
       projectId: input.projectId,
       milestoneId: input.milestoneId,
       title: input.title,
-      actionType: input.actionType,
+      actionType: "organize",
       details: input.details,
-      benefit: input.benefit,
+      benefit: "",
       dueDate: input.dueDate,
       status: "later",
       waitingFor: "",
@@ -525,9 +608,15 @@ export function DesktopWorkbench({
       }
       await Promise.all([refreshProjects(), refreshWork()]);
       showMessage("任务已经添加。 ");
+      return true;
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "无法添加任务");
+      return false;
     }
+  }
+
+  async function addTask(input: NewActionInput) {
+    await createTask(input);
   }
 
   async function saveWeeklyFocus(primaryOutcome: string, secondaryOutcome: string) {
@@ -560,9 +649,9 @@ export function DesktopWorkbench({
       ...article,
       collection: destination === "explore" ? "sources" : "notes",
       collectionLabel: destination === "explore" ? "探索资料" : "笔记",
-      category: destination === "explore" ? "探索资料" : "笔记",
-      type: destination === "explore" ? "外部资料" : article.type === "外部资料" ? "思考" : article.type,
-      branch: "已整理",
+      category: destination === "explore" ? "探索资料" : articleLifeDomain(article),
+      type: destination === "explore" ? "外部资料" : article.type === "外部资料" ? "想法" : article.type,
+      branch: destination === "explore" ? "收藏中" : "已整理",
     }, destination === "explore" ? "已转入探索库。" : "已整理为笔记。");
     if (saved) closeDocument();
   }
@@ -570,17 +659,15 @@ export function DesktopWorkbench({
   async function convertInboxToAction(article: StoredArticle, projectId: string) {
     const project = projectDetails.find((item) => item.project.id === projectId);
     if (!project) return;
-    await addTask({
+    const created = await createTask({
       projectId,
       milestoneId: project.milestones.find((item) => item.status === "current")?.id ?? null,
       title: article.title,
-      actionType: "organize",
       details: article.body,
-      benefit: "由待整理内容转化，保留原始上下文。",
       dueDate: "",
       plannedToday: false,
     });
-    await moveInboxArticle(article, "note");
+    if (created) await finishConvertedCapture(article, "已转为项目行动，原收藏已归档。");
   }
 
   async function convertInboxToProposal(article: StoredArticle, projectId: string) {
@@ -600,11 +687,22 @@ export function DesktopWorkbench({
     try {
       await projectRepository.saveProposal(proposal);
       await refreshProjects();
-      await moveInboxArticle(article, "note");
-      showMessage("已转为项目提案并保留原始笔记。");
+      await finishConvertedCapture(article, "已转为项目提案，原收藏已归档。");
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "转为提案失败");
     }
+  }
+
+  async function finishConvertedCapture(article: StoredArticle, sourceMessage: string) {
+    if (isSourceArticle(article)) {
+      await persist({ ...article, branch: "已归档" }, sourceMessage, false);
+      return;
+    }
+    await moveInboxArticle(article, "note");
+  }
+
+  async function archiveSource(article: StoredArticle, archived: boolean) {
+    await persist({ ...article, branch: archived ? "已归档" : "收藏中" }, archived ? "收藏已经归档。" : "收藏已经恢复。", false);
   }
 
   const documentMode = Boolean(selected || editing);
@@ -649,8 +747,12 @@ export function DesktopWorkbench({
               draft={draft}
               projects={projects}
               saving={saving}
-              onChange={setDraft}
-              onCancel={() => selected ? setEditing(false) : closeDocument()}
+              appendMode={appending}
+              onChange={(next) => {
+                setDraft(next);
+                setDraftDirty(true);
+              }}
+              onCancel={requestCloseDocument}
               onSave={() => void saveDraft()}
             />
           ) : selected ? (
@@ -677,8 +779,10 @@ export function DesktopWorkbench({
           loading={loading}
           query={query}
           view={noteView}
+          domain={noteDomain}
           onQuery={setQuery}
           onView={setNoteView}
+          onDomain={setNoteDomain}
           onOpen={openArticle}
           onNew={startNewArticle}
         />
@@ -686,18 +790,19 @@ export function DesktopWorkbench({
         <section className="workspace-main-stage">
           {section === "home" && <HomeDashboard today={today} tasks={workspaceTasks} articles={articles} weeklyFocus={weeklyFocus} onSaveWeeklyFocus={saveWeeklyFocus} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
           {section === "tasks" && <TasksPage today={today} tasks={workspaceTasks} projects={projects} projectDetails={projectDetails} onAddTask={addTask} onRestoreTask={restoreTask} onOpenProject={openProject} {...taskActions} />}
-          {section === "explore" && <ExplorePage articles={articles} onSaveLink={saveExternalLink} onOpenArticle={openArticle} />}
+          {section === "explore" && <ExplorePage articles={articles} onSaveLink={saveExternalLink} onArchive={archiveSource} onDelete={removeArticle} />}
           {section === "inbox" && <InboxPage articles={articles} projects={projects} onOpenArticle={openArticle} onNewCapture={() => setQuickCaptureOpen(true)} onMoveArticle={moveInboxArticle} onConvertToAction={convertInboxToAction} onConvertToProposal={convertInboxToProposal} />}
-          {section === "review" && <ReviewPage projects={projects} articles={articles} tasks={workspaceTasks} weeklyFocus={weeklyFocus} closeouts={closeouts} today={today} onSaveCloseout={saveCloseout} />}
+          {section === "review" && <ReviewPage projects={projects} projectDetails={projectDetails} articles={articles} tasks={workspaceTasks} weeklyFocus={weeklyFocus} closeouts={closeouts} today={today} onSaveCloseout={saveCloseout} />}
+          {section === "settings" && <SettingsPage themeMode={themeMode} backingUp={backingUp} onThemeChange={onThemeChange} onCreateBackup={onCreateBackup} onRestoreBackup={onRestoreBackup} />}
         </section>
       )}
 
       {quickCaptureOpen && (
         <div className="capture-backdrop" role="presentation" onMouseDown={(event) => {
-          if (event.currentTarget === event.target) setQuickCaptureOpen(false);
+          if (event.currentTarget === event.target) closeQuickCapture();
         }}>
           <form className="capture-dialog" onSubmit={quickCapture}>
-            <header><span>随手记录</span><button type="button" onClick={() => setQuickCaptureOpen(false)} aria-label="关闭快速记录">×</button></header>
+            <header><span>随手记录</span><button type="button" onClick={closeQuickCapture} aria-label="关闭快速记录">×</button></header>
             <h2>先把它留下来</h2>
             <p>不必分类、不必写完整，保存后会进入独立的待整理清单。</p>
             <textarea autoFocus value={quickText} onChange={(event) => setQuickText(event.target.value)} onKeyDown={(event) => {
@@ -748,6 +853,7 @@ function WorkbenchSidebar({
         ))}
       </nav>
       <div className="sidebar-foot">
+        <button className={`settings-nav-entry ${section === "settings" ? "active" : ""}`} onClick={() => onSwitch("settings")} title={collapsed ? "设置" : undefined} aria-label="设置"><i><WorkbenchIcon name="settings" /></i><span>设置</span></button>
         {accountDock}
       </div>
     </aside>
@@ -767,25 +873,57 @@ function MagicParticles({ intensity }: { intensity: number }) {
   })}</div>;
 }
 
-function NotesWorkspace({ articles, loading, query, view, onQuery, onView, onOpen, onNew }: {
+function SettingsPage({ themeMode, backingUp, onThemeChange, onCreateBackup, onRestoreBackup }: {
+  themeMode: ThemeMode;
+  backingUp: boolean;
+  onThemeChange: (mode: ThemeMode) => void;
+  onCreateBackup: () => void;
+  onRestoreBackup: () => void;
+}) {
+  return (
+    <div className="settings-page workspace-scroll">
+      <header className="workspace-page-heading"><div><h1>设置</h1><p>统一管理外观、数据与以后新增的工作台偏好。</p></div></header>
+      <div className="settings-grid">
+        <section className="workspace-card settings-section">
+          <header><span>外观</span><h2>主题与阅读氛围</h2><p>只改变视觉强度，不影响资料内容。</p></header>
+          <div className="settings-theme-options">{([ ["minimal", "简洁", "更少装饰，优先清晰阅读"], ["magic", "魔法", "保留主题氛围与轻量粒子"], ["immersive", "沉浸", "完整背景与更强视觉层次"] ] as const).map(([value, label, description]) => <button className={themeMode === value ? "active" : ""} key={value} onClick={() => onThemeChange(value)}><i>{themeMode === value ? "✓" : ""}</i><span><strong>{label}</strong><small>{description}</small></span></button>)}</div>
+        </section>
+        <section className="workspace-card settings-section settings-data-section">
+          <header><span>数据</span><h2>备份与恢复</h2><p>项目、行动、笔记和回顾会一起保存在完整本地备份中。</p></header>
+          <div className="settings-data-actions">
+            <button disabled={backingUp} onClick={onCreateBackup}><i>⇩</i><span><strong>{backingUp ? "正在备份" : "创建本地备份"}</strong><small>导出当前资料库的完整副本</small></span></button>
+            <button disabled={backingUp} onClick={onRestoreBackup}><i>↺</i><span><strong>恢复最近备份</strong><small>恢复前会自动保留当前资料库</small></span></button>
+          </div>
+          <aside><strong>数据边界</strong><p>云同步目前覆盖笔记；跨设备迁移完整工作台时，请使用这里的本地备份。</p></aside>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function NotesWorkspace({ articles, loading, query, view, domain, onQuery, onView, onDomain, onOpen, onNew }: {
   articles: StoredArticle[];
   loading: boolean;
   query: string;
   view: NoteView;
+  domain: "all" | LifeDomain;
   onQuery: (value: string) => void;
   onView: (view: NoteView) => void;
+  onDomain: (domain: "all" | LifeDomain) => void;
   onOpen: (article: StoredArticle) => void;
   onNew: () => void;
 }) {
+  const [helpOpen, setHelpOpen] = useState(false);
   return (
     <>
       <section className="notes-filter-pane">
-        <header><span>知识积累</span><h1>笔记</h1><p>一条内容可以同时属于思考、经验与多个主题。</p></header>
-        <nav>{noteViews.map((item) => <button className={view === item.id ? "active" : ""} key={item.id} onClick={() => onView(item.id)}><span>{item.label}</span><small>{item.id === "all" ? articles.length : ""}</small></button>)}</nav>
-        <div><strong>分类原则</strong><p>不使用互斥文件夹。性质说明内容是什么，主题说明它在谈什么。</p></div>
+        <header><div><span>知识积累</span><button className="notes-help-toggle" aria-label="查看笔记分类说明" aria-expanded={helpOpen} onClick={() => setHelpOpen((value) => !value)}>?</button></div><h1>笔记</h1><p>先看内容性质，也可以按生活领域缩小范围。</p></header>
+        <nav>{noteViews.map((item) => <button className={view === item.id ? "active" : ""} key={item.id} onClick={() => onView(item.id)}><span>{item.label}</span></button>)}</nav>
+        <label className="notes-domain-filter"><span>所属领域</span><select value={domain} onChange={(event) => onDomain(event.target.value as "all" | LifeDomain)}><option value="all">不限领域</option>{LIFE_DOMAIN_OPTIONS.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label>
+        {helpOpen && <aside className="notes-help-popover" role="dialog" aria-label="笔记分类说明"><header><strong>笔记如何分类</strong><button aria-label="关闭说明" onClick={() => setHelpOpen(false)}>×</button></header><p>领域说明内容与生活的哪一部分有关；性质说明这篇内容本身是什么。</p><dl><div><dt>领域</dt><dd>与项目共用学习、工作、创作、生活等九个稳定入口。</dd></div><div><dt>性质</dt><dd>知识、想法、方法、经验、决策或复盘，可以多选。</dd></div><div><dt>主题</dt><dd>继续自由填写更具体的关键词。</dd></div></dl></aside>}
       </section>
       <section className="notes-list-stage">
-        <header className="notes-list-header"><div><strong>{noteViews.find((item) => item.id === view)?.label}</strong><span>{articles.length} 条</span></div><button onClick={onNew}>＋ 新建</button></header>
+        <header className="notes-list-header"><div><strong>{query ? "搜索结果" : noteViews.find((item) => item.id === view)?.label}</strong><span>{articles.length} 条</span></div><button onClick={onNew}>＋ 新建</button></header>
         <label className="desktop-search"><span>⌕</span><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="搜索标题、正文、主题…" />{query && <button onClick={() => onQuery("")} aria-label="清空搜索">×</button>}</label>
         <div className="notes-card-list">
           {loading ? <div className="list-empty"><span>正在读取笔记…</span></div> : articles.length ? articles.map((article) => (
@@ -793,7 +931,7 @@ function NotesWorkspace({ articles, loading, query, view, onQuery, onView, onOpe
               <span className="note-natures">{getNatures(article).slice(0, 2).map((nature) => <i key={nature}>{nature}</i>)}</span>
               <strong>{article.title}</strong>
               <p>{article.summary || plainExcerpt(article.body)}</p>
-              <footer><span>{article.project || article.tags.slice(0, 2).join(" · ") || "未关联主题"}</span><time>{formatRelativeDate(article.updated || article.created)}</time></footer>
+              <footer><span>{LIFE_DOMAIN_LABELS[articleLifeDomain(article)]}{article.project ? ` · ${article.project}` : ""}</span><time>{formatRelativeDate(article.updated || article.created)}</time></footer>
             </button>
           )) : <div className="list-empty"><span>{query ? "没有找到相关笔记" : "这个视图还没有内容"}</span><button onClick={onNew}>写下第一条</button></div>}
         </div>
@@ -815,11 +953,11 @@ function ArticleReader({ article, saving, onBack, onEdit, onAppend, onRemove }: 
     <article className="desktop-reader immersive-reader">
       <header className="reader-toolbar">
         <button className="reader-back" onClick={onBack}>← 返回笔记</button>
-        <div><span>最后修改于 {formatDate(article.updated || article.created)}</span><button disabled={saving} onClick={onRemove}>移除</button><button onClick={onAppend}>追加想法</button><button className="primary" onClick={onEdit}>编辑</button></div>
+        <div><span>最后修改于 {formatDate(article.updated || article.created)}</span><button disabled={saving} onClick={onRemove}>移除</button><button className="primary" onClick={onEdit}>编辑</button></div>
       </header>
       <div className="reader-scroll">
         <div className="reader-document">
-          <div className="reader-kicker"><span>{article.collection === "sources" ? "探索资料" : "个人笔记"}</span><small>{formatDate(article.created)}</small></div>
+          <div className="reader-kicker"><span>{article.collection === "sources" ? "探索资料" : LIFE_DOMAIN_LABELS[articleLifeDomain(article)]}</span><small>{formatDate(article.created)}</small></div>
           <h1>{article.title}</h1>
           <div className="reader-tags">
             {getNatures(article).map((nature) => <span className="nature" key={nature}>{nature}</span>)}
@@ -827,33 +965,93 @@ function ArticleReader({ article, saving, onBack, onEdit, onAppend, onRemove }: 
             {article.project && <span>关联：{article.project}</span>}
           </div>
           <MarkdownDocument body={article.body} title={article.title} />
-          <footer className="reader-history"><div><strong>这篇内容仍可继续生长</strong><span>直接编辑会更新修改时间；“追加想法”会保留原文并增加带日期的新段落。</span></div>{sourceUrl && <a href={sourceUrl} target="_blank" rel="noreferrer">打开原始来源 ↗</a>}</footer>
+          <footer className="reader-history"><div><strong>读到这里，有新的想法吗？</strong><span>追加会在原文末尾新建一个带日期的段落，保留前文的连贯性。</span></div><div className="reader-history-actions">{sourceUrl && <a href={sourceUrl} target="_blank" rel="noreferrer">打开原始来源 ↗</a>}<button onClick={onAppend}>＋ 在文末追加想法</button></div></footer>
         </div>
       </div>
     </article>
   );
 }
 
-function ArticleEditor({ draft, projects, saving, onChange, onCancel, onSave }: {
+function ArticleEditor({ draft, projects, saving, appendMode, onChange, onCancel, onSave }: {
   draft: Article;
   projects: ProjectSummary[];
   saving: boolean;
+  appendMode: boolean;
   onChange: (article: Article) => void;
   onCancel: () => void;
   onSave: () => void;
 }) {
   const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const undoHistoryRef = useRef<Article[]>([]);
+  const redoHistoryRef = useRef<Article[]>([]);
+  const [historyAvailability, setHistoryAvailability] = useState({ canUndo: false, canRedo: false });
   const natures = getNatures(draft);
   const sourceUrl = draft.source.find((item) => /^https?:\/\//i.test(item)) || "";
   const sourceKind = draft.source.find((item) => !/^https?:\/\//i.test(item)) || "自写";
 
+  useEffect(() => {
+    if (!appendMode || !bodyRef.current) return;
+    const input = bodyRef.current;
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    window.setTimeout(() => input.scrollIntoView({ block: "end", behavior: "smooth" }), 0);
+  }, [appendMode]);
+
+  function syncHistoryAvailability() {
+    setHistoryAvailability({
+      canUndo: undoHistoryRef.current.length > 0,
+      canRedo: redoHistoryRef.current.length > 0,
+    });
+  }
+
+  function commit(next: Article) {
+    undoHistoryRef.current.push(draft);
+    if (undoHistoryRef.current.length > 150) undoHistoryRef.current.shift();
+    redoHistoryRef.current = [];
+    onChange(next);
+    syncHistoryAvailability();
+  }
+
+  function restoreInputSelection(target: EventTarget | null) {
+    if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
+    const start = target.selectionStart;
+    const end = target.selectionEnd;
+    window.requestAnimationFrame(() => {
+      target.focus();
+      if (start === null || end === null) return;
+      const nextStart = Math.min(start, target.value.length);
+      const nextEnd = Math.min(end, target.value.length);
+      target.setSelectionRange(nextStart, nextEnd);
+    });
+  }
+
+  function stepHistory(direction: "undo" | "redo", focusTarget: EventTarget | null = null) {
+    const from = direction === "undo" ? undoHistoryRef.current : redoHistoryRef.current;
+    const to = direction === "undo" ? redoHistoryRef.current : undoHistoryRef.current;
+    const next = from.pop();
+    if (!next) return false;
+    to.push(draft);
+    onChange(next);
+    syncHistoryAvailability();
+    restoreInputSelection(focusTarget);
+    return true;
+  }
+
+  function handleEditorKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+    const key = event.key.toLowerCase();
+    const direction = key === "y" || (key === "z" && event.shiftKey) ? "redo" : key === "z" ? "undo" : null;
+    if (!direction) return;
+    if (stepHistory(direction, event.target)) event.preventDefault();
+  }
+
   function update<Key extends keyof Article>(key: Key, value: Article[Key]) {
-    onChange({ ...draft, [key]: value });
+    commit({ ...draft, [key]: value });
   }
 
   function toggleNature(nature: string) {
     const next = natures.includes(nature) ? natures.filter((item) => item !== nature) : [...natures, nature];
-    update("type", (next.length ? next : ["思考"]).join("，"));
+    update("type", (next.length ? next : ["想法"]).join("，"));
   }
 
   function updateSource(kind: string, url = sourceUrl) {
@@ -871,18 +1069,19 @@ function ArticleEditor({ draft, projects, saving, onChange, onCancel, onSave }: 
   }
 
   return (
-    <div className="workbench-editor immersive-editor">
-      <header className="editor-toolbar"><div><button onClick={onCancel}>← 取消</button><span>{draft.id ? "编辑笔记" : "新建笔记"}</span></div><div><small><kbd>Ctrl</kbd> + <kbd>S</kbd></small><button className="primary" disabled={saving} onClick={onSave}>{saving ? "保存中…" : "保存"}</button></div></header>
+    <div className="workbench-editor immersive-editor" onKeyDown={handleEditorKeyDown}>
+      <header className="editor-toolbar"><div><button onClick={onCancel}>← 取消</button><span>{draft.id ? "编辑笔记" : "新建笔记"}</span></div><div className="editor-toolbar-actions"><div className="editor-history-actions" aria-label="编辑历史"><button type="button" disabled={!historyAvailability.canUndo} onClick={() => stepHistory("undo")} title="撤回（Ctrl+Z）">↶ 撤回</button><button type="button" disabled={!historyAvailability.canRedo} onClick={() => stepHistory("redo")} title="重做（Ctrl+Shift+Z / Ctrl+Y）">↷ 重做</button></div><small><kbd>Ctrl</kbd> + <kbd>S</kbd></small><button className="primary" disabled={saving} onClick={onSave}>{saving ? "保存中…" : "保存"}</button></div></header>
       <div className="editor-scroll"><div className="editor-paper">
-        <input className="editor-title" autoFocus value={draft.title} onChange={(event) => update("title", event.target.value)} placeholder="这篇笔记的标题" />
-        <div className="markdown-toolbar" aria-label="Markdown 格式工具"><button onClick={() => insertMarkdown("## ")}>标题</button><button onClick={() => insertMarkdown("**", "**")}>加粗</button><button onClick={() => insertMarkdown("> ")}>引用</button><button onClick={() => insertMarkdown("- ")}>列表</button><button onClick={() => insertMarkdown("[", "](https://)")}>链接</button><span>Markdown 会在阅读时完整排版</span></div>
+        <input className="editor-title" autoFocus={!appendMode} value={draft.title} onChange={(event) => update("title", event.target.value)} placeholder="这篇笔记的标题" />
+        <div className="markdown-toolbar" aria-label="Markdown 格式工具"><button type="button" onClick={() => insertMarkdown("## ")}>标题</button><button type="button" onClick={() => insertMarkdown("**", "**")}>加粗</button><button type="button" onClick={() => insertMarkdown("> ")}>引用</button><button type="button" onClick={() => insertMarkdown("- ")}>列表</button><button type="button" onClick={() => insertMarkdown("[", "](https://)")}>链接</button><span>Markdown 会在阅读时完整排版</span></div>
         <textarea ref={bodyRef} className="editor-body" value={draft.body} onChange={(event) => update("body", event.target.value)} placeholder="从这里开始写。可以直接使用标题、列表、引用、链接、表格和任务清单……" />
         <section className="editor-metadata new-note-metadata">
           <header><div><strong>笔记关系</strong><span>都可以留空，保存不会被分类打断</span></div></header>
           <fieldset><legend>内容性质 · 可多选</legend><div className="nature-picker">{natureOptions.map((nature) => <button className={natures.includes(nature) ? "active" : ""} type="button" key={nature} onClick={() => toggleNature(nature)}>{nature}</button>)}</div></fieldset>
           <div className="metadata-grid">
+            <label><span>所属领域</span><select value={articleLifeDomain(draft)} onChange={(event) => update("category", event.target.value)}>{LIFE_DOMAIN_OPTIONS.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label>
             <label><span>主题</span><input value={draft.tags.join("，")} onChange={(event) => update("tags", splitTags(event.target.value))} placeholder="科研，创作，工具……" /></label>
-            <label><span>关联项目</span><select value={draft.projectId || projects.find((project) => project.title === draft.project)?.id || ""} onChange={(event) => { const project = projects.find((item) => item.id === event.target.value); onChange({ ...draft, projectId: project?.id || "", project: project?.title || "" }); }}><option value="">不关联项目</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></label>
+            <label><span>关联项目</span><select value={draft.projectId || projects.find((project) => project.title === draft.project)?.id || ""} onChange={(event) => { const project = projects.find((item) => item.id === event.target.value); commit({ ...draft, projectId: project?.id || "", project: project?.title || "" }); }}><option value="">不关联项目</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></label>
             <label><span>来源</span><select value={sourceKind} onChange={(event) => updateSource(event.target.value)}>{sourceOptions.map((source) => <option key={source}>{source}</option>)}</select></label>
             <label><span>来源链接</span><input type="url" value={sourceUrl} onChange={(event) => updateSource(sourceKind, event.target.value)} placeholder="可选" /></label>
           </div>
@@ -894,23 +1093,33 @@ function ArticleEditor({ draft, projects, saving, onChange, onCancel, onSave }: 
 }
 
 function matchesNoteView(article: StoredArticle, view: NoteView) {
-  if (view === "all") return true;
+  if (view === "recent") return true;
   const natures = getNatures(article);
-  const topics = article.tags.join(" ") + article.project;
-  if (view === "thoughts") return natures.some((item) => ["思考", "灵感", "问题"].includes(item));
-  if (view === "experience") return natures.some((item) => ["经验", "方法", "复盘"].includes(item));
-  if (view === "research") return /科研|研究|论文|学习|学术/.test(topics + article.collectionLabel);
-  return /创作|小说|视频|写作|术途异道/.test(topics + article.body);
+  if (view === "knowledge") return natures.includes("知识");
+  if (view === "ideas") return natures.includes("想法");
+  if (view === "methods") return natures.includes("方法");
+  if (view === "experience") return natures.includes("经验");
+  if (view === "decisions") return natures.includes("决策");
+  return natures.includes("复盘");
 }
 
 function getNatures(article: Pick<Article, "type">) {
   const values = article.type.split(/[，,]/).map((item) => item.trim()).filter(Boolean);
-  if (!values.length || values.every((item) => item === "记录" || item === "文章")) return ["思考"];
-  return values.filter((item) => item !== "记录" && item !== "文章");
+  if (!values.length || values.every((item) => item === "记录" || item === "文章")) return ["知识"];
+  return [...new Set(values.map((item) => {
+    if (["思考", "灵感", "问题"].includes(item)) return "想法";
+    if (["模板", "教程", "步骤"].includes(item)) return "方法";
+    if (["结论", "资料", "文章", "记录"].includes(item)) return "知识";
+    return item;
+  }))];
+}
+
+function articleLifeDomain(article: Pick<Article, "category" | "tags" | "title" | "summary">) {
+  return inferLifeDomain(article.category, article.tags.join(" "), article.title, article.summary);
 }
 
 function articleSearchText(article: StoredArticle) {
-  return [article.title, article.summary, article.body, article.project, article.type, article.tags.join(" ")].join(" ").toLocaleLowerCase("zh-CN");
+  return [article.title, article.summary, article.body, article.project, article.type, article.category, LIFE_DOMAIN_LABELS[articleLifeDomain(article)], article.tags.join(" ")].join(" ").toLocaleLowerCase("zh-CN");
 }
 
 function toEditableArticle(article: StoredArticle): Article {
@@ -941,16 +1150,6 @@ function linkPlatform(value: string) {
   } catch {
     return "外部链接";
   }
-}
-
-function localDate(value = new Date()) {
-  const offset = value.getTimezoneOffset() * 60_000;
-  return new Date(value.getTime() - offset).toISOString().slice(0, 10);
-}
-
-function startOfMonth() {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
 }
 
 function startOfLocalWeekDate() {

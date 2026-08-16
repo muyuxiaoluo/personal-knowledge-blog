@@ -93,6 +93,10 @@ test("persists articles and sync metadata in a real SQLite database", async () =
   let pending = await repository.listPendingChanges();
   assert.equal(pending.length, 1);
   assert.equal(pending[0].operation, "upsert");
+  assert.equal(
+    pending[0].changeId,
+    `windows-test-device:${created.id}:1:upsert`,
+  );
 
   await repository.markSynced([
     { id: created.id, version: created.storage.version },
@@ -138,6 +142,19 @@ test("persists articles and sync metadata in a real SQLite database", async () =
     "来自另一台设备的版本",
   );
 
+  await assert.rejects(
+    () => repository.save({
+      ...seeded[0],
+      title: "基于旧版本继续编辑",
+      body: "这段草稿不能覆盖同步得到的新版本。",
+    }),
+    /当前草稿没有覆盖新版本/,
+  );
+  assert.equal(
+    (await repository.list()).find((article) => article.id === remote.id)?.title,
+    "来自另一台设备的版本",
+  );
+
   const backupDirectory = fs.mkdtempSync(
     path.join(os.tmpdir(), "mind-garden-backup-"),
   );
@@ -153,6 +170,64 @@ test("persists articles and sync metadata in a real SQLite database", async () =
   backupDatabase.close();
   fs.rmSync(backupDirectory, { recursive: true, force: true });
 
+  database.close();
+});
+
+test("commits remote changes and cursor atomically while preserving one conflict copy", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteArticleRepository(new NodeSqliteAdapter(database), {
+    deviceId: "desktop-device",
+    seedArticles: [seedArticle],
+    clock: () => new Date("2026-08-16T08:00:00.000Z"),
+  });
+  const local = (await repository.list())[0];
+  const remote = {
+    ...local,
+    title: "手机端已经更新",
+    updated: "2026-08-16T07:30:00.000Z",
+    storage: {
+      version: 2,
+      deviceId: "phone-device",
+      syncStatus: "synced" as const,
+      deletedAt: null,
+    },
+  };
+  const changes = [{ article: remote, operation: "upsert" as const }];
+
+  database.exec(`
+    CREATE TRIGGER reject_sync_cursor
+    BEFORE INSERT ON app_meta
+    WHEN NEW.key = 'sync_cursor'
+    BEGIN
+      SELECT RAISE(ABORT, 'cursor write rejected');
+    END;
+  `);
+  await assert.rejects(
+    () => repository.commitSyncResult([], changes, "12"),
+    /cursor write rejected/,
+  );
+  assert.equal(await repository.getSyncCursor(), "");
+  assert.deepEqual(
+    (await repository.list()).map((article) => article.title),
+    ["已有想法"],
+  );
+
+  database.exec("DROP TRIGGER reject_sync_cursor");
+  assert.deepEqual(await repository.commitSyncResult([], changes, "12"), {
+    applied: 1,
+    conflicts: 1,
+  });
+  const afterRetry = await repository.list();
+  assert.equal(await repository.getSyncCursor(), "12");
+  assert.equal(afterRetry.length, 2);
+  assert.ok(afterRetry.some((article) => article.title === "手机端已经更新"));
+  const conflict = afterRetry.find((article) =>
+    article.title.endsWith("（冲突副本）"),
+  );
+  assert.match(conflict?.id || "", /#conflict-[a-z0-9]{7}$/);
+
+  await repository.commitSyncResult([], changes, "12");
+  assert.equal((await repository.list()).length, 2);
   database.close();
 });
 

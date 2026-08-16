@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { ProjectRepository } from "../app/data/project-repository";
+import { LIFE_DOMAIN_LABELS, LIFE_DOMAIN_OPTIONS, normalizeLifeDomain } from "../app/domain-taxonomy";
 import type {
-  ActionType,
   Milestone,
   Project,
   ProjectCategory,
@@ -29,23 +29,8 @@ type WorkspaceDraft = {
   task: ProjectTask;
 };
 
-const categoryLabels: Record<ProjectCategory, string> = {
-  research: "科研学习",
-  creative: "持续创作",
-  product: "个人产品",
-  maintenance: "长期维护",
-  support: "支持工具",
-  personal: "个人项目",
-};
-
-const categorySymbols: Record<ProjectCategory, string> = {
-  research: "研",
-  creative: "创",
-  product: "造",
-  maintenance: "维",
-  support: "辅",
-  personal: "行",
-};
+const categoryLabels = LIFE_DOMAIN_LABELS;
+const categoryOptions = LIFE_DOMAIN_OPTIONS;
 
 const statusLabels: Record<ProjectStatus, string> = {
   active: "正在推进",
@@ -59,26 +44,6 @@ const taskStatusLabels: Record<ProjectTaskStatus, string> = {
   waiting: "等待中",
   later: "稍后",
   done: "已完成",
-};
-
-const actionTypeLabels: Record<ActionType, string> = {
-  read: "阅读理解",
-  write: "写作输出",
-  experiment: "实验验证",
-  decide: "决策判断",
-  organize: "整理归纳",
-  communicate: "沟通等待",
-  life: "生活事务",
-};
-
-const actionTypeSymbols: Record<ActionType, string> = {
-  read: "阅",
-  write: "写",
-  experiment: "验",
-  decide: "判",
-  organize: "理",
-  communicate: "联",
-  life: "生",
 };
 
 const proposalStatusLabels: Record<ProposalStatus, string> = {
@@ -99,7 +64,8 @@ export function ProjectWorkspace({
   const lastInitialProjectId = useRef<string | null>(null);
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | ProjectStatus>("all");
+  const [statusFilter, setStatusFilter] = useState<ProjectStatus>("active");
+  const [domainFilter, setDomainFilter] = useState<"all" | ProjectCategory>("all");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -111,7 +77,8 @@ export function ProjectWorkspace({
   const visibleProjects = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase("zh-CN");
     return projects.filter((project) => {
-      if (statusFilter !== "all" && project.status !== statusFilter) return false;
+      if (project.status !== statusFilter) return false;
+      if (domainFilter !== "all" && normalizeLifeDomain(project.category) !== domainFilter) return false;
       if (!needle) return true;
       return [
       project.title,
@@ -121,7 +88,7 @@ export function ProjectWorkspace({
       project.nextTask?.title ?? "",
       ].join(" ").toLocaleLowerCase("zh-CN").includes(needle);
     });
-  }, [projects, query, statusFilter]);
+  }, [domainFilter, projects, query, statusFilter]);
 
   useEffect(() => {
     if (!projects.length) {
@@ -186,7 +153,7 @@ export function ProjectWorkspace({
         outcome: "",
         motivation: "",
         status: "active",
-        category: "personal",
+        category: "uncategorized",
         sortOrder: (projects.length + 1) * 10,
         isDraft: false,
         sourceNote: "本人创建",
@@ -204,13 +171,15 @@ export function ProjectWorkspace({
     if (!detail) return;
     const now = new Date().toISOString();
     const milestone = detail.milestones.find((item) => item.status === "current") ?? detail.milestones[0] ?? emptyMilestone(detail.project.id, now);
-    const task = detail.tasks.find((item) => item.status === "next")
-      ?? detail.tasks.find((item) => item.status === "waiting")
+    const currentTasks = detail.tasks.filter((item) => item.status !== "done" && (!milestone.id || item.milestoneId === milestone.id));
+    const task = currentTasks.find((item) => item.status === "next")
+      ?? currentTasks.find((item) => item.status === "waiting")
+      ?? currentTasks[0]
       ?? emptyTask(detail.project.id, milestone.id, now);
     setDraft({
-      project: { ...detail.project },
+      project: { ...detail.project, category: normalizeProjectCategory(detail.project.category) },
       milestones: detail.milestones.length ? detail.milestones.map((item) => ({ ...item })) : [{ ...milestone }],
-      task: { ...task },
+      task: { ...task, status: task.status === "later" ? "next" : task.status },
     });
     setEditing(true);
   }
@@ -265,12 +234,19 @@ export function ProjectWorkspace({
     }
   }
 
-  async function addProgress(event: FormEvent) {
+  async function addProgress(event: FormEvent, kind: "continuation" | "general" = "general") {
     event.preventDefault();
     if (!detail || !logText.trim()) return;
     setSaving(true);
     try {
-      await repository.addLog(detail.project.id, logText);
+      const currentMilestone = detail.milestones.find((item) => item.status === "current") ?? null;
+      const currentTask = detail.tasks.find((item) => item.status === "next" && (!currentMilestone || item.milestoneId === currentMilestone.id))
+        ?? detail.tasks.find((item) => item.status === "waiting" && (!currentMilestone || item.milestoneId === currentMilestone.id))
+        ?? null;
+      const body = kind === "continuation"
+        ? encodeContinuationLog(currentTask?.id || currentMilestone?.id || detail.project.id, currentTask?.title || currentMilestone?.title || detail.project.title, logText)
+        : logText;
+      await repository.addLog(detail.project.id, body);
       setLogText("");
       await reload(detail.project.id);
       showMessage("推进记录已经留下。");
@@ -301,7 +277,11 @@ export function ProjectWorkspace({
     if (!detail || !window.confirm(`确认删除阶段「${milestone.title}」吗？关联行动会保留，但不再归属该阶段。`)) return;
     setSaving(true);
     try {
+      const replacement = milestone.status === "current"
+        ? detail.milestones.find((item) => item.id !== milestone.id && item.status === "planned") ?? null
+        : null;
       await repository.removeMilestone(milestone.id);
+      if (replacement) await repository.saveMilestone({ ...replacement, status: "current" });
       await repository.addLog(detail.project.id, `移除阶段：${milestone.title}`);
       await reload(detail.project.id);
       showMessage("阶段已经移除，原有关联行动仍被保留。");
@@ -382,17 +362,21 @@ export function ProjectWorkspace({
             </header>
             <div className="project-gallery-controls">
               <nav aria-label="项目状态">
-                {([ ["all", "全部"], ["active", "进行中"], ["waiting", "等待"], ["paused", "暂停"], ["completed", "已完成"] ] as const).map(([value, label]) => <button className={statusFilter === value ? "active" : ""} key={value} onClick={() => setStatusFilter(value)}>{label}</button>)}
+                {([ ["active", "进行中"], ["waiting", "等待"], ["paused", "暂停"], ["completed", "已完成"] ] as const).map(([value, label]) => <button className={statusFilter === value ? "active" : ""} key={value} onClick={() => setStatusFilter(value)}>{label}</button>)}
               </nav>
-              <label><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索项目" />{query && <button onClick={() => setQuery("")}>×</button>}</label>
+              <div className="project-gallery-filters">
+                <label className="project-domain-filter"><span>领域</span><select value={domainFilter} onChange={(event) => setDomainFilter(event.target.value as "all" | ProjectCategory)}><option value="all">不限领域</option>{categoryOptions.filter((option) => option.value !== "uncategorized").map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}<option value="uncategorized">未分类</option></select></label>
+                <label className="project-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索项目" />{query && <button onClick={() => setQuery("")}>×</button>}</label>
+              </div>
             </div>
             <div className="project-gallery-grid" aria-live="polite">
               {visibleProjects.map((project) => {
                 const total = project.milestoneCount;
                 const progress = total ? Math.round(project.completedMilestoneCount / total * 100) : 0;
-                return <button className={`project-gallery-card category-${project.category}`} key={project.id} onClick={() => { setSelectedId(project.id); setEditing(false); }}>
-                  <header><i>{categorySymbols[project.category]}</i><span className={`project-status ${project.status}`}>{statusLabels[project.status]}</span></header>
-                  <div><small>{categoryLabels[project.category]}{project.isDraft ? " · 待确认" : ""}</small><h2>{project.title}</h2><p>{project.outcome}</p></div>
+                const category = normalizeLifeDomain(project.category);
+                return <button className={`project-gallery-card category-${category}`} key={project.id} onClick={() => { setSelectedId(project.id); setEditing(false); }}>
+                  <header><span className="project-domain">{categoryLabels[category]}</span><span className={`project-status ${project.status}`}>{statusLabels[project.status]}</span></header>
+                  <div>{project.isDraft && <small>待确认</small>}<h2>{project.title}</h2><p>{project.outcome}</p></div>
                   <section><span>当前阶段</span><strong>{project.currentMilestone?.title || "尚未设置当前阶段"}</strong>{project.currentMilestone?.dueDate && <small>{formatDueDate(project.currentMilestone.dueDate)}</small>}</section>
                   <footer><i><b style={{ width: `${progress}%` }} /></i><span>{project.completedMilestoneCount}/{total || 0} 个阶段完成</span><em>进入项目 →</em></footer>
                 </button>;
@@ -429,7 +413,7 @@ function ProjectPage({
   onTabChange: (tab: ProjectTab) => void;
   logText: string;
   onLogTextChange: (value: string) => void;
-  onAddProgress: (event: FormEvent) => void;
+  onAddProgress: (event: FormEvent, kind?: "continuation" | "general") => void;
   onConfirm: () => void;
   onEdit: () => void;
   onBack: () => void;
@@ -445,6 +429,9 @@ function ProjectPage({
   const doneTasks = tasks.filter((item) => item.status === "done").slice(0, 5);
   const completedStages = milestones.filter((item) => item.status === "completed").length;
   const nextTask = openTasks.find((item) => item.status === "next") ?? openTasks[0] ?? null;
+  const continuationTargetId = nextTask?.id || currentMilestone?.id || project.id;
+  const latestContinuation = logs.map((log) => ({ log, continuation: decodeContinuationLog(log.body) }))
+    .find((entry) => entry.continuation?.targetId === continuationTargetId) ?? null;
 
   return (
     <article className="project-page">
@@ -452,7 +439,7 @@ function ProjectPage({
         <div>
           <button className="project-back" onClick={onBack}>← 项目大厅</button>
           <span className={`project-status ${project.status}`}>{statusLabels[project.status]}</span>
-          <span>{categoryLabels[project.category]}</span>
+          {normalizeLifeDomain(project.category) !== "uncategorized" && <span>{categoryLabels[normalizeLifeDomain(project.category)]}</span>}
           <span className="project-local-badge">仅本机</span>
         </div>
         <div>
@@ -473,20 +460,25 @@ function ProjectPage({
         </nav>
 
         {tab === "overview" && <>
-          <section className="project-overview-focus">
-            <div><span>当前阶段</span><strong>{currentMilestone?.title || "尚未选择当前阶段"}</strong><p>{currentMilestone?.definitionOfDone || "在阶段路线中补充这一阶段的完成标准。"}</p></div>
-            <div><span>下一项行动</span><strong>{nextTask?.title || "尚未留下下一项行动"}</strong><p>{nextTask?.benefit || "从当前阶段选择一个最小、明确的下一步。"}</p></div>
-            <div><span>下次评审</span><strong>{project.reviewDate ? formatDueDate(project.reviewDate) : "尚未设置"}</strong><p>{proposals.filter((item) => item.status === "pending").length} 条想法等待判断</p></div>
-          </section>
-
-          <div className="project-content-grid">
-            <div className="project-content-main">
-              <ProjectActions tasks={openTasks} doneTasks={doneTasks} milestones={milestones} saving={saving} onTaskStatus={onTaskStatus} />
-              <section className="project-section project-history-preview">
-                <header><div><span>最近发生</span></div><button onClick={() => onTabChange("history")}>查看全部 →</button></header>
-                <ProjectTimeline logs={logs.slice(0, 4)} />
-              </section>
-            </div>
+          <ProjectCurrentProgress
+            currentMilestone={currentMilestone}
+            nextTask={nextTask}
+            otherTasks={openTasks.filter((task) => task.id !== nextTask?.id)}
+            doneTasks={doneTasks}
+            latestContinuation={latestContinuation}
+            saving={saving}
+            logText={logText}
+            onLogTextChange={onLogTextChange}
+            onAddContinuation={(event) => onAddProgress(event, "continuation")}
+            onTaskStatus={onTaskStatus}
+            onEdit={onEdit}
+          />
+          <StageTimelinePreview milestones={milestones} completedStages={completedStages} onOpen={() => onTabChange("stages")} />
+          <div className="project-secondary-grid">
+            <section className="project-section project-history-preview">
+              <header><div><span>最近发生</span></div><button onClick={() => onTabChange("history")}>查看全部 →</button></header>
+              <ProjectTimeline logs={logs.slice(0, 4)} />
+            </section>
             <ProjectContext detail={detail} />
           </div>
         </>}
@@ -497,7 +489,7 @@ function ProjectPage({
 
         {tab === "history" && <section className="project-section project-progress project-history-full">
           <header><div><span>项目轨迹</span><small>完成行动、调整阶段和评审想法会自动留下记录</small></div></header>
-          <details className="manual-log-entry"><summary>补充一条结果或判断</summary><form onSubmit={onAddProgress}><textarea value={logText} onChange={(event) => onLogTextChange(event.target.value)} placeholder="写下确实发生的结果、变化或新判断" /><button disabled={saving || !logText.trim()} type="submit">保存记录</button></form></details>
+          <details className="manual-log-entry"><summary>补充一条结果或判断</summary><form onSubmit={(event) => onAddProgress(event, "general")}><textarea value={logText} onChange={(event) => onLogTextChange(event.target.value)} placeholder="写下确实发生的结果、变化或新判断" /><button disabled={saving || !logText.trim()} type="submit">保存记录</button></form></details>
           <ProjectTimeline logs={logs} />
         </section>}
       </div>
@@ -505,29 +497,58 @@ function ProjectPage({
   );
 }
 
-function ProjectActions({ tasks, doneTasks, milestones, saving, onTaskStatus }: { tasks: ProjectTask[]; doneTasks: ProjectTask[]; milestones: Milestone[]; saving: boolean; onTaskStatus: (task: ProjectTask, status: ProjectTaskStatus) => void }) {
-  return <section className="project-section project-actions">
-    <header><div><span>当前阶段的行动</span><small>具体做法默认折叠</small></div></header>
-    {tasks.length ? tasks.map((task) => <article className={`project-task project-action-card ${task.status}`} key={task.id}>
-      <i className="project-action-symbol">{actionTypeSymbols[task.actionType]}</i>
-      <div className="project-action-main">
-        <header><small>{actionTypeLabels[task.actionType]} · {taskStatusLabels[task.status]}</small>{task.dueDate && <time>{formatDueDate(task.dueDate)}</time>}</header>
-        <strong>{task.title}</strong><span>{milestones.find((item) => item.id === task.milestoneId)?.title || "未关联阶段"}</span>
-        <details className="action-disclosure"><summary>查看具体做法与收益</summary><div><p><b>具体做法</b>{task.details || "还没有补充具体做法。"}</p><p><b>推进价值</b>{task.benefit || "还没有记录它对项目的帮助。"}</p></div></details>
-      </div>
-      <div className="project-action-buttons">{task.status !== "next" && <button disabled={saving} onClick={() => onTaskStatus(task, "next")}>设为当前</button>}<button disabled={saving} onClick={() => onTaskStatus(task, "done")}>✓ 完成</button></div>
-    </article>) : <p className="project-empty-copy">当前阶段还没有未完成行动。</p>}
-    {doneTasks.length > 0 && <details className="project-done-list"><summary>最近完成 {doneTasks.length} 项</summary>{doneTasks.map((task) => <p key={task.id}>✓ {actionTypeLabels[task.actionType]} · {task.title}</p>)}</details>}
+function ProjectCurrentProgress({ currentMilestone, nextTask, otherTasks, doneTasks, latestContinuation, saving, logText, onLogTextChange, onAddContinuation, onTaskStatus, onEdit }: {
+  currentMilestone: Milestone | null;
+  nextTask: ProjectTask | null;
+  otherTasks: ProjectTask[];
+  doneTasks: ProjectTask[];
+  latestContinuation: { log: ProjectDetail["logs"][number]; continuation: ReturnType<typeof decodeContinuationLog> } | null;
+  saving: boolean;
+  logText: string;
+  onLogTextChange: (value: string) => void;
+  onAddContinuation: (event: FormEvent) => void;
+  onTaskStatus: (task: ProjectTask, status: ProjectTaskStatus) => void;
+  onEdit: () => void;
+}) {
+  return <section className="project-current-progress">
+    <header className="project-current-stage">
+      <div><span>当前推进</span><h2>{currentMilestone?.title || "尚未选择当前阶段"}</h2><p>{currentMilestone?.definitionOfDone || "先确定这一阶段要抵达的结果。"}</p></div>
+      {currentMilestone?.dueDate && <time>阶段截止 {formatDueDate(currentMilestone.dueDate)}</time>}
+    </header>
+    <div className="project-current-body">
+      <article className="project-next-action">
+        <header><span>下一步</span>{nextTask && (nextTask.status !== "next" || nextTask.dueDate) && <small>{nextTask.status !== "next" ? taskStatusLabels[nextTask.status] : ""}{nextTask.status !== "next" && nextTask.dueDate ? " · " : ""}{nextTask.dueDate ? formatDueDate(nextTask.dueDate) : ""}</small>}</header>
+        {nextTask ? <>
+          <h3>{projectTaskDisplayTitle(nextTask)}</h3>
+          <details className="action-disclosure"><summary>展开具体做法</summary><p>{nextTask.details || "还没有补充具体做法。"}</p>{nextTask.waitingFor && <p><b>正在等待</b>{nextTask.waitingFor}</p>}</details>
+          <div className="project-action-buttons">{nextTask.status !== "next" && <button disabled={saving} onClick={() => onTaskStatus(nextTask, "next")}>设为当前</button>}<button disabled={saving} onClick={() => onTaskStatus(nextTask, "done")}>✓ 完成</button></div>
+        </> : <div className="project-next-empty"><p>当前阶段还没有明确的下一步。</p><button onClick={onEdit}>补充下一步</button></div>}
+      </article>
+      <aside className="project-continuation">
+        <header><span>接续记录</span><small>为下一次打开留下起点</small></header>
+        {latestContinuation?.continuation && <div className="continuation-latest"><small>上次做到</small><p>{latestContinuation.continuation.text}</p><time>{formatProjectDate(latestContinuation.log.createdAt)}</time></div>}
+        <form onSubmit={onAddContinuation}><textarea value={logText} onChange={(event) => onLogTextChange(event.target.value)} placeholder="今天做到哪里了？下一次从哪里继续？" /><button disabled={saving || !logText.trim()} type="submit">保存接续点</button></form>
+      </aside>
+    </div>
+    {otherTasks.length > 0 && <details className="project-other-actions"><summary>本阶段还有 {otherTasks.length} 项行动</summary>{otherTasks.map((task) => <div key={task.id}><span>{taskStatusLabels[task.status]}</span><strong>{projectTaskDisplayTitle(task)}</strong>{task.status !== "next" && <button disabled={saving} onClick={() => onTaskStatus(task, "next")}>设为下一步</button>}</div>)}</details>}
+    {doneTasks.length > 0 && <details className="project-done-list"><summary>最近完成 {doneTasks.length} 项</summary>{doneTasks.map((task) => <p key={task.id}>✓ {projectTaskDisplayTitle(task)}</p>)}</details>}
+  </section>;
+}
+
+function StageTimelinePreview({ milestones, completedStages, onOpen }: { milestones: Milestone[]; completedStages: number; onOpen: () => void }) {
+  return <section className="project-route-preview">
+    <header><div><span>阶段路线</span><small>{completedStages}/{milestones.length || 0} 个阶段完成</small></div><button onClick={onOpen}>调整路线 →</button></header>
+    {milestones.length ? <div className="project-route-line">{milestones.map((milestone, index) => <div className={milestone.status} key={milestone.id || index}><i>{milestone.status === "completed" ? "✓" : index + 1}</i><span>{milestone.title}</span></div>)}</div> : <p className="project-empty-copy">还没有阶段路线。</p>}
   </section>;
 }
 
 function ProjectContext({ detail }: { detail: ProjectDetail }) {
   const { project, milestones } = detail;
-  return <aside className="project-context-panel"><section><span>为什么做</span><p>{project.motivation || "还没有记录这个项目为什么值得投入。"}</p></section><section><span>阶段概览</span><p>{milestones.filter((item) => item.status === "completed").length} 个已完成 · {milestones.filter((item) => item.status !== "completed").length} 个仍在路线中</p></section><section><span>最近更新</span><p>{formatProjectDate(project.updatedAt)}</p></section></aside>;
+  return <details className="project-context-panel"><summary><span>项目背景</span><small>目标缘由与低频信息</small></summary><div><section><span>为什么做</span><p>{project.motivation || "还没有记录这个项目为什么值得投入。"}</p></section><section><span>阶段概览</span><p>{milestones.filter((item) => item.status === "completed").length} 个已完成 · {milestones.filter((item) => item.status !== "completed").length} 个仍在路线中</p></section><section><span>最近更新</span><p>{formatProjectDate(project.updatedAt)}</p></section></div></details>;
 }
 
 function ProjectTimeline({ logs }: { logs: ProjectDetail["logs"] }) {
-  return <div className="project-timeline">{logs.length ? logs.map((log) => <div key={log.id}><time>{formatProjectDate(log.createdAt)}</time><p>{log.body}</p></div>) : <p className="project-empty-copy">项目发生变化后，轨迹会自动出现在这里。</p>}</div>;
+  return <div className="project-timeline">{logs.length ? logs.map((log) => { const continuation = decodeContinuationLog(log.body); return <div key={log.id}><time>{formatProjectDate(log.createdAt)}</time><p>{continuation ? <><strong>接续点 · {continuation.label}</strong>{continuation.text}</> : log.body}</p></div>; }) : <p className="project-empty-copy">项目发生变化后，轨迹会自动出现在这里。</p>}</div>;
 }
 
 function StageRouteEditor({ projectId, milestones, tasks, saving, onSave, onRemove }: { projectId: string; milestones: Milestone[]; tasks: ProjectTask[]; saving: boolean; onSave: (milestone: Milestone) => void; onRemove: (milestone: Milestone) => void }) {
@@ -535,7 +556,7 @@ function StageRouteEditor({ projectId, milestones, tasks, saving, onSave, onRemo
   const [draft, setDraft] = useState<Milestone | null>(null);
   function edit(item?: Milestone) { const now = new Date().toISOString(); const next = item ? { ...item } : { ...emptyMilestone(projectId, now), status: milestones.length ? "planned" as const : "current" as const, sortOrder: (milestones.length + 1) * 10 }; setDraft(next); setEditingId(item?.id || "new"); }
   function submit(event: FormEvent) { event.preventDefault(); if (!draft?.title.trim()) return; onSave(draft); setDraft(null); setEditingId(null); }
-  return <section className="project-stage-overview stage-route-page"><header><div><h2>阶段路线</h2><p>阶段可以在推进中随时增补和调整。</p></div><button onClick={() => edit()}>＋ 添加阶段</button></header><div className="project-stage-path">{milestones.map((milestone, index) => { const stageTasks = tasks.filter((task) => task.milestoneId === milestone.id); return <article className={`project-stage-node ${milestone.status}`} key={milestone.id}><button className="stage-node-button" onClick={() => edit(milestone)}><i>{milestone.status === "completed" ? "✓" : index + 1}</i><span><small>{milestone.status === "current" ? "当前阶段" : milestone.status === "completed" ? "已完成" : "待开始"}</small><strong>{milestone.title}</strong><em>{stageTasks.filter((task) => task.status === "done").length}/{stageTasks.length} 行动</em></span></button>{editingId === milestone.id && draft && <StageInlineForm draft={draft} saving={saving} onChange={setDraft} onCancel={() => { setDraft(null); setEditingId(null); }} onRemove={() => onRemove(milestone)} onSubmit={submit} />}</article>; })}{editingId === "new" && draft && <article className="project-stage-node current new"><StageInlineForm draft={draft} saving={saving} onChange={setDraft} onCancel={() => { setDraft(null); setEditingId(null); }} onSubmit={submit} /></article>}</div></section>;
+  return <section className="project-stage-overview stage-route-page"><header><div><h2>阶段路线</h2><p>沿着连线查看已经走过、正在推进和之后再处理的阶段。</p></div><button onClick={() => edit()}>＋ 添加阶段</button></header><div className="project-stage-path">{milestones.map((milestone, index) => { const stageTasks = tasks.filter((task) => task.milestoneId === milestone.id); return <article className={`project-stage-node ${milestone.status}`} key={milestone.id}><button className="stage-node-button" onClick={() => edit(milestone)}><i>{milestone.status === "completed" ? "✓" : index + 1}</i><span><small>{milestone.status === "current" ? "当前阶段" : milestone.status === "completed" ? "已完成" : "待开始"}</small><strong>{milestone.title}</strong><em>{stageTasks.filter((task) => task.status === "done").length}/{stageTasks.length} 行动</em></span></button>{editingId === milestone.id && draft && <StageInlineForm draft={draft} saving={saving} onChange={setDraft} onCancel={() => { setDraft(null); setEditingId(null); }} onRemove={() => { onRemove(milestone); setDraft(null); setEditingId(null); }} onSubmit={submit} />}</article>; })}{editingId === "new" && draft && <article className="project-stage-node current new"><StageInlineForm draft={draft} saving={saving} onChange={setDraft} onCancel={() => { setDraft(null); setEditingId(null); }} onSubmit={submit} /></article>}</div></section>;
 }
 
 function StageInlineForm({ draft, saving, onChange, onCancel, onRemove, onSubmit }: { draft: Milestone; saving: boolean; onChange: (draft: Milestone) => void; onCancel: () => void; onRemove?: () => void; onSubmit: (event: FormEvent) => void }) {
@@ -581,6 +602,27 @@ function ProjectEditor({
   const updateTask = <Key extends keyof ProjectTask>(key: Key, value: ProjectTask[Key]) => {
     onChange({ ...draft, task: { ...draft.task, [key]: value } });
   };
+  const moveMilestone = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= draft.milestones.length) return;
+    const next = [...draft.milestones];
+    [next[index], next[target]] = [next[target], next[index]];
+    onChange({ ...draft, milestones: next.map((milestone, milestoneIndex) => ({ ...milestone, sortOrder: (milestoneIndex + 1) * 10 })) });
+  };
+  const removeMilestoneAt = (index: number) => {
+    const milestone = draft.milestones[index];
+    if ((milestone.id || milestone.title.trim()) && !window.confirm(`确认删除阶段「${milestone.title || `阶段 ${index + 1}`}」吗？关联行动会保留，但不再归属这个阶段。`)) return;
+    const next = draft.milestones.filter((_, milestoneIndex) => milestoneIndex !== index);
+    if (milestone.status === "current" && next.length && !next.some((item) => item.status === "current")) {
+      const replacement = Math.min(index, next.length - 1);
+      next[replacement] = { ...next[replacement], status: "current" };
+    }
+    const normalized = next.map((item, milestoneIndex) => ({ ...item, sortOrder: (milestoneIndex + 1) * 10 }));
+    const task = milestone.id && draft.task.milestoneId === milestone.id
+      ? { ...draft.task, milestoneId: normalized.find((item) => item.status === "current")?.id || null }
+      : draft.task;
+    onChange({ ...draft, milestones: normalized, task });
+  };
 
   return (
     <div className="project-editor">
@@ -602,15 +644,15 @@ function ProjectEditor({
             <span>期望结果</span>
             <textarea value={draft.project.outcome} onChange={(event) => updateProject("outcome", event.target.value)} placeholder="这个项目最终希望得到什么结果？" />
           </label>
-          <label>
-            <span>为什么值得做</span>
-            <textarea value={draft.project.motivation} onChange={(event) => updateProject("motivation", event.target.value)} placeholder="为什么现在值得投入？" />
-          </label>
+          <details className="project-editor-optional">
+            <summary>项目背景（可选）</summary>
+            <label><span>为什么值得做</span><textarea value={draft.project.motivation} onChange={(event) => updateProject("motivation", event.target.value)} placeholder="需要时再记录它为什么值得投入" /></label>
+          </details>
           <div className="project-editor-grid">
             <label>
-              <span>项目类型</span>
+              <span>所属领域 · 可选</span>
               <select value={draft.project.category} onChange={(event) => updateProject("category", event.target.value as ProjectCategory)}>
-                {Object.entries(categoryLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                {categoryOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
               </select>
             </label>
             <label>
@@ -619,48 +661,31 @@ function ProjectEditor({
                 {Object.entries(statusLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
               </select>
             </label>
-            <label>
-              <span>下次复盘</span>
-              <input type="date" value={draft.project.reviewDate} onChange={(event) => updateProject("reviewDate", event.target.value)} />
-            </label>
           </div>
 
           <section className="project-editor-block">
             <header><strong>阶段路线</strong><button type="button" onClick={() => onChange({ ...draft, milestones: [...draft.milestones, { ...emptyMilestone(draft.project.id, new Date().toISOString()), status: "planned", sortOrder: (draft.milestones.length + 1) * 10 }] })}>＋ 添加阶段</button></header>
             <div className="project-stage-editor-list">
               {draft.milestones.map((milestone, index) => <article key={milestone.id || `new-stage-${index}`}>
-                <header><span>阶段 {index + 1}</span><select value={milestone.status} onChange={(event) => updateMilestone(index, "status", event.target.value as Milestone["status"])}><option value="completed">已完成</option><option value="current">当前阶段</option><option value="planned">待开始</option></select></header>
+                <header><span>阶段 {index + 1}</span><div className="stage-editor-actions"><button type="button" disabled={index === 0} onClick={() => moveMilestone(index, -1)} aria-label={`上移阶段 ${index + 1}`}>↑</button><button type="button" disabled={index === draft.milestones.length - 1} onClick={() => moveMilestone(index, 1)} aria-label={`下移阶段 ${index + 1}`}>↓</button><button className="danger" type="button" onClick={() => removeMilestoneAt(index)}>删除</button><select value={milestone.status} onChange={(event) => updateMilestone(index, "status", event.target.value as Milestone["status"])}><option value="completed">已完成</option><option value="current">当前阶段</option><option value="planned">待开始</option></select></div></header>
                 <label><span>阶段名称</span><input value={milestone.title} onChange={(event) => updateMilestone(index, "title", event.target.value)} placeholder="这一阶段要解决什么问题？" /></label>
-                <div className="project-editor-grid"><label><span>截止时间</span><input type="date" value={milestone.dueDate} onChange={(event) => updateMilestone(index, "dueDate", event.target.value)} /></label><label><span>排序</span><input type="number" value={milestone.sortOrder} onChange={(event) => updateMilestone(index, "sortOrder", Number(event.target.value))} /></label></div>
+                <label><span>截止时间 · 可选</span><input type="date" value={milestone.dueDate} onChange={(event) => updateMilestone(index, "dueDate", event.target.value)} /></label>
                 <label><span>完成标准</span><textarea value={milestone.definitionOfDone} onChange={(event) => updateMilestone(index, "definitionOfDone", event.target.value)} /></label>
               </article>)}
             </div>
           </section>
 
           <section className="project-editor-block">
-            <header><strong>当前阶段的行动</strong><span>折叠状态保持轻量，需要时再看细节</span></header>
+            <header><strong>当前阶段的下一步</strong><span>只保留真正影响执行的信息</span></header>
             <div className="project-editor-grid">
               <label>
-                <span>行动类型</span>
-                <select value={draft.task.actionType} onChange={(event) => updateTask("actionType", event.target.value as ActionType)}>{Object.entries(actionTypeLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select>
+                <span>当前状态</span>
+                <select value={draft.task.status} onChange={(event) => updateTask("status", event.target.value as ProjectTaskStatus)}><option value="next">当前要做</option><option value="waiting">等待中</option><option value="done">已完成</option></select>
               </label>
-              <label>
-                <span>行动状态</span>
-                <select value={draft.task.status} onChange={(event) => updateTask("status", event.target.value as ProjectTaskStatus)}>
-                  <option value="next">下一步</option>
-                  <option value="later">稍后</option>
-                  <option value="waiting">等待中</option>
-                  <option value="done">已完成</option>
-                </select>
-              </label>
+              <label><span>截止时间 · 可选</span><input type="date" value={draft.task.dueDate} onChange={(event) => updateTask("dueDate", event.target.value)} /></label>
             </div>
-            <label><span>折叠时显示的名称</span><input value={draft.task.title} onChange={(event) => updateTask("title", event.target.value)} placeholder="例如：阅读与判断" /></label>
-            <label><span>具体做法</span><textarea value={draft.task.details} onChange={(event) => updateTask("details", event.target.value)} /></label>
-            <label><span>完成它有什么帮助</span><textarea value={draft.task.benefit} onChange={(event) => updateTask("benefit", event.target.value)} /></label>
-            <div className="project-editor-grid">
-              <label><span>截止时间</span><input type="date" value={draft.task.dueDate} onChange={(event) => updateTask("dueDate", event.target.value)} /></label>
-              <label><span>适合场景</span><select value={draft.task.context} onChange={(event) => updateTask("context", event.target.value as ProjectTask["context"])}><option value="anywhere">任何地方</option><option value="computer">需要电脑</option><option value="phone">手机可做</option></select></label>
-            </div>
+            <label><span>下一步要做什么</span><input value={draft.task.title} onChange={(event) => updateTask("title", event.target.value)} placeholder="例如：比较三个候选方向并写下结论" /></label>
+            <label><span>具体做法</span><textarea value={draft.task.details} onChange={(event) => updateTask("details", event.target.value)} placeholder="准备开始时，需要按什么顺序做？" /></label>
             {(draft.project.status === "waiting" || draft.task.status === "waiting") && (
               <div className="project-waiting-editor">
                 <label><span>正在等待什么</span><input value={draft.task.waitingFor} onChange={(event) => updateTask("waitingFor", event.target.value)} /></label>
@@ -714,10 +739,26 @@ function emptyProposal(projectId: string): ProjectProposal {
   return { id: "", projectId, title: "", problem: "", expectedValue: "", cost: "", status: "pending", reviewNote: "", createdAt: now, updatedAt: now };
 }
 
-function contextLabel(context: ProjectTask["context"]) {
-  if (context === "computer") return "需要电脑";
-  if (context === "phone") return "手机可做";
-  return "任何地方都可推进";
+function normalizeProjectCategory(category: ProjectCategory): ProjectCategory {
+  return normalizeLifeDomain(category);
+}
+
+const genericProjectTaskTitles = new Set(["阅读与判断", "写作修订", "真实使用与反馈", "验收与整理", "方案判断"]);
+
+function projectTaskDisplayTitle(task: ProjectTask) {
+  if (!genericProjectTaskTitles.has(task.title.trim()) || !task.details.trim()) return task.title;
+  const firstSentence = task.details.trim().split(/[。；\n]/)[0];
+  return firstSentence.length > 38 ? `${firstSentence.slice(0, 38)}…` : firstSentence;
+}
+
+function encodeContinuationLog(targetId: string, label: string, text: string) {
+  return `接续点｜${targetId}｜${label.replaceAll("｜", "-")}｜${text.trim()}`;
+}
+
+function decodeContinuationLog(body: string) {
+  if (!body.startsWith("接续点｜")) return null;
+  const [, targetId = "", label = "当前推进", ...content] = body.split("｜");
+  return { targetId, label, text: content.join("｜").trim() };
 }
 
 function formatProjectDate(value: string) {

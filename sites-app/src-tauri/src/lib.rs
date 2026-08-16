@@ -48,8 +48,12 @@ async fn execute_sqlite_transaction(
             query = match value {
                 Value::Null => query.bind(Option::<String>::None),
                 Value::Bool(value) => query.bind(if value { 1_i64 } else { 0_i64 }),
-                Value::Number(value) if value.is_i64() => query.bind(value.as_i64().unwrap_or_default()),
-                Value::Number(value) if value.is_u64() => query.bind(value.as_u64().unwrap_or_default() as i64),
+                Value::Number(value) if value.is_i64() => {
+                    query.bind(value.as_i64().unwrap_or_default())
+                }
+                Value::Number(value) if value.is_u64() => {
+                    query.bind(value.as_u64().unwrap_or_default() as i64)
+                }
                 Value::Number(value) => query.bind(value.as_f64().unwrap_or_default()),
                 Value::String(value) => query.bind(value),
                 _ => {
@@ -106,17 +110,25 @@ fn latest_backup_path(app: tauri::AppHandle) -> Result<Option<BackupPath>, Strin
     let mut candidates = fs::read_dir(&directory)
         .map_err(|error| format!("无法读取备份目录：{error}"))?
         .filter_map(Result::ok)
-        .filter(|entry| {
-            entry.file_name().to_string_lossy().starts_with("mind-garden-")
-                && entry.path().extension().is_some_and(|value| value == "sqlite3")
-        })
+        .filter(|entry| is_primary_backup_name(&entry.file_name().to_string_lossy()))
         .collect::<Vec<_>>();
     candidates.sort_by_key(|entry| {
-        entry.metadata().and_then(|metadata| metadata.modified()).unwrap_or(UNIX_EPOCH)
+        entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(UNIX_EPOCH)
     });
     Ok(candidates.last().map(|entry| BackupPath {
         path: entry.path().to_string_lossy().into_owned(),
     }))
+}
+
+fn is_primary_backup_name(name: &str) -> bool {
+    name.strip_prefix("mind-garden-")
+        .and_then(|value| value.strip_suffix(".sqlite3"))
+        .is_some_and(|timestamp| {
+            !timestamp.is_empty() && timestamp.chars().all(|value| value.is_ascii_digit())
+        })
 }
 
 #[tauri::command]
@@ -150,7 +162,8 @@ fn restore_backup(app: tauri::AppHandle, source_path: String) -> Result<(), Stri
         .as_secs();
     let safety_copy = allowed_dir.join(format!("mind-garden-before-restore-{timestamp}.sqlite3"));
     let temporary = database.with_extension("restore.tmp");
-    fs::copy(&canonical_source, &temporary).map_err(|error| format!("无法准备恢复文件：{error}"))?;
+    fs::copy(&canonical_source, &temporary)
+        .map_err(|error| format!("无法准备恢复文件：{error}"))?;
     if database.exists() {
         fs::rename(&database, &safety_copy)
             .map_err(|error| format!("无法创建恢复前安全副本：{error}"))?;
@@ -192,6 +205,11 @@ fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     reveal_main_window(&app)
 }
 
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -208,26 +226,14 @@ pub fn run() {
 
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
-                app.handle().plugin(
-                    tauri_plugin_global_shortcut::Builder::new().build(),
-                )?;
+                app.handle()
+                    .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
 
-                let show_item = MenuItem::with_id(
-                    app,
-                    "show",
-                    "打开人生攻略库",
-                    true,
-                    None::<&str>,
-                )?;
-                let capture_item = MenuItem::with_id(
-                    app,
-                    "capture",
-                    "快速记录",
-                    true,
-                    None::<&str>,
-                )?;
-                let quit_item =
-                    MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+                let show_item =
+                    MenuItem::with_id(app, "show", "打开人生攻略库", true, None::<&str>)?;
+                let capture_item =
+                    MenuItem::with_id(app, "capture", "快速记录", true, None::<&str>)?;
+                let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
                 let menu = Menu::with_items(app, &[&show_item, &capture_item, &quit_item])?;
 
                 let mut tray = TrayIconBuilder::new()
@@ -242,7 +248,9 @@ pub fn run() {
                             let _ = reveal_main_window(app);
                             let _ = app.emit("open-quick-capture", ());
                         }
-                        "quit" => app.exit(0),
+                        "quit" => {
+                            let _ = app.emit("request-app-quit", ());
+                        }
                         _ => {}
                     })
                     .on_tray_icon_event(|tray, event| {
@@ -267,8 +275,24 @@ pub fn run() {
             latest_backup_path,
             restore_backup,
             execute_sqlite_transaction,
-            show_main_window
+            show_main_window,
+            quit_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running the life strategy library");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_primary_backup_name;
+
+    #[test]
+    fn selects_only_regular_timestamped_backups() {
+        assert!(is_primary_backup_name("mind-garden-1786800000.sqlite3"));
+        assert!(!is_primary_backup_name(
+            "mind-garden-before-restore-1786800000.sqlite3"
+        ));
+        assert!(!is_primary_backup_name("mind-garden-latest.sqlite3"));
+        assert!(!is_primary_backup_name("mind-garden-1786800000.db"));
+    }
 }

@@ -46,6 +46,10 @@ test("plans tasks and records a completed focus session", async () => {
     label: "验证首页任务",
   });
   assert.equal((await repository.getActiveSession())?.id, started.id);
+  await assert.rejects(
+    () => repository.startSession({ label: "不能同时开始的第二项专注" }),
+    /已经有一项专注正在进行/,
+  );
 
   now = new Date("2026-08-11T01:25:00.000Z");
   const stopped = await repository.stopSession(started.id);

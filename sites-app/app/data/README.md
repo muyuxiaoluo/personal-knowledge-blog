@@ -22,16 +22,19 @@ The repository creates its schema lazily and stores:
 - soft-delete tombstones;
 - the last server sync cursor.
 
-`listPendingChanges`, `markSynced`, `getSyncCursor`, and `setSyncCursor` are the
-boundary for the later cloud synchronization service.
+`listPendingChanges`, `getSyncCursor`, and `commitSyncResult` form the cloud
+synchronization boundary. Each pending change carries a deterministic
+`changeId`; upload acknowledgements, remote changes, conflict copies, and the
+next cursor are committed in one SQLite transaction.
 
 The desktop client now also uses `getDeviceId` and `applyRemoteChanges`.
 Same-version disagreements are never overwritten silently: the local edit is
 preserved as a visible conflict copy before the server version is applied.
 
-`CloudSyncClient` sends only pending changes to the private sync service and
-keeps its access token in memory. Login is optional, so an unavailable server
-never blocks local writing.
+`CloudSyncClient` sends pending changes only on the first page, validates every
+response element, follows the server cursor until `hasMore` is false, and aborts
+stalled requests after a timeout. It keeps its access token in memory. Login is
+optional, so an unavailable server never blocks local writing.
 
 ## 迁移规则
 

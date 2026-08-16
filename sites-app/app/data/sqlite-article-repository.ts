@@ -188,6 +188,7 @@ function isoDate(value: Date) {
 export class SqliteArticleRepository implements SyncCapableArticleRepository {
   private initialization: Promise<void> | null = null;
   private resolvedDeviceId = "";
+  private mutationQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly database: SqliteDatabase,
@@ -200,6 +201,20 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
 
   private now() {
     return (this.options.clock ?? (() => new Date()))();
+  }
+
+  private async runMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationQueue;
+    let release: () => void = () => {};
+    this.mutationQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   private async initialize() {
@@ -284,6 +299,7 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
   async list(): Promise<StoredArticle[]> {
     try {
       await this.initialize();
+      await this.mutationQueue;
       const rows = await this.database.select<ArticleRow>(
         `SELECT ${articleColumns}
          FROM articles
@@ -305,74 +321,100 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
 
     try {
       await this.initialize();
-      const now = isoDate(this.now());
-      const slug = article.slug || `${slugify(title)}-${this.now().getTime()}`;
-      const id = article.id || `${article.collection || "thoughts"}/${slug}`;
-      const created = article.created || now.slice(0, 10);
-      const collection = article.collection || "thoughts";
-      const collectionLabel = article.collectionLabel || "想法与随笔";
+      return await this.runMutation(async () => {
+        const now = isoDate(this.now());
+        const slug = article.slug || `${slugify(title)}-${this.now().getTime()}`;
+        const id = article.id || `${article.collection || "thoughts"}/${slug}`;
+        const created = article.created || now.slice(0, 10);
+        const collection = article.collection || "thoughts";
+        const collectionLabel = article.collectionLabel || "想法与随笔";
+        const expectedVersion = article.storage?.version ?? null;
 
-      await this.database.execute(
-        `INSERT INTO articles (${articleColumns})
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'pending', NULL)
-         ON CONFLICT(id) DO UPDATE SET
-           slug = excluded.slug,
-           collection = excluded.collection,
-           collection_label = excluded.collection_label,
-           title = excluded.title,
-           updated_at = excluded.updated_at,
-           branch = excluded.branch,
-           subbranch = excluded.subbranch,
-           stage = excluded.stage,
-           validity = excluded.validity,
-           category = excluded.category,
-           tags_json = excluded.tags_json,
-          type = excluded.type,
-          project = excluded.project,
-          project_id = excluded.project_id,
-           confidence = excluded.confidence,
-           source_json = excluded.source_json,
-           review_date = excluded.review_date,
-           summary = excluded.summary,
-           next_action = excluded.next_action,
-           body = excluded.body,
-           version = articles.version + 1,
-           device_id = excluded.device_id,
-           sync_status = 'pending',
-           deleted_at = NULL`,
-        [
-          id,
-          slug,
-          collection,
-          collectionLabel,
-          title,
-          created,
-          now,
-          article.branch || "待分类",
-          article.subbranch || "",
-          article.stage || "种子",
-          article.validity || "待验证",
-          article.category || collectionLabel,
-          JSON.stringify(article.tags || []),
-          article.type || "记录",
-          article.project || "",
-          article.projectId || "",
-          article.confidence || "低",
-          JSON.stringify(article.source || ["私人记录"]),
-          article.reviewDate || "",
-          article.summary || body.slice(0, 88),
-          article.next || "",
-          body,
-          this.resolvedDeviceId,
-        ],
-      );
+        const result = await this.database.execute(
+          `INSERT INTO articles (${articleColumns})
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'pending', NULL)
+           ON CONFLICT(id) DO UPDATE SET
+             slug = excluded.slug,
+             collection = excluded.collection,
+             collection_label = excluded.collection_label,
+             title = excluded.title,
+             updated_at = excluded.updated_at,
+             branch = excluded.branch,
+             subbranch = excluded.subbranch,
+             stage = excluded.stage,
+             validity = excluded.validity,
+             category = excluded.category,
+             tags_json = excluded.tags_json,
+             type = excluded.type,
+             project = excluded.project,
+             project_id = excluded.project_id,
+             confidence = excluded.confidence,
+             source_json = excluded.source_json,
+             review_date = excluded.review_date,
+             summary = excluded.summary,
+             next_action = excluded.next_action,
+             body = excluded.body,
+             version = articles.version + 1,
+             device_id = excluded.device_id,
+             sync_status = 'pending',
+             deleted_at = NULL
+           WHERE ? IS NULL OR articles.version = ?`,
+          [
+            id,
+            slug,
+            collection,
+            collectionLabel,
+            title,
+            created,
+            now,
+            article.branch || "待分类",
+            article.subbranch || "",
+            article.stage || "种子",
+            article.validity || "待验证",
+            article.category || collectionLabel,
+            JSON.stringify(article.tags || []),
+            article.type || "记录",
+            article.project || "",
+            article.projectId || "",
+            article.confidence || "低",
+            JSON.stringify(article.source || ["私人记录"]),
+            article.reviewDate || "",
+            article.summary || body.slice(0, 88),
+            article.next || "",
+            body,
+            this.resolvedDeviceId,
+            expectedVersion,
+            expectedVersion,
+          ],
+        );
 
-      const rows = await this.database.select<ArticleRow>(
-        `SELECT ${articleColumns} FROM articles WHERE id = ? LIMIT 1`,
-        [id],
-      );
-      if (!rows[0]) throw new Error("保存后未找到内容");
-      return rowToArticle(rows[0]);
+        if (expectedVersion !== null && result.rowsAffected === 0) {
+          throw new ArticleRepositoryError(
+            "这篇内容已在其他位置更新，当前草稿没有覆盖新版本。请复制草稿后重新打开笔记。",
+            "conflict",
+          );
+        }
+
+        const rows = await this.database.select<ArticleRow>(
+          `SELECT ${articleColumns} FROM articles WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        if (!rows[0]) throw new Error("保存后未找到内容");
+        const saved = rowToArticle(rows[0]);
+        if (
+          expectedVersion !== null &&
+          result.rowsAffected === undefined &&
+          (saved.storage.version !== expectedVersion + 1 ||
+            saved.storage.deviceId !== this.resolvedDeviceId ||
+            saved.storage.syncStatus !== "pending")
+        ) {
+          throw new ArticleRepositoryError(
+            "这篇内容已在其他位置更新，当前草稿没有覆盖新版本。请复制草稿后重新打开笔记。",
+            "conflict",
+          );
+        }
+        return saved;
+      });
     } catch (error) {
       if (error instanceof ArticleRepositoryError) throw error;
       throw new ArticleRepositoryError("保存到本地 SQLite 失败", "save_failed", error);
@@ -382,14 +424,16 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
   async remove(id: string): Promise<void> {
     try {
       await this.initialize();
-      const now = isoDate(this.now());
-      await this.database.execute(
-        `UPDATE articles
-         SET deleted_at = ?, updated_at = ?, version = version + 1,
-             device_id = ?, sync_status = 'pending'
-         WHERE id = ?`,
-        [now, now, this.resolvedDeviceId, id],
-      );
+      await this.runMutation(async () => {
+        const now = isoDate(this.now());
+        await this.database.execute(
+          `UPDATE articles
+           SET deleted_at = ?, updated_at = ?, version = version + 1,
+               device_id = ?, sync_status = 'pending'
+           WHERE id = ?`,
+          [now, now, this.resolvedDeviceId, id],
+        );
+      });
     } catch (error) {
       throw new ArticleRepositoryError("从本地 SQLite 移除失败", "remove_failed", error);
     }
@@ -397,6 +441,7 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
 
   async listPendingChanges(): Promise<ArticleChange[]> {
     await this.initialize();
+    await this.mutationQueue;
     const rows = await this.database.select<ArticleRow>(
       `SELECT ${articleColumns}
        FROM articles
@@ -406,29 +451,55 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
     return rows.map((row) => ({
       article: rowToArticle(row),
       operation: row.deleted_at ? "delete" : "upsert",
+      changeId: `${this.resolvedDeviceId}:${row.id}:${row.version}:${
+        row.deleted_at ? "delete" : "upsert"
+      }`,
     }));
   }
 
   async markSynced(versions: SyncedArticleVersion[]): Promise<void> {
     await this.initialize();
-    for (const item of versions) {
-      await this.database.execute(
-        `UPDATE articles
-         SET sync_status = 'synced'
-         WHERE id = ? AND version = ?`,
-        [item.id, item.version],
-      );
-    }
+    await this.runMutation(() =>
+      executeSqliteTransaction(
+        this.database,
+        versions.map(markSyncedStatement),
+      ),
+    );
   }
 
   async applyRemoteChanges(
     changes: ArticleChange[],
   ): Promise<RemoteApplyResult> {
     await this.initialize();
+    return this.runMutation(() => this.commitSyncResultInternal([], changes));
+  }
+
+  async commitSyncResult(
+    versions: SyncedArticleVersion[],
+    changes: ArticleChange[],
+    cursor: string,
+  ): Promise<RemoteApplyResult> {
+    await this.initialize();
+    return this.runMutation(() =>
+      this.commitSyncResultInternal(versions, changes, cursor),
+    );
+  }
+
+  private async commitSyncResultInternal(
+    versions: SyncedArticleVersion[],
+    changes: ArticleChange[],
+    cursor?: string,
+  ): Promise<RemoteApplyResult> {
     let applied = 0;
     let conflicts = 0;
+    const statements = versions.map(markSyncedStatement);
+    const acceptedVersions = new Map(
+      versions.map((item) => [item.id, item.version]),
+    );
+    const latestChanges = new Map<string, ArticleChange>();
+    for (const change of changes) latestChanges.set(change.article.id, change);
 
-    for (const change of changes) {
+    for (const change of latestChanges.values()) {
       const remote = change.article;
       const rows = await this.database.select<ArticleRow>(
         `SELECT ${articleColumns} FROM articles WHERE id = ? LIMIT 1`,
@@ -436,45 +507,63 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
       );
       const local = rows[0] ? rowToArticle(rows[0]) : null;
       const sameContent =
-        local &&
-        JSON.stringify(articleContent(local)) ===
-          JSON.stringify(articleContent(remote));
+        local && contentFingerprint(local) === contentFingerprint(remote);
+      const localWasAccepted =
+        local && acceptedVersions.get(local.id) === local.storage.version;
+      const effectiveStatus = localWasAccepted
+        ? "synced"
+        : local?.storage.syncStatus;
 
       if (
         local &&
-        ["pending", "conflict"].includes(local.storage.syncStatus) &&
+        (effectiveStatus === "pending" || effectiveStatus === "conflict") &&
         !sameContent
       ) {
-        await this.preserveConflictCopy(local);
+        statements.push(this.preserveConflictCopyStatement(local, remote));
         conflicts += 1;
       }
 
       if (
         local &&
-        local.storage.syncStatus === "synced" &&
+        effectiveStatus === "synced" &&
         local.storage.version > remote.storage.version
       ) {
         continue;
       }
 
-      await this.writeRemoteArticle(remote);
+      statements.push(writeRemoteArticleStatement(remote));
       applied += 1;
     }
 
+    if (cursor !== undefined) statements.push(syncCursorStatement(cursor));
+    await executeSqliteTransaction(this.database, statements);
     return { applied, conflicts };
   }
 
-  private async preserveConflictCopy(article: StoredArticle) {
-    if (article.storage.deletedAt) return;
-    const stamp = this.now().getTime();
-    const conflictId = `${article.id}#conflict-${stamp}`;
-    await this.database.execute(
-      `INSERT INTO articles (${articleColumns})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'conflict', NULL)
-       ON CONFLICT(id) DO NOTHING`,
-      [
+  private preserveConflictCopyStatement(
+    article: StoredArticle,
+    remote: StoredArticle,
+  ): SqliteStatement {
+    const identity = [
+      article.id,
+      article.storage.deviceId,
+      article.storage.version,
+      remote.storage.deviceId,
+      remote.storage.version,
+      contentFingerprint(article),
+    ].join("|");
+    const suffix = stableHash(identity);
+    const conflictId = `${article.id.slice(0, 270)}#conflict-${suffix}`;
+    const sources = article.source.includes("同步冲突保护")
+      ? article.source
+      : [...article.source, "同步冲突保护"];
+    return {
+      sql: `INSERT INTO articles (${articleColumns})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'conflict', NULL)
+            ON CONFLICT(id) DO NOTHING`,
+      bindValues: [
         conflictId,
-        `${article.slug}-conflict-${stamp}`,
+        `${article.slug.slice(0, 60)}-conflict-${suffix}`,
         article.collection,
         article.collectionLabel,
         `${article.title}（冲突副本）`,
@@ -490,74 +579,14 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
         article.project,
         article.projectId || "",
         article.confidence,
-        JSON.stringify([...article.source, "同步冲突保护"]),
+        JSON.stringify(sources),
         article.reviewDate,
         article.summary,
         article.next,
         article.body,
         this.resolvedDeviceId,
       ],
-    );
-  }
-
-  private async writeRemoteArticle(article: StoredArticle) {
-    await this.database.execute(
-      `INSERT INTO articles (${articleColumns})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', ?)
-       ON CONFLICT(id) DO UPDATE SET
-         slug = excluded.slug,
-         collection = excluded.collection,
-         collection_label = excluded.collection_label,
-         title = excluded.title,
-         created_at = excluded.created_at,
-         updated_at = excluded.updated_at,
-         branch = excluded.branch,
-         subbranch = excluded.subbranch,
-         stage = excluded.stage,
-         validity = excluded.validity,
-         category = excluded.category,
-         tags_json = excluded.tags_json,
-         type = excluded.type,
-         project = excluded.project,
-         project_id = excluded.project_id,
-         confidence = excluded.confidence,
-         source_json = excluded.source_json,
-         review_date = excluded.review_date,
-         summary = excluded.summary,
-         next_action = excluded.next_action,
-         body = excluded.body,
-         version = excluded.version,
-         device_id = excluded.device_id,
-         sync_status = 'synced',
-         deleted_at = excluded.deleted_at`,
-      [
-        article.id,
-        article.slug,
-        article.collection,
-        article.collectionLabel,
-        article.title,
-        article.created,
-        article.updated,
-        article.branch,
-        article.subbranch,
-        article.stage,
-        article.validity,
-        article.category,
-        JSON.stringify(article.tags),
-        article.type,
-        article.project,
-        article.projectId || "",
-        article.confidence,
-        JSON.stringify(article.source),
-        article.reviewDate,
-        article.summary,
-        article.next,
-        article.body,
-        article.storage.version,
-        article.storage.deviceId,
-        article.storage.deletedAt,
-      ],
-    );
+    };
   }
 
   async createBackup(targetPath: string): Promise<void> {
@@ -565,11 +594,14 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
     if (!targetPath.trim()) {
       throw new ArticleRepositoryError("备份路径不能为空", "invalid_data");
     }
-    await this.database.execute("VACUUM INTO ?", [targetPath]);
+    await this.runMutation(() =>
+      this.database.execute("VACUUM INTO ?", [targetPath]).then(() => undefined),
+    );
   }
 
   async getSyncCursor(): Promise<string> {
     await this.initialize();
+    await this.mutationQueue;
     const rows = await this.database.select<{ value: string }>(
       "SELECT value FROM app_meta WHERE key = 'sync_cursor' LIMIT 1",
     );
@@ -578,16 +610,119 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
 
   async setSyncCursor(cursor: string): Promise<void> {
     await this.initialize();
-    await this.database.execute(
-      `INSERT INTO app_meta(key, value) VALUES('sync_cursor', ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-      [cursor],
+    await this.runMutation(() =>
+      executeSqliteTransaction(this.database, [syncCursorStatement(cursor)]),
     );
   }
 }
 
-function articleContent(article: Article) {
-  const { storage, ...content } = article;
-  void storage;
-  return content;
+function markSyncedStatement(item: SyncedArticleVersion): SqliteStatement {
+  return {
+    sql: `UPDATE articles
+          SET sync_status = 'synced'
+          WHERE id = ? AND version = ?`,
+    bindValues: [item.id, item.version],
+  };
+}
+
+function syncCursorStatement(cursor: string): SqliteStatement {
+  return {
+    sql: `INSERT INTO app_meta(key, value) VALUES('sync_cursor', ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    bindValues: [cursor],
+  };
+}
+
+function writeRemoteArticleStatement(article: StoredArticle): SqliteStatement {
+  return {
+    sql: `INSERT INTO articles (${articleColumns})
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', ?)
+          ON CONFLICT(id) DO UPDATE SET
+            slug = excluded.slug,
+            collection = excluded.collection,
+            collection_label = excluded.collection_label,
+            title = excluded.title,
+            created_at = excluded.created_at,
+            updated_at = excluded.updated_at,
+            branch = excluded.branch,
+            subbranch = excluded.subbranch,
+            stage = excluded.stage,
+            validity = excluded.validity,
+            category = excluded.category,
+            tags_json = excluded.tags_json,
+            type = excluded.type,
+            project = excluded.project,
+            project_id = excluded.project_id,
+            confidence = excluded.confidence,
+            source_json = excluded.source_json,
+            review_date = excluded.review_date,
+            summary = excluded.summary,
+            next_action = excluded.next_action,
+            body = excluded.body,
+            version = excluded.version,
+            device_id = excluded.device_id,
+            sync_status = 'synced',
+            deleted_at = excluded.deleted_at`,
+    bindValues: [
+      article.id,
+      article.slug,
+      article.collection,
+      article.collectionLabel,
+      article.title,
+      article.created,
+      article.updated,
+      article.branch,
+      article.subbranch,
+      article.stage,
+      article.validity,
+      article.category,
+      JSON.stringify(article.tags),
+      article.type,
+      article.project,
+      article.projectId || "",
+      article.confidence,
+      JSON.stringify(article.source),
+      article.reviewDate,
+      article.summary,
+      article.next,
+      article.body,
+      article.storage.version,
+      article.storage.deviceId,
+      article.storage.deletedAt,
+    ],
+  };
+}
+
+function contentFingerprint(article: Article) {
+  return JSON.stringify({
+    id: article.id,
+    slug: article.slug,
+    collection: article.collection,
+    collectionLabel: article.collectionLabel,
+    title: article.title,
+    branch: article.branch,
+    subbranch: article.subbranch,
+    stage: article.stage,
+    validity: article.validity,
+    category: article.category,
+    tags: article.tags,
+    type: article.type,
+    project: article.project,
+    projectId: article.projectId || "",
+    confidence: article.confidence,
+    source: article.source,
+    reviewDate: article.reviewDate,
+    summary: article.summary,
+    next: article.next,
+    body: article.body,
+  });
+}
+
+function stableHash(value: string) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36).padStart(7, "0");
 }

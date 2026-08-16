@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isRegistered, register } from "@tauri-apps/plugin-global-shortcut";
 import Database from "@tauri-apps/plugin-sql";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -68,6 +69,7 @@ export function DesktopApp() {
   const [backingUp, setBackingUp] = useState(false);
   const [revision, setRevision] = useState(0);
   const [mutationRevision, setMutationRevision] = useState(0);
+  const [workbenchEditing, setWorkbenchEditing] = useState(false);
   const [notice, setNotice] = useState<SyncNotice>({
     tone: "quiet",
     text: "本地资料库准备中…",
@@ -78,6 +80,31 @@ export function DesktopApp() {
   });
   const autoSyncTimer = useRef<number | null>(null);
   const syncInFlight = useRef(false);
+
+  useEffect(() => {
+    if (notice.tone !== "success" || !notice.text) return;
+    const timer = window.setTimeout(() => setNotice({ tone: "quiet", text: "" }), 3600);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: UnlistenFn | undefined;
+    let disposed = false;
+    void listen("request-app-quit", () => {
+      if (workbenchEditing && !window.confirm("当前编辑还没有结束，确认退出应用吗？")) return;
+      void invoke("quit_app");
+    })
+      .then((dispose) => {
+        if (disposed) dispose();
+        else unlisten = dispose;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [workbenchEditing]);
 
   useEffect(() => {
     if (!isTauri() || shortcutInitialization) return;
@@ -151,6 +178,12 @@ export function DesktopApp() {
   const syncNow = useCallback(
     async (showSuccess = true) => {
       if (!syncClient || !runtime || !session || syncInFlight.current) return;
+      if (workbenchEditing) {
+        if (showSuccess) {
+          setNotice({ tone: "warning", text: "请先保存或退出当前编辑，再开始同步。" });
+        }
+        return;
+      }
       syncInFlight.current = true;
       setSyncing(true);
       setNotice({ tone: "quiet", text: "正在安全同步…" });
@@ -173,11 +206,11 @@ export function DesktopApp() {
         setSyncing(false);
       }
     },
-    [runtime, session, syncClient, updatePendingCount],
+    [runtime, session, syncClient, updatePendingCount, workbenchEditing],
   );
 
   useEffect(() => {
-    if (!session || !mutationRevision) return;
+    if (!session || !mutationRevision || workbenchEditing) return;
     if (autoSyncTimer.current) window.clearTimeout(autoSyncTimer.current);
     autoSyncTimer.current = window.setTimeout(() => {
       void syncNow(false);
@@ -185,11 +218,16 @@ export function DesktopApp() {
     return () => {
       if (autoSyncTimer.current) window.clearTimeout(autoSyncTimer.current);
     };
-  }, [mutationRevision, session, syncNow]);
+  }, [mutationRevision, session, syncNow, workbenchEditing]);
 
   async function login(event: React.FormEvent) {
     event.preventDefault();
     if (!syncClient || !username.trim() || !password) return;
+    if (workbenchEditing) {
+      setNotice({ tone: "warning", text: "请先保存或退出当前编辑，再登录同步。" });
+      setShowAccount(false);
+      return;
+    }
     setSyncing(true);
     setNotice({ tone: "quiet", text: "正在登录同步账户…" });
     try {
@@ -250,8 +288,12 @@ export function DesktopApp() {
       await invoke("restore_backup", { sourcePath: latest.path });
       await relaunch();
     } catch (error) {
-      setNotice({ tone: "warning", text: error instanceof Error ? error.message : "恢复备份失败" });
+      const message = error instanceof Error ? error.message : "恢复备份失败";
       setBackingUp(false);
+      window.alert(`${message}\n\n资料库连接已经关闭，应用将立即重启以恢复正常使用。`);
+      await relaunch().catch(() => {
+        setNotice({ tone: "warning", text: `${message}；请手动重新启动应用。` });
+      });
     }
   }
 
@@ -285,21 +327,21 @@ export function DesktopApp() {
       {notice.text && notice.tone !== "quiet" && <div className="floating-system-alert system-alert visible"><i className={notice.tone} /><span>{notice.text}</span></div>}
 
       <DesktopWorkbench
-        key={revision}
         repository={runtime.articleRepository}
         projectRepository={runtime.projectRepository}
         workRepository={runtime.workRepository}
+        dataRevision={revision}
         themeMode={themeMode}
+        backingUp={backingUp}
+        onThemeChange={changeTheme}
+        onCreateBackup={() => void createBackup()}
+        onRestoreBackup={() => void restoreLatestBackup()}
+        onEditingStateChange={setWorkbenchEditing}
         accountDock={
           <AccountDock
             session={session}
             pendingCount={pendingCount}
             syncing={syncing}
-            backingUp={backingUp}
-            themeMode={themeMode}
-            onTheme={changeTheme}
-            onBackup={() => void createBackup()}
-            onRestore={() => void restoreLatestBackup()}
             onSync={() => session ? void syncNow() : setShowAccount(true)}
             onAccount={() => setShowAccount(true)}
           />
@@ -403,10 +445,13 @@ function syncMessage(
       text: `同步完成，并保留了 ${result.conflicts} 条冲突副本。`,
     };
   }
-  if (!showSuccess || (!result.uploaded && !result.downloaded)) return { tone: "quiet", text: "" };
+  if (!showSuccess) return { tone: "quiet", text: "" };
+  if (!result.uploaded && !result.downloaded) {
+    return { tone: "success", text: "同步完成，当前已经是最新状态。" };
+  }
   return {
-    tone: "quiet",
-    text: "",
+    tone: "success",
+    text: `同步完成：上传 ${result.uploaded} 条，接收 ${result.downloaded} 条。`,
   };
 }
 
@@ -414,41 +459,46 @@ function AccountDock({
   session,
   pendingCount,
   syncing,
-  backingUp,
-  themeMode,
-  onTheme,
-  onBackup,
-  onRestore,
   onSync,
   onAccount,
 }: {
   session: LoginResult | null;
   pendingCount: number;
   syncing: boolean;
-  backingUp: boolean;
-  themeMode: ThemeMode;
-  onTheme: (mode: ThemeMode) => void;
-  onBackup: () => void;
-  onRestore: () => void;
   onSync: () => void;
   onAccount: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const dockRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function closeOutside(event: PointerEvent) {
+      if (!dockRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
   return (
-    <div className="sidebar-account-dock">
-      <button className="account-dock-trigger" onClick={() => setOpen((value) => !value)} title="账户与数据">
-        <i><WorkbenchIcon name="account" /></i><span><strong>{session?.username || "本地工作台"}</strong><small>{session ? pendingCount ? `${pendingCount} 条待同步` : "已连接同步" : "账户与数据"}</small></span><b>{open ? "×" : "⌃"}</b>
+    <div className="sidebar-account-dock" ref={dockRef}>
+      <button className="account-dock-trigger" onClick={() => setOpen((value) => !value)} title="账户与更新">
+        <i><WorkbenchIcon name="account" /></i><span><strong>{session?.username || "本地工作台"}</strong><small>{session ? pendingCount ? `${pendingCount} 条待同步` : "已连接同步" : "账户与更新"}</small></span><b>{open ? "×" : "⌃"}</b>
       </button>
       {open && <section className="account-dock-menu">
-        <header><span>账户与数据</span><strong>{session ? session.username : "仅保存在本机"}</strong></header>
+        <header><span>账户与更新</span><strong>{session ? session.username : "仅保存在本机"}</strong></header>
         <nav>
-          <button disabled={backingUp} onClick={onBackup}><i>⇩</i><span><strong>{backingUp ? "正在备份" : "本地备份"}</strong><small>导出资料库副本</small></span></button>
-          <button disabled={backingUp} onClick={onRestore}><i>↺</i><span><strong>恢复最近备份</strong><small>恢复前会自动保留当前资料库</small></span></button>
           <button disabled={syncing} onClick={onSync}><i>↻</i><span><strong>{session ? syncing ? "正在同步" : "立即同步" : "登录同步"}</strong><small>{session ? pendingCount ? `${pendingCount} 条本地变更` : "当前没有待同步变更" : "连接自己的服务器"}</small></span></button>
-          <button onClick={onAccount}><i>◉</i><span><strong>账户设置</strong><small>云同步目前覆盖笔记；完整工作台请使用本地备份</small></span></button>
+          <button onClick={onAccount}><i>◉</i><span><strong>账户设置</strong><small>管理登录状态与同步服务器</small></span></button>
           <div className="account-update-entry"><AppUpdater /></div>
         </nav>
-        <div className="theme-mode-control"><span>主题强度</span><div>{([ ["minimal", "简洁"], ["magic", "魔法"], ["immersive", "沉浸"] ] as const).map(([value, label]) => <button className={themeMode === value ? "active" : ""} key={value} onClick={() => onTheme(value)}>{label}</button>)}</div></div>
       </section>}
     </div>
   );

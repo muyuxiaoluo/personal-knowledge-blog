@@ -1,9 +1,9 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { isInboxArticle } from "../app/article-helpers";
+import { isSourceArticle, isThoughtInboxArticle, pickRediscoverySource } from "../app/article-helpers";
+import { calendarDayDifference, formatRelativeDueDate } from "../app/date-helpers";
 import type {
-  ActionType,
   ProjectDetail,
   ProjectStatus,
   ProjectSummary,
@@ -15,7 +15,6 @@ import type { DailyCloseout, FocusSession, TaskPlan, WeeklyFocus } from "../app/
 export type WorkspaceTask = ProjectTask & {
   projectTitle: string;
   projectStatus: ProjectStatus;
-  projectReviewDate: string;
   stageTitle: string;
   stageDueDate: string;
   stageIndex: number;
@@ -29,9 +28,7 @@ export type NewActionInput = {
   projectId: string;
   milestoneId: string | null;
   title: string;
-  actionType: ActionType;
   details: string;
-  benefit: string;
   dueDate: string;
   plannedToday: boolean;
 };
@@ -43,16 +40,6 @@ type TaskActions = {
   onStartFocus: (task: WorkspaceTask) => void;
   onStopFocus: () => void;
   activeSession: FocusSession | null;
-};
-
-const actionMeta: Record<ActionType, { label: string; symbol: string }> = {
-  read: { label: "阅读理解", symbol: "阅" },
-  write: { label: "写作输出", symbol: "写" },
-  experiment: { label: "实验验证", symbol: "验" },
-  decide: { label: "决策判断", symbol: "判" },
-  organize: { label: "整理归纳", symbol: "理" },
-  communicate: { label: "沟通等待", symbol: "联" },
-  life: { label: "生活事务", symbol: "生" },
 };
 
 export function HomeDashboard({
@@ -86,13 +73,16 @@ export function HomeDashboard({
     .filter((task) => task.status !== "done" && task.status !== "waiting" && task.projectStatus === "active")
     .sort((left, right) => taskRank(left, today) - taskRank(right, today));
   const planned = available.filter((task) => task.plan?.plannedDate === today);
-  const urgent = available.filter((task) => !planned.includes(task) && isDueSoon(task, today));
-  const suggested = available.filter((task) => !planned.includes(task) && !urgent.includes(task) && task.status === "next");
-  const primaryTask = planned[0] ?? urgent[0] ?? suggested[0] ?? null;
-  const alternatives = [...planned.slice(primaryTask === planned[0] ? 1 : 0), ...urgent.filter((task) => task.id !== primaryTask?.id), ...suggested.filter((task) => task.id !== primaryTask?.id)].slice(0, 2);
+  const primaryTask = planned[0] ?? null;
+  const alternatives = planned.slice(1, 3);
   const echo = selectContextualEcho(articles, primaryTask, today);
+  const rediscovery = pickRediscoverySource(
+    articles,
+    primaryTask ? `${primaryTask.projectTitle} ${primaryTask.stageTitle} ${primaryTask.title} ${primaryTask.details}` : weeklyFocus?.primaryOutcome || "",
+    today,
+  );
   const completedToday = tasks.filter((task) => task.completedAt?.slice(0, 10) === today).length;
-  const notesToday = articles.filter((article) => (article.updated || article.created).slice(0, 10) === today).length;
+  const notesToday = articles.filter((article) => !isSourceArticle(article) && !isThoughtInboxArticle(article) && (article.updated || article.created).slice(0, 10) === today).length;
 
   return (
     <div className="home-dashboard home-launchpad workspace-scroll">
@@ -111,56 +101,51 @@ export function HomeDashboard({
         <button>保存本周聚焦</button>
       </form>}
 
-      <section className="home-strategy-card workspace-card">
-        <header>
-          <div><span>{planned.includes(primaryTask!) ? "今日行动" : urgent.includes(primaryTask!) ? "临近截止" : "建议选择"}</span><strong>{primaryTask?.projectTitle || "今天还没有安排行动"}</strong></div>
-          {primaryTask && <button onClick={() => onOpenProject(primaryTask.projectId)}>进入项目</button>}
-        </header>
-        {primaryTask ? (
-          <div className="home-strategy-body">
-            <div className="home-action-mark"><i>{actionMeta[primaryTask.actionType].symbol}</i><span>{actionMeta[primaryTask.actionType].label}</span></div>
-            <div className="home-action-core">
-              <p><span>阶段 {primaryTask.stageIndex}/{primaryTask.stageCount}</span><b>{primaryTask.stageTitle || "未关联阶段"}</b>{actionDueDate(primaryTask) && <time>{formatDueDate(actionDueDate(primaryTask))}</time>}</p>
-              <h1>{primaryTask.title}</h1>
-              {primaryTask.benefit && <blockquote>{primaryTask.benefit}</blockquote>}
-              <StageProgress task={primaryTask} />
-              <details className="action-disclosure">
-                <summary>准备开始时展开具体做法</summary>
-                <p>{primaryTask.details || "还没有补充具体做法。可以进入项目后编辑这条行动。"}</p>
-              </details>
-              <div className="home-strategy-actions">
-                <button className="primary" onClick={() => taskActions.onCompleteTask(primaryTask)}>✓ 记为完成</button>
-                {taskActions.activeSession?.taskId === primaryTask.id
-                  ? <button onClick={taskActions.onStopFocus}>■ 结束投入</button>
-                  : !taskActions.activeSession && <button onClick={() => taskActions.onStartFocus(primaryTask)}>▷ 开始投入</button>}
-                {primaryTask.plan?.plannedDate === today
-                  ? <button onClick={() => taskActions.onRemoveFromToday(primaryTask)}>取消今日标记</button>
-                  : <button onClick={() => taskActions.onPlanToday(primaryTask)}>标记为今日推进</button>}
+      <div className={`home-primary-grid ${alternatives.length ? "with-alternatives" : ""}`}>
+        <section className="home-strategy-card workspace-card">
+          <header>
+            <div><span>今日行动</span><strong>{primaryTask?.projectTitle || "尚未安排"}</strong></div>
+            {primaryTask && <button onClick={() => onOpenProject(primaryTask.projectId)}>进入项目</button>}
+          </header>
+          {primaryTask ? (
+            <div className="home-strategy-body">
+              <div className="home-action-core">
+                <p><span>阶段 {primaryTask.stageIndex}/{primaryTask.stageCount}</span><b>{primaryTask.stageTitle || "未关联阶段"}</b>{actionDueDate(primaryTask) && <time>{formatDueDate(actionDueDate(primaryTask))}</time>}</p>
+                <h1>{actionDisplayTitle(primaryTask)}</h1>
+                <StageProgress task={primaryTask} />
+                <details className="action-disclosure">
+                  <summary>准备开始时展开具体做法</summary>
+                  <p>{primaryTask.details || "还没有补充具体做法。可以进入项目后编辑这条行动。"}</p>
+                </details>
+                <div className="home-strategy-actions">
+                  <button className="primary" onClick={() => taskActions.onCompleteTask(primaryTask)}>✓ 记为完成</button>
+                  {taskActions.activeSession?.taskId === primaryTask.id
+                    ? <button onClick={taskActions.onStopFocus}>■ 结束投入</button>
+                    : !taskActions.activeSession && <button onClick={() => taskActions.onStartFocus(primaryTask)}>▷ 开始投入</button>}
+                  <button onClick={() => taskActions.onRemoveFromToday(primaryTask)}>取消今日安排</button>
+                </div>
               </div>
             </div>
-          </div>
-        ) : (
-          <EmptyState title="今天还没有行动" body="可以去今日行动中挑选一项，也可以先进入项目看看当前阶段。" />
-        )}
-      </section>
-
-      <div className="home-support-grid">
-        <section className="workspace-card home-alternatives">
-          <CardHeader title="之后可以做" subtitle="只保留两项可选行动" />
-          {alternatives.length ? alternatives.map((task) => (
-            <button key={task.id} onClick={onOpenTasks}>
-              <i>{actionMeta[task.actionType].symbol}</i>
-              <span><strong>{task.title}</strong><small>{task.projectTitle} · {task.stageTitle || "未关联阶段"}</small></span>
-              <em>{actionDueDate(task) ? formatDueDate(actionDueDate(task)) : "无硬性截止"}</em>
-            </button>
-          )) : <p className="compact-empty">没有额外候选项。</p>}
+          ) : (
+            <div className="home-empty-today"><EmptyState title="今天还没有安排" body="挑选一项真正准备推进的行动，首页才会显示它。" /><button onClick={onOpenTasks}>安排今日行动 →</button></div>
+          )}
         </section>
 
-        <section className="workspace-card home-footprint">
-          <CardHeader title="今天留下的结果" subtitle="由完成行动和内容更新自动形成" />
-          <div><span><strong>{completedToday}</strong> 项行动完成</span><span><strong>{notesToday}</strong> 条内容更新</span></div>
-          <p>{completedToday || notesToday ? "今天已经留下可追溯的结果。" : "还没有记录也没关系，完成或写下一点结果后会出现在这里。"}</p>
-        </section>
+        <aside className="home-primary-side">
+          <section className="workspace-card home-footprint">
+            <CardHeader title="今天留下的结果" subtitle="" />
+            <div><span><strong>{completedToday}</strong> 项行动完成</span><span><strong>{notesToday}</strong> 条笔记更新</span></div>
+          </section>
+          {alternatives.length > 0 && <section className="workspace-card home-alternatives">
+            <CardHeader title="接下来" subtitle="今日已安排" />
+            {alternatives.map((task) => (
+              <button key={task.id} onClick={onOpenTasks}>
+                <span><strong>{actionDisplayTitle(task)}</strong><small>{task.projectTitle} · {task.stageTitle || "未关联阶段"}</small></span>
+                <em>{actionDueDate(task) ? formatDueDate(actionDueDate(task)) : "稍后"}</em>
+              </button>
+            ))}
+          </section>}
+        </aside>
       </div>
 
       <div className="home-bottom-grid">
@@ -175,6 +160,15 @@ export function HomeDashboard({
             </details>
           ) : <p className="compact-empty">还没有找到和当前阶段足够相关的旧记录。</p>}
         </section>
+        {rediscovery && <section className="workspace-card home-rediscovery-card">
+          <CardHeader title="收藏回响" subtitle="让收藏在需要时重新出现" />
+          <div>
+            <span>{rediscovery.reason}</span>
+            <strong>{rediscovery.article.title}</strong>
+            <p>{rediscovery.article.summary || plainExcerpt(rediscovery.article.body)}</p>
+          </div>
+          {sourceUrl(rediscovery.article) && <button onClick={() => void openExternalUrl(sourceUrl(rediscovery.article))}>重新打开 ↗</button>}
+        </section>}
       </div>
     </div>
   );
@@ -204,9 +198,7 @@ export function TasksPage({
   const [projectId, setProjectId] = useState(initialProjectId);
   const [milestoneId, setMilestoneId] = useState("");
   const [title, setTitle] = useState("");
-  const [actionType, setActionType] = useState<ActionType>("organize");
   const [details, setDetails] = useState("");
-  const [benefit, setBenefit] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [planOnSave, setPlanOnSave] = useState(false);
   const available = tasks.filter((task) => task.status !== "done" && task.status !== "waiting" && task.projectStatus === "active").sort((a, b) => taskRank(a, today) - taskRank(b, today));
@@ -227,8 +219,8 @@ export function TasksPage({
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!title.trim() || !projectId) return;
-    await onAddTask({ projectId, milestoneId: milestoneId || null, title: title.trim(), actionType, details: details.trim(), benefit: benefit.trim(), dueDate, plannedToday: planOnSave });
-    setTitle(""); setDetails(""); setBenefit(""); setDueDate(""); setActionType("organize"); setPlanOnSave(false); setShowComposer(false);
+    await onAddTask({ projectId, milestoneId: milestoneId || null, title: title.trim(), details: details.trim(), dueDate, plannedToday: planOnSave });
+    setTitle(""); setDetails(""); setDueDate(""); setPlanOnSave(false); setShowComposer(false);
   }
 
   return (
@@ -249,11 +241,10 @@ export function TasksPage({
       <section className="task-list-shell action-list-shell">
         <header><div><strong>{tab === "today" ? "今天已经选择" : tab === "soon" ? "需要留意的截止" : tab === "candidate" ? "从项目阶段中挑选" : tab === "waiting" ? "暂时不用盯着" : "已经留下的结果"}</strong></div></header>
         <div className="task-list-large">
-          {visible.length ? visible.map((task, index) => (
+          {visible.length ? visible.map((task) => (
             <ActionRow
               key={task.id}
               task={task}
-              index={index}
               today={today}
               done={tab === "done"}
               onOpenProject={onOpenProject}
@@ -271,13 +262,9 @@ export function TasksPage({
             <form onSubmit={submit}>
               <label><span>所属项目</span><select value={projectId} onChange={(event) => chooseProject(event.target.value)}><option value="">选择项目</option>{projects.filter((project) => project.status !== "completed").map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></label>
               <label><span>所属阶段</span><select value={milestoneId} onChange={(event) => setMilestoneId(event.target.value)}><option value="">暂不关联</option>{selectedProject?.milestones.map((milestone) => <option key={milestone.id} value={milestone.id}>{milestone.status === "current" ? "当前 · " : ""}{milestone.title}</option>)}</select></label>
-              <div className="task-drawer-grid">
-                <label><span>行动类型</span><select value={actionType} onChange={(event) => setActionType(event.target.value as ActionType)}>{Object.entries(actionMeta).map(([value, meta]) => <option value={value} key={value}>{meta.label}</option>)}</select></label>
-                <label><span>截止时间</span><input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} /></label>
-              </div>
-              <label><span>折叠时显示的名称</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：阅读与判断、第一章修订" /></label>
-              <label><span>展开后的具体做法</span><textarea value={details} onChange={(event) => setDetails(event.target.value)} placeholder="真正准备开始时，需要具体做什么？" /></label>
-              <label><span>完成它有什么帮助</span><textarea value={benefit} onChange={(event) => setBenefit(event.target.value)} placeholder="它会推动哪个判断、结果或阶段？" /></label>
+              <label><span>下一步要做什么</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：比较三个方向并写下结论" /></label>
+              <label><span>具体做法</span><textarea value={details} onChange={(event) => setDetails(event.target.value)} placeholder="真正准备开始时，需要按什么顺序做？" /></label>
+              <label><span>截止时间 · 可选</span><input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} /></label>
               <label className="task-today-toggle"><input type="checkbox" checked={planOnSave} onChange={(event) => setPlanOnSave(event.target.checked)} /><span><strong>安排到今天</strong><small>不会启动计时，也可以随时撤销</small></span></label>
               <footer><button type="button" onClick={() => setShowComposer(false)}>取消</button><button className="primary" disabled={!title.trim() || !projectId}>保存行动</button></footer>
             </form>
@@ -288,18 +275,67 @@ export function TasksPage({
   );
 }
 
-export function ExplorePage({ articles, onSaveLink, onOpenArticle }: { articles: StoredArticle[]; onSaveLink: (url: string, note: string) => Promise<void>; onOpenArticle: (article: StoredArticle) => void }) {
-  const [url, setUrl] = useState("");
+export function ExplorePage({ articles, onSaveLink, onArchive, onDelete }: {
+  articles: StoredArticle[];
+  onSaveLink: (url: string, note: string) => Promise<boolean>;
+  onArchive: (article: StoredArticle, archived: boolean) => Promise<void>;
+  onDelete: (article: StoredArticle) => Promise<void>;
+}) {
+  const [capture, setCapture] = useState("");
   const [note, setNote] = useState("");
-  const sources = articles.filter((article) => article.collection === "sources" || article.type === "外部资料");
-  async function submit(event: FormEvent) { event.preventDefault(); if (!url.trim()) return; await onSaveLink(url.trim(), note.trim()); setUrl(""); setNote(""); }
+  const [error, setError] = useState("");
+  const sources = articles.filter(isSourceArticle);
+  const savedSources = sources.filter((article) => article.branch !== "已归档");
+  const archivedSources = sources.filter((article) => article.branch === "已归档");
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    const url = extractFirstUrl(capture);
+    if (!url) {
+      setError("没有识别到有效链接，请检查粘贴内容。");
+      return;
+    }
+    const saved = await onSaveLink(url, note.trim());
+    if (!saved) return;
+    setCapture("");
+    setNote("");
+    setError("");
+  }
+
   return (
     <div className="explore-page workspace-scroll">
-      <header className="workspace-page-heading"><div><h1>探索库</h1><p>留下外部链接和兴趣线索，之后再决定是否值得转化为自己的内容。</p></div></header>
-      <form className="link-capture-card" onSubmit={submit}><div><span>收进探索库</span><strong>粘贴 B站、抖音、文章或其他链接</strong></div><input type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://..." /><input value={note} onChange={(event) => setNote(event.target.value)} placeholder="为什么想留下它？可选" /><button disabled={!url.trim()}>保存链接</button></form>
-      <section className="source-inbox"><CardHeader title="兴趣线索" subtitle="打开后可以整理、补充判断或移除" /><div>{sources.length ? sources.map((article) => <button key={article.id} onClick={() => onOpenArticle(article)}><i>{sourceMark(article)}</i><span><strong>{article.title}</strong><p>{article.summary || plainExcerpt(article.body)}</p><small>{article.source[0] || "外部资料"} · {formatRelativeDate(article.created)}</small></span></button>) : <EmptyState title="探索库是空的" body="下一次遇到感兴趣的内容时，先写一句为什么值得留下。" />}</div></section>
+      <header className="workspace-page-heading"><div><h1>探索库</h1><p>保存感兴趣的内容；当它与当前行动相关或沉寂较久时，首页会重新提醒你。</p></div></header>
+      <form className="link-capture-card" onSubmit={submit}>
+        <div><span>添加收藏</span><strong>支持直接粘贴分享文案或链接</strong></div>
+        <input value={capture} onChange={(event) => { setCapture(event.target.value); setError(""); }} placeholder="粘贴 B站、抖音、文章链接或整段分享文案" />
+        <input value={note} onChange={(event) => setNote(event.target.value)} placeholder="为什么收藏它？可选，能帮助以后重新发现" />
+        <button disabled={!capture.trim()}>收藏</button>
+        {error && <p className="capture-error">{error}</p>}
+      </form>
+      <section className="source-inbox source-workbench">
+        <CardHeader title="我的收藏" subtitle={`${savedSources.length} 条`} />
+        <div>{savedSources.length ? savedSources.map((article) => <SourceItem key={article.id} article={article} onArchive={onArchive} onDelete={onDelete} />) : <EmptyState title="探索库还是空的" body="下一次遇到感兴趣的内容时，先收藏下来，首页会在合适的时机帮你重新发现。" />}</div>
+      </section>
+      {archivedSources.length > 0 && <details className="source-archive"><summary>已归档 · {archivedSources.length}</summary><div>{archivedSources.map((article) => <SourceItem key={article.id} article={article} archived onArchive={onArchive} onDelete={onDelete} />)}</div></details>}
     </div>
   );
+}
+
+function SourceItem({ article, archived = false, onArchive, onDelete }: {
+  article: StoredArticle;
+  archived?: boolean;
+  onArchive: (article: StoredArticle, archived: boolean) => Promise<void>;
+  onDelete: (article: StoredArticle) => Promise<void>;
+}) {
+  const url = sourceUrl(article);
+  return <article className="source-item">
+    <div className="source-item-main"><span><small>{article.source[0] || "外部资料"} · {formatRelativeDate(article.created)}</small><strong>{article.title}</strong><p>{article.summary || plainExcerpt(article.body)}</p>{url && <code title={url}>{url}</code>}</span></div>
+    <div className="source-item-actions">
+      {url && <button className="primary" onClick={() => void openExternalUrl(url)}>打开原链接 ↗</button>}
+      <button onClick={() => void onArchive(article, !archived)}>{archived ? "恢复" : "归档"}</button>
+      <button className="danger" onClick={() => void onDelete(article)}>删除</button>
+    </div>
+  </article>;
 }
 
 export function InboxPage({ articles, projects, onOpenArticle, onNewCapture, onMoveArticle, onConvertToAction, onConvertToProposal }: {
@@ -311,9 +347,7 @@ export function InboxPage({ articles, projects, onOpenArticle, onNewCapture, onM
   onConvertToAction: (article: StoredArticle, projectId: string) => Promise<void>;
   onConvertToProposal: (article: StoredArticle, projectId: string) => Promise<void>;
 }) {
-  const inbox = articles.filter(isInboxArticle);
-  const thoughts = inbox.filter((article) => article.collection !== "sources" && article.type !== "外部资料");
-  const sources = inbox.filter((article) => article.collection === "sources" || article.type === "外部资料");
+  const thoughts = articles.filter(isThoughtInboxArticle);
   return (
     <div className="inbox-page workspace-scroll">
       <header className="workspace-page-heading">
@@ -322,7 +356,6 @@ export function InboxPage({ articles, projects, onOpenArticle, onNewCapture, onM
       </header>
       <div className="inbox-groups">
         <InboxGroup title="零散想法" items={thoughts} projects={projects} empty="目前没有待整理的想法。" onOpenArticle={onOpenArticle} onMoveArticle={onMoveArticle} onConvertToAction={onConvertToAction} onConvertToProposal={onConvertToProposal} />
-        <InboxGroup title="待处理资料" items={sources} projects={projects} empty="目前没有待处理的外部资料。" onOpenArticle={onOpenArticle} onMoveArticle={onMoveArticle} onConvertToAction={onConvertToAction} onConvertToProposal={onConvertToProposal} />
       </div>
     </div>
   );
@@ -356,8 +389,9 @@ function InboxItem({ article, projects, onOpenArticle, onMoveArticle, onConvertT
   </article>;
 }
 
-export function ReviewPage({ projects, articles, tasks, weeklyFocus, closeouts, today, onSaveCloseout }: {
+export function ReviewPage({ projects, projectDetails, articles, tasks, weeklyFocus, closeouts, today, onSaveCloseout }: {
   projects: ProjectSummary[];
+  projectDetails: ProjectDetail[];
   articles: StoredArticle[];
   tasks: WorkspaceTask[];
   weeklyFocus: WeeklyFocus | null;
@@ -375,15 +409,30 @@ export function ReviewPage({ projects, articles, tasks, weeklyFocus, closeouts, 
     setTomorrow(currentCloseout?.tomorrow ?? "");
   }, [currentCloseout]);
   const weekStart = startOfLocalWeek();
-  const weekArticles = articles.filter((article) => (article.updated || article.created) >= weekStart.slice(0, 10));
+  const weekArticles = articles.filter((article) => !isSourceArticle(article) && !isThoughtInboxArticle(article) && (article.updated || article.created) >= weekStart.slice(0, 10));
   const weekCompleted = tasks.filter((task) => task.completedAt && task.completedAt >= weekStart);
+  const continuationRecords = projectDetails.flatMap((detail) => detail.logs.flatMap((log) => {
+    const continuation = decodeContinuationLog(log.body);
+    if (!continuation || log.createdAt < weekStart) return [];
+    return [{ id: log.id, projectId: detail.project.id, projectTitle: detail.project.title, title: continuation.text, detail: continuation.label, kind: "接续记录" }];
+  }));
+  const weekProgress = [
+    ...weekCompleted.map((task) => ({ id: task.id, projectId: task.projectId, projectTitle: task.projectTitle, title: actionDisplayTitle(task), detail: task.stageTitle || "未关联阶段", kind: "完成" })),
+    ...continuationRecords,
+  ];
+  const progressGroups = [...weekProgress.reduce((groups, item) => {
+    const group = groups.get(item.projectId) ?? { projectId: item.projectId, projectTitle: item.projectTitle, items: [] as typeof weekProgress };
+    group.items.push(item);
+    groups.set(item.projectId, group);
+    return groups;
+  }, new Map<string, { projectId: string; projectTitle: string; items: typeof weekProgress }>()).values()];
   const completedStages = projects.reduce((sum, project) => sum + project.completedMilestoneCount, 0);
   return (
     <div className="review-page workspace-scroll">
       <header className="workspace-page-heading"><div><h1>本周回顾</h1><p>{weeklyFocus?.primaryOutcome ? `本周主结果：${weeklyFocus.primaryOutcome}` : "查看留下了什么结果、判断与经验，而不是用计时证明自己很忙。"}</p></div></header>
-      <div className="review-metrics"><article><span>行动结果</span><strong>{weekCompleted.length}</strong><small>项行动在本周完成</small></article><article><span>阶段达成</span><strong>{completedStages}</strong><small>个项目阶段已经走过</small></article><article><span>知识沉淀</span><strong>{weekArticles.length}</strong><small>条笔记或资料有更新</small></article></div>
+      <div className="review-metrics"><article><span>行动结果</span><strong>{weekCompleted.length}</strong><small>项行动在本周完成</small></article><article><span>累计阶段</span><strong>{completedStages}</strong><small>个项目阶段已经走过</small></article><article><span>知识沉淀</span><strong>{weekArticles.length}</strong><small>条笔记或资料有更新</small></article></div>
       <div className="review-grid">
-        <section className="workspace-card review-project-time"><CardHeader title="本周推进了什么" subtitle="结果按项目归拢" />{weekCompleted.length ? weekCompleted.map((task) => <div className="review-result-row" key={task.id}><span>{actionMeta[task.actionType].label}</span><strong>{task.title}</strong><small>{task.projectTitle} · {task.stageTitle}</small></div>) : <EmptyState title="本周还没有完成记录" body="完成行动或写下推进结果后，会自动汇总到这里。" />}</section>
+        <section className="workspace-card review-project-time"><CardHeader title="项目进展" subtitle={weekProgress.length ? `${progressGroups.length} 个项目 · ${weekProgress.length} 条记录` : "完成与接续记录"} />{progressGroups.length ? <div className="review-project-groups">{progressGroups.map((group) => <article className="review-project-group" key={group.projectId}><header><strong>{group.projectTitle}</strong><span>{group.items.length} 条</span></header><div>{group.items.map((item) => <div className="review-progress-row" key={item.id}><i>{item.kind}</i><span><strong>{item.title}</strong><small>{item.detail}</small></span></div>)}</div></article>)}</div> : <div className="review-compact-empty"><strong>本周还没有项目进展</strong><p>完成行动或写下“今天做到哪里”，这里就会按项目归拢。</p></div>}</section>
         <section className="workspace-card review-growth"><CardHeader title="本周留下了什么" subtitle="最近更新的经验、思考和资料" />{weekArticles.slice(0, 6).map((article) => <p key={article.id}><span>{natureLabel(article)}</span><strong>{article.title}</strong><small>{formatRelativeDate(article.updated || article.created)}</small></p>)}{!weekArticles.length && <EmptyState title="还没有新的沉淀" body="完成工作后留一句发现，也是一种可见的成长。" />}</section>
       </div>
       <form className="workspace-card daily-closeout-card" onSubmit={async (event) => { event.preventDefault(); await onSaveCloseout(result, lesson, tomorrow); }}>
@@ -397,19 +446,19 @@ export function ReviewPage({ projects, articles, tasks, weeklyFocus, closeouts, 
   );
 }
 
-function ActionRow({ task, index, today, done, onOpenProject, onRestoreTask, onCompleteTask, onPlanToday, onRemoveFromToday, onStartFocus, onStopFocus, activeSession }: { task: WorkspaceTask; index: number; today: string; done: boolean; onOpenProject: (projectId: string) => void; onRestoreTask: (task: WorkspaceTask) => void } & TaskActions) {
+function ActionRow({ task, today, done, onOpenProject, onRestoreTask, onCompleteTask, onPlanToday, onRemoveFromToday, onStartFocus, onStopFocus, activeSession }: { task: WorkspaceTask; today: string; done: boolean; onOpenProject: (projectId: string) => void; onRestoreTask: (task: WorkspaceTask) => void } & TaskActions) {
   const plannedToday = task.plan?.plannedDate === today;
+  const title = actionDisplayTitle(task);
   return (
     <article className={`workspace-task action-row ${plannedToday ? "is-today" : ""} ${done ? "is-done" : ""}`}>
-      <i className="action-type-icon">{actionMeta[task.actionType].symbol}</i>
       <div className="action-row-main">
-        <header><span>{actionMeta[task.actionType].label}</span>{plannedToday && <b>今日推进</b>}{index === 0 && !done && <b>当前</b>}</header>
-        <h2>{task.title}</h2>
-        <button className="action-context" onClick={() => onOpenProject(task.projectId)}>{task.projectTitle} <i>›</i> 阶段 {task.stageIndex}/{task.stageCount}：{task.stageTitle || "未关联阶段"}</button>
-        <div className="action-row-meta"><span>{actionDueDate(task) ? `截止 ${formatDueDate(actionDueDate(task))}` : "无硬性截止"}</span><StageProgress task={task} compact /></div>
-        <details className="action-disclosure"><summary>查看具体做法与收益</summary><div><p><strong>具体做法</strong>{task.details || "还没有补充具体做法。"}</p><p><strong>推进价值</strong>{task.benefit || "还没有记录它对阶段的帮助。"}</p>{task.waitingFor && <p><strong>正在等待</strong>{task.waitingFor}</p>}</div></details>
+        <header><button className="action-context" onClick={() => onOpenProject(task.projectId)}>{task.projectTitle} <i>›</i></button><span>阶段 {task.stageIndex}/{task.stageCount}</span>{plannedToday && <b>已安排到今天</b>}</header>
+        <h2>{title}</h2>
+        {task.stageTitle && title !== task.stageTitle && <p className="action-stage-title">当前阶段：{task.stageTitle}</p>}
+        <div className="action-row-meta"><span className={actionDueDate(task) ? "has-due" : ""}>{actionDueDate(task) ? formatDueDate(actionDueDate(task)) : "无硬性截止"}</span><StageProgress task={task} compact /></div>
+        <details className="action-disclosure"><summary>展开具体做法</summary><div><p>{task.details || "还没有补充具体做法。"}</p>{task.waitingFor && <p><strong>正在等待</strong>{task.waitingFor}</p>}</div></details>
       </div>
-      <div className="action-row-actions">{done ? <button onClick={() => onRestoreTask(task)}>恢复</button> : <><button onClick={() => onCompleteTask(task)}>✓ 完成</button>{activeSession?.taskId === task.id ? <button onClick={onStopFocus}>■ 结束投入</button> : !activeSession && <button onClick={() => onStartFocus(task)}>▷ 开始投入</button>}{plannedToday ? <button onClick={() => onRemoveFromToday(task)}>取消今日</button> : <button onClick={() => onPlanToday(task)}>标记今日</button>}</>}</div>
+      <div className="action-row-actions">{done ? <button onClick={() => onRestoreTask(task)}>恢复</button> : <><button onClick={() => onCompleteTask(task)}>✓ 完成</button>{activeSession?.taskId === task.id ? <button onClick={onStopFocus}>■ 结束投入</button> : !activeSession && <button onClick={() => onStartFocus(task)}>▷ 开始投入</button>}{plannedToday ? <button onClick={() => onRemoveFromToday(task)}>取消今日安排</button> : <button onClick={() => onPlanToday(task)}>安排到今天</button>}</>}</div>
     </article>
   );
 }
@@ -437,23 +486,26 @@ function QuickLinks() {
 
   function save(next: QuickLink[]) { setLinks(next); localStorage.setItem("life-strategy.quick-links-v2", JSON.stringify(next)); }
   function submit(event: FormEvent) { event.preventDefault(); if (!title.trim() || !url.trim()) return; const normalized = /^https?:\/\//i.test(url) ? url : `https://${url}`; save([...links, { id: `link-${Date.now()}`, title: title.trim(), url: normalized, category, pinned: pinned.length < 4, order: links.length }]); setTitle(""); setUrl(""); setAdding(false); }
-  function remove(link: QuickLink) { const index = links.findIndex((item) => item.id === link.id); save(links.filter((item) => item.id !== link.id)); setDeleted({ link, index }); }
+  function remove(link: QuickLink) { if (!window.confirm(`确认删除工具“${link.title}”吗？`)) return; const index = links.findIndex((item) => item.id === link.id); save(links.filter((item) => item.id !== link.id)); setDeleted({ link, index }); }
   function undoDelete() { if (!deleted) return; const next = [...links]; next.splice(deleted.index, 0, deleted.link); save(next); setDeleted(null); }
-  function togglePin(link: QuickLink) { save(links.map((item) => item.id === link.id ? { ...item, pinned: !item.pinned } : item)); }
+  function togglePin(link: QuickLink) { if (!link.pinned && pinned.length >= 4) { setOpenError("首页最多置顶四个工具，请先取消一个置顶。"); return; } setOpenError(""); save(links.map((item) => item.id === link.id ? { ...item, pinned: !item.pinned } : item)); }
   async function openLink(target: string) { setOpenError(""); try { await openExternalUrl(target); } catch { setOpenError("未能打开该入口，请检查网址或系统默认浏览器设置。"); } }
 
   return (
-    <section className="workspace-card quick-links-card tool-shelf">
-      <CardHeader title="常用工具" subtitle="只在首页露出最多四个置顶入口" action={expanded ? "收起" : "全部工具"} onAction={() => setExpanded((value) => !value)} />
-      <div className="pinned-tools">{pinned.map((link) => <button type="button" onClick={() => void openLink(link.url)} key={link.id}><i>{link.title.slice(0, 1)}</i><span>{link.title}</span></button>)}</div>
+    <section className={`workspace-card quick-links-card tool-shelf ${expanded ? "expanded" : ""}`}>
+      <CardHeader title="常用工具" subtitle="固定常用入口，也可以随时整理" action={expanded ? "完成" : "管理工具"} onAction={() => setExpanded((value) => !value)} />
+      {pinned.length ? <div className="pinned-tools">{pinned.map((link) => <article key={link.id}>
+        <button className="pinned-tool-open" type="button" onClick={() => void openLink(link.url)}><i>{link.title.slice(0, 1)}</i><span><strong>{link.title}</strong><small>{safeHost(link.url)}</small></span><em>↗</em></button>
+        <div><button className="pinned" onClick={() => togglePin(link)} title="取消置顶" aria-label={`取消置顶 ${link.title}`}>★</button><button className="danger" onClick={() => remove(link)} title="删除" aria-label={`删除 ${link.title}`}>删除</button></div>
+      </article>)}</div> : <p className="tool-empty">还没有置顶工具，展开管理面板选择常用入口。</p>}
       {expanded && <div className="tool-library">
-        <header><strong>工具抽屉</strong><button onClick={() => setAdding((value) => !value)}>{adding ? "取消" : "＋ 添加入口"}</button></header>
-        {adding && <form onSubmit={submit}><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="名称" /><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="网址" /><select value={category} onChange={(event) => setCategory(event.target.value as QuickLinkCategory)}>{Object.entries(quickLinkCategories).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><button>保存</button></form>}
-        {Object.entries(quickLinkCategories).map(([value, label]) => {
+        <header><div><strong>管理全部工具</strong><span>{links.length} 个入口 · 最多置顶 4 个</span></div><button onClick={() => setAdding((value) => !value)}>{adding ? "取消添加" : "＋ 添加工具"}</button></header>
+        {adding && <form className="tool-add-form" onSubmit={submit}><label><span>名称</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：Zotero" /></label><label><span>网址</span><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://..." /></label><label><span>分类</span><select value={category} onChange={(event) => setCategory(event.target.value as QuickLinkCategory)}>{Object.entries(quickLinkCategories).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><button>保存工具</button></form>}
+        <div className="tool-groups">{Object.entries(quickLinkCategories).map(([value, label]) => {
           const categoryLinks = links.filter((link) => link.category === value);
           if (!categoryLinks.length) return null;
-          return <details key={value} open={value === "research" || value === "general"}><summary>{label}<span>{categoryLinks.length}</span></summary><div>{categoryLinks.map((link) => <div className="tool-row" key={link.id}><button onClick={() => void openLink(link.url)}><i>{link.title.slice(0, 1)}</i><span><strong>{link.title}</strong><small>{safeHost(link.url)}</small></span></button><button className={link.pinned ? "pinned" : ""} onClick={() => togglePin(link)} title={link.pinned ? "取消置顶" : "置顶"}>☆</button><button onClick={() => remove(link)} title="删除">×</button></div>)}</div></details>;
-        })}
+          return <section className="tool-group" key={value}><header><strong>{label}</strong><span>{categoryLinks.length}</span></header><div>{categoryLinks.map((link) => <article className="tool-row" key={link.id}><button className="tool-row-open" onClick={() => void openLink(link.url)}><i>{link.title.slice(0, 1)}</i><span><strong>{link.title}</strong><small>{link.url}</small></span></button><div><button className={link.pinned ? "pinned" : ""} onClick={() => togglePin(link)}>{link.pinned ? "取消置顶" : "置顶"}</button><button className="danger" onClick={() => remove(link)}>删除</button></div></article>)}</div></section>;
+        })}</div>
         {deleted && <div className="tool-undo"><span>已删除“{deleted.link.title}”</span><button onClick={undoDelete}>撤销</button></div>}
       </div>}
       {openError && <p className="quick-link-error" role="alert">{openError}</p>}
@@ -483,10 +535,10 @@ const defaultQuickLinks: QuickLink[] = [
 function CardHeader({ title, subtitle, action, onAction }: { title: string; subtitle: string; action?: string; onAction?: () => void }) { return <header className="card-header"><div><strong>{title}</strong><span>{subtitle}</span></div>{action && <button onClick={onAction}>{action} →</button>}</header>; }
 function EmptyState({ title, body }: { title: string; body: string }) { return <div className="workspace-empty"><strong>{title}</strong><p>{body}</p></div>; }
 async function openExternalUrl(url: string) { if (isTauri()) { await openUrl(url); return; } window.open(url, "_blank", "noopener,noreferrer"); }
-function taskRank(task: WorkspaceTask, today: string) { const todayRank = task.plan?.plannedDate === today ? 0 : task.status === "next" ? 4 : 10; const dueRank = actionDueDate(task) ? Math.max(0, Math.floor((new Date(actionDueDate(task)).getTime() - Date.now()) / 86_400_000)) : 30; return todayRank + dueRank / 100 + task.sortOrder / 1000; }
-function isDueSoon(task: WorkspaceTask, today: string) { const due = actionDueDate(task); if (!due) return false; const from = new Date(`${today}T00:00:00`).getTime(); const to = new Date(`${due}T23:59:59`).getTime(); return to <= from + 2 * 86_400_000; }
-function actionDueDate(task: WorkspaceTask) { return task.dueDate || task.stageDueDate || task.projectReviewDate; }
-function formatDueDate(value: string) { if (!value) return ""; const date = new Date(`${value}T12:00:00`); const diff = Math.ceil((date.getTime() - Date.now()) / 86_400_000); if (diff < 0) return `已过期 ${Math.abs(diff)} 天`; if (diff === 0) return "今天截止"; if (diff === 1) return "明天截止"; return `${date.getMonth() + 1}月${date.getDate()}日`; }
+function taskRank(task: WorkspaceTask, today: string) { const todayRank = task.plan?.plannedDate === today ? 0 : task.status === "next" ? 4 : 10; const dueDifference = actionDueDate(task) ? calendarDayDifference(actionDueDate(task), today) : null; const dueRank = dueDifference === null ? 30 : Math.max(0, dueDifference); return todayRank + dueRank / 100 + task.sortOrder / 1000; }
+function isDueSoon(task: WorkspaceTask, today: string) { const due = actionDueDate(task); if (!due) return false; const difference = calendarDayDifference(due, today); return difference !== null && difference <= 2; }
+function actionDueDate(task: WorkspaceTask) { return task.dueDate || task.stageDueDate; }
+function formatDueDate(value: string) { return formatRelativeDueDate(value); }
 function selectContextualEcho(articles: StoredArticle[], task: WorkspaceTask | null, today: string) {
   if (!task) return null;
   const source = `${task.projectTitle} ${task.stageTitle} ${task.title} ${task.benefit}`;
@@ -503,5 +555,10 @@ function formatDate(value: string) { return value ? value.slice(0, 10).replaceAl
 function formatRelativeDate(value: string) { if (!value) return "未记录"; const date = new Date(value.length <= 10 ? `${value}T00:00:00` : value); const diff = Math.floor((Date.now() - date.getTime()) / 86_400_000); if (diff <= 0) return "今天"; if (diff === 1) return "昨天"; if (diff < 7) return `${diff} 天前`; return formatDate(value); }
 function plainExcerpt(text: string) { return text.replace(/[#>*`\-\[\]()]/g, "").replace(/\s+/g, " ").trim().slice(0, 110); }
 function startOfLocalWeek() { const date = new Date(); const day = date.getDay() || 7; date.setDate(date.getDate() - day + 1); date.setHours(0, 0, 0, 0); return date.toISOString(); }
+const genericActionTitles = new Set(["阅读与判断", "写作修订", "真实使用与反馈", "验收与整理", "方案判断"]);
+function actionDisplayTitle(task: WorkspaceTask) { return genericActionTitles.has(task.title.trim()) && task.stageTitle ? task.stageTitle : task.title; }
+function decodeContinuationLog(body: string) { if (!body.startsWith("接续点｜")) return null; const [, , label = "当前推进", ...content] = body.split("｜"); const text = content.join("｜").trim(); return text ? { label, text } : null; }
 function sourceMark(article: StoredArticle) { const source = article.source.join(" ").toLocaleLowerCase(); if (source.includes("bilibili") || source.includes("哔哩")) return "B"; if (source.includes("douyin") || source.includes("抖音")) return "抖"; return article.type === "外部资料" ? "链" : "记"; }
+function sourceUrl(article: StoredArticle) { return article.source.find((item) => /^https?:\/\//i.test(item)) || ""; }
+function extractFirstUrl(value: string) { return value.match(/https?:\/\/[^\s<>'\"]+/i)?.[0]?.replace(/[，。！？、；：)）\]}]+$/, "") || ""; }
 function natureLabel(article: StoredArticle) { const value = article.type.split(/[，,]/).find(Boolean)?.trim(); return value && value !== "记录" ? value : "笔记"; }

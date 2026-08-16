@@ -3,11 +3,18 @@ import { ClientInputError } from "./database.mjs";
 import { issueAccessToken, verifyAccessToken } from "./security.mjs";
 
 const maxBodyBytes = 5 * 1024 * 1024;
+const maxRateLimitEntries = 10_000;
+const rateLimitWindowMs = 15 * 60 * 1000;
 
-export function createSyncServer({ database, authSecret, logger = console }) {
+export function createSyncServer({
+  database,
+  authSecret,
+  logger = console,
+  trustProxy = false,
+}) {
   const attempts = new Map();
 
-  return http.createServer(async (request, response) => {
+  const server = http.createServer(async (request, response) => {
     setCommonHeaders(response);
     if (request.method === "OPTIONS") {
       response.writeHead(204);
@@ -21,19 +28,21 @@ export function createSyncServer({ database, authSecret, logger = console }) {
         sendJson(response, 200, {
           status: "ok",
           service: "mind-garden-sync",
-          version: "0.4.0",
         });
         return;
       }
 
       if (request.method === "POST" && url.pathname === "/v1/auth/login") {
-        const client = clientAddress(request);
+        const client = rateLimitKey(
+          attempts,
+          clientAddress(request, trustProxy),
+        );
         if (isRateLimited(attempts, client)) {
           sendJson(response, 429, { error: "尝试次数过多，请稍后再试。" });
           return;
         }
-        const body = await readJson(request);
-        const user = database.authenticate(body.username, body.password);
+        const body = validateLoginBody(await readJson(request));
+        const user = await database.authenticate(body.username, body.password);
         if (!user) {
           recordFailure(attempts, client);
           sendJson(response, 401, { error: "账户或密码不正确。" });
@@ -49,7 +58,7 @@ export function createSyncServer({ database, authSecret, logger = console }) {
         return;
       }
 
-      const user = authenticate(request, authSecret);
+      const user = authenticate(request, authSecret, database);
       if (!user) {
         sendJson(response, 401, { error: "请先登录。" });
         return;
@@ -66,8 +75,8 @@ export function createSyncServer({ database, authSecret, logger = console }) {
         request.method === "POST" &&
         url.pathname === "/v1/auth/change-password"
       ) {
-        const body = await readJson(request);
-        const changed = database.changePassword(
+        const body = validatePasswordChange(await readJson(request));
+        const changed = await database.changePassword(
           Number(user.sub),
           body.currentPassword,
           body.newPassword,
@@ -94,12 +103,21 @@ export function createSyncServer({ database, authSecret, logger = console }) {
       sendJson(response, 500, { error: "服务器暂时无法处理这次同步。" });
     }
   });
+  server.requestTimeout = 30_000;
+  server.headersTimeout = 15_000;
+  server.keepAliveTimeout = 5_000;
+  server.maxRequestsPerSocket = 100;
+  return server;
 }
 
-function authenticate(request, secret) {
+function authenticate(request, secret, database) {
   const authorization = request.headers.authorization || "";
   if (!authorization.startsWith("Bearer ")) return null;
-  return verifyAccessToken(authorization.slice(7), secret);
+  const user = verifyAccessToken(authorization.slice(7), secret);
+  if (!user) return null;
+  const userId = Number(user.sub);
+  if (!Number.isSafeInteger(userId)) return null;
+  return database.isTokenCurrent(userId, user.ver) ? user : null;
 }
 
 async function readJson(request) {
@@ -135,16 +153,22 @@ function setCommonHeaders(response) {
   response.setHeader("Referrer-Policy", "no-referrer");
 }
 
-function clientAddress(request) {
+function clientAddress(request, trustProxy) {
   const forwarded = request.headers["x-forwarded-for"];
-  if (typeof forwarded === "string") return forwarded.split(",")[0].trim();
+  if (trustProxy && typeof forwarded === "string") {
+    const addresses = forwarded
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (addresses.length) return addresses.at(-1);
+  }
   return request.socket.remoteAddress || "unknown";
 }
 
 function isRateLimited(attempts, client) {
   const entry = attempts.get(client);
   if (!entry) return false;
-  if (Date.now() - entry.startedAt > 15 * 60 * 1000) {
+  if (Date.now() - entry.startedAt > rateLimitWindowMs) {
     attempts.delete(client);
     return false;
   }
@@ -153,11 +177,61 @@ function isRateLimited(attempts, client) {
 
 function recordFailure(attempts, client) {
   const current = attempts.get(client);
-  if (!current || Date.now() - current.startedAt > 15 * 60 * 1000) {
+  if (!current || Date.now() - current.startedAt > rateLimitWindowMs) {
     attempts.set(client, { count: 1, startedAt: Date.now() });
     return;
   }
   current.count += 1;
+}
+
+function rateLimitKey(attempts, address) {
+  if (attempts.has(address)) return address;
+  if (attempts.size >= maxRateLimitEntries) {
+    const now = Date.now();
+    for (const [key, entry] of attempts) {
+      if (now - entry.startedAt > rateLimitWindowMs) attempts.delete(key);
+    }
+  }
+  return attempts.size >= maxRateLimitEntries ? "rate-limit-overflow" : address;
+}
+
+function validateLoginBody(body) {
+  if (!isRecord(body)) throw new ClientInputError("登录请求格式不正确。");
+  const username = validateText(body.username, "账户", 1, 100).trim();
+  const password = validateText(body.password, "密码", 1, 512, true);
+  if (!username) throw new ClientInputError("账户不能为空。");
+  return { username, password };
+}
+
+function validatePasswordChange(body) {
+  if (!isRecord(body)) throw new ClientInputError("改密请求格式不正确。");
+  const currentPassword = validateText(
+    body.currentPassword,
+    "当前密码",
+    1,
+    512,
+    true,
+  );
+  const newPassword = validateText(body.newPassword, "新密码", 12, 512, true);
+  return { currentPassword, newPassword };
+}
+
+function validateText(value, label, minimum, maximumBytes, preserveWhitespace) {
+  if (typeof value !== "string") {
+    throw new ClientInputError(`${label}格式不正确。`);
+  }
+  const comparable = preserveWhitespace ? value : value.trim();
+  if (comparable.length < minimum) {
+    throw new ClientInputError(`${label}至少需要 ${minimum} 个字符。`);
+  }
+  if (Buffer.byteLength(comparable, "utf8") > maximumBytes) {
+    throw new ClientInputError(`${label}过长。`);
+  }
+  return value;
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 class RequestTooLargeError extends Error {}

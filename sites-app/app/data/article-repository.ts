@@ -3,6 +3,7 @@ import type { Article, StoredArticle } from "../types";
 export type ArticleChange = {
   article: StoredArticle;
   operation: "upsert" | "delete";
+  changeId?: string;
 };
 
 export type SyncedArticleVersion = {
@@ -26,6 +27,11 @@ export interface SyncCapableArticleRepository extends ArticleRepository {
   listPendingChanges(): Promise<ArticleChange[]>;
   markSynced(versions: SyncedArticleVersion[]): Promise<void>;
   applyRemoteChanges(changes: ArticleChange[]): Promise<RemoteApplyResult>;
+  commitSyncResult(
+    versions: SyncedArticleVersion[],
+    changes: ArticleChange[],
+    cursor: string,
+  ): Promise<RemoteApplyResult>;
   getSyncCursor(): Promise<string>;
   setSyncCursor(cursor: string): Promise<void>;
 }
@@ -33,7 +39,7 @@ export interface SyncCapableArticleRepository extends ArticleRepository {
 export class ArticleRepositoryError extends Error {
   constructor(
     message: string,
-    readonly code: "read_failed" | "save_failed" | "remove_failed" | "invalid_data",
+    readonly code: "read_failed" | "save_failed" | "remove_failed" | "invalid_data" | "conflict",
     readonly cause?: unknown,
   ) {
     super(message);

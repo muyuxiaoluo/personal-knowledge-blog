@@ -13,6 +13,7 @@ import type {
   ProjectTaskStatus,
   ProposalStatus,
 } from "../project-types";
+import { normalizeLifeDomain } from "../domain-taxonomy";
 import {
   ProjectRepositoryError,
   type ProjectRepository,
@@ -190,6 +191,21 @@ export class SqliteProjectRepository implements ProjectRepository {
     await this.ensureColumn("project_tasks", "details", "TEXT NOT NULL DEFAULT ''");
     await this.ensureColumn("project_tasks", "benefit", "TEXT NOT NULL DEFAULT ''");
     await this.ensureColumn("project_tasks", "due_date", "TEXT NOT NULL DEFAULT ''");
+    await this.database.execute(
+      `UPDATE projects
+       SET category = CASE category
+         WHEN 'research' THEN 'learning'
+         WHEN 'creative' THEN 'creative'
+         WHEN 'product' THEN 'systems'
+         WHEN 'maintenance' THEN 'systems'
+         WHEN 'support' THEN 'systems'
+         WHEN 'personal' THEN 'uncategorized'
+         WHEN '科研' THEN 'learning'
+         WHEN '创作' THEN 'creative'
+         WHEN '产品' THEN 'systems'
+         ELSE category
+       END`,
+    );
     await this.database.execute("PRAGMA optimize");
 
     const seeded = await this.database.select<{ value: string }>(
@@ -199,36 +215,6 @@ export class SqliteProjectRepository implements ProjectRepository {
 
     for (const seed of this.options.seedProjects ?? []) {
       await this.insertSeed(seed);
-    }
-    const workbenchRoadmap = (this.options.seedProjects ?? []).find(
-      (seed) => seed.project.id === "project-life-workbench-v01",
-    );
-    if (workbenchRoadmap && seeded[0]?.value === "1") {
-      await this.writeProject(workbenchRoadmap.project, false);
-      for (const milestone of workbenchRoadmap.milestones) await this.writeMilestone(milestone, false);
-      for (const task of workbenchRoadmap.tasks) await this.writeTask(task, false);
-      for (const log of workbenchRoadmap.logs) {
-        await this.database.execute(
-          `INSERT INTO project_logs(id, project_id, body, created_at)
-           VALUES (?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
-          [log.id, log.projectId, log.body, log.createdAt],
-        );
-      }
-      await this.database.execute(
-        "DELETE FROM project_milestones WHERE id = 'project-life-workbench-v01-milestone-1'",
-      );
-    }
-    if (seeded[0]?.value === "1" || seeded[0]?.value === "2") {
-      for (const seed of this.options.seedProjects ?? []) {
-        for (const task of seed.tasks) {
-          await this.database.execute(
-            `UPDATE project_tasks
-             SET title = ?, action_type = ?, details = ?, benefit = ?, due_date = ?
-             WHERE id = ?`,
-            [task.title, task.actionType, task.details, task.benefit, task.dueDate, task.id],
-          );
-        }
-      }
     }
     await this.database.execute(
       `INSERT INTO app_meta(key, value) VALUES('project_seed_version', '3')
@@ -362,6 +348,9 @@ export class SqliteProjectRepository implements ProjectRepository {
         const matching = savedMilestones.find((milestone) => milestone.id === task.milestoneId)
           ?? (!taskMilestoneId ? savedMilestones.find((milestone) => milestone.status === "current") : null);
         if (matching) taskMilestoneId = matching.id;
+        else if (taskMilestoneId && !savedMilestones.some((milestone) => milestone.id === taskMilestoneId)) {
+          taskMilestoneId = savedMilestones.find((milestone) => milestone.status === "current")?.id ?? null;
+        }
       }
       const savedTask = task?.title.trim() ? {
         ...task,
@@ -377,7 +366,15 @@ export class SqliteProjectRepository implements ProjectRepository {
         completedAt: task.status === "done" ? task.completedAt || now : null,
       } : null;
 
+      const existingMilestones = project.id
+        ? await this.database.select<{ id: string }>("SELECT id FROM project_milestones WHERE project_id = ?", [project.id])
+        : [];
+      const savedMilestoneIds = new Set(savedMilestones.map((milestone) => milestone.id));
+      const removedMilestones = existingMilestones.filter((milestone) => !savedMilestoneIds.has(milestone.id));
       const statements: SqliteStatement[] = [projectWriteStatement(savedProject)];
+      for (const milestone of removedMilestones) {
+        statements.push({ sql: "DELETE FROM project_milestones WHERE id = ?", bindValues: [milestone.id] });
+      }
       for (const milestone of savedMilestones) {
         if (milestone.status === "current") {
           statements.push({
@@ -419,14 +416,19 @@ export class SqliteProjectRepository implements ProjectRepository {
         createdAt: milestone.createdAt || now,
         updatedAt: now,
       };
+      const statements: SqliteStatement[] = [];
       if (saved.status === "current") {
-        await this.database.execute(
-          "UPDATE project_milestones SET status = 'planned', updated_at = ? WHERE project_id = ? AND status = 'current' AND id != ?",
-          [now, saved.projectId, saved.id],
-        );
+        statements.push({
+          sql: "UPDATE project_milestones SET status = 'planned', updated_at = ? WHERE project_id = ? AND status = 'current' AND id != ?",
+          bindValues: [now, saved.projectId, saved.id],
+        });
       }
-      await this.writeMilestone(saved, false);
-      await this.touchProject(saved.projectId, now);
+      statements.push(milestoneWriteStatement(saved));
+      statements.push({
+        sql: "UPDATE projects SET updated_at = ? WHERE id = ?",
+        bindValues: [now, saved.projectId],
+      });
+      await executeSqliteTransaction(this.database, statements);
       return saved;
     } catch (error) {
       if (error instanceof ProjectRepositoryError) throw error;
@@ -467,14 +469,19 @@ export class SqliteProjectRepository implements ProjectRepository {
         updatedAt: now,
         completedAt: task.status === "done" ? task.completedAt || now : null,
       };
+      const statements: SqliteStatement[] = [];
       if (saved.status === "next") {
-        await this.database.execute(
-          "UPDATE project_tasks SET status = 'later', updated_at = ? WHERE project_id = ? AND status = 'next' AND id != ?",
-          [now, saved.projectId, saved.id],
-        );
+        statements.push({
+          sql: "UPDATE project_tasks SET status = 'later', updated_at = ? WHERE project_id = ? AND status = 'next' AND id != ?",
+          bindValues: [now, saved.projectId, saved.id],
+        });
       }
-      await this.writeTask(saved, false);
-      await this.touchProject(saved.projectId, now);
+      statements.push(taskWriteStatement(saved));
+      statements.push({
+        sql: "UPDATE projects SET updated_at = ? WHERE id = ?",
+        bindValues: [now, saved.projectId],
+      });
+      await executeSqliteTransaction(this.database, statements);
       return saved;
     } catch (error) {
       if (error instanceof ProjectRepositoryError) throw error;
@@ -491,19 +498,24 @@ export class SqliteProjectRepository implements ProjectRepository {
       );
       if (!rows[0]) throw new ProjectRepositoryError("没有找到这条行动", "invalid_data");
       const now = this.now();
+      const statements: SqliteStatement[] = [];
       if (status === "next") {
-        await this.database.execute(
-          "UPDATE project_tasks SET status = 'later', updated_at = ? WHERE project_id = ? AND status = 'next' AND id != ?",
-          [now, rows[0].project_id, id],
-        );
+        statements.push({
+          sql: "UPDATE project_tasks SET status = 'later', updated_at = ? WHERE project_id = ? AND status = 'next' AND id != ?",
+          bindValues: [now, rows[0].project_id, id],
+        });
       }
-      await this.database.execute(
-        `UPDATE project_tasks
-         SET status = ?, updated_at = ?, completed_at = ?
-         WHERE id = ?`,
-        [status, now, status === "done" ? now : null, id],
-      );
-      await this.touchProject(rows[0].project_id, now);
+      statements.push({
+        sql: `UPDATE project_tasks
+              SET status = ?, updated_at = ?, completed_at = ?
+              WHERE id = ?`,
+        bindValues: [status, now, status === "done" ? now : null, id],
+      });
+      statements.push({
+        sql: "UPDATE projects SET updated_at = ? WHERE id = ?",
+        bindValues: [now, rows[0].project_id],
+      });
+      await executeSqliteTransaction(this.database, statements);
     } catch (error) {
       if (error instanceof ProjectRepositoryError) throw error;
       throw new ProjectRepositoryError("更新行动状态失败", "save_failed", error);
@@ -805,7 +817,7 @@ function rowToProject(row: ProjectRow): Project {
     outcome: row.outcome,
     motivation: row.motivation,
     status: row.status,
-    category: row.category,
+    category: normalizeLifeDomain(row.category),
     sortOrder: Number(row.sort_order),
     isDraft: Boolean(row.is_draft),
     sourceNote: row.source_note,

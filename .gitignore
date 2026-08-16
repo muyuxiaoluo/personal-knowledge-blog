@@ -14,6 +14,15 @@ sites-app/src-tauri/gen/
 sync-server/data/
 sync-server/.env
 deploy-artifacts/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
 
 # Windows shortcuts are machine-local.
 *.lnk

@@ -183,8 +183,6 @@ export class SqliteWorkRepository implements WorkRepository {
     if (!label) throw new WorkRepositoryError("请先写下这次要专注的事情", "invalid_data");
     try {
       await this.initialize();
-      const active = await this.getActiveSession();
-      if (active) throw new WorkRepositoryError("已经有一项专注正在进行", "invalid_data");
       const startedAt = this.clock().toISOString();
       const session: FocusSession = {
         id: `focus-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -195,11 +193,15 @@ export class SqliteWorkRepository implements WorkRepository {
         endedAt: null,
         durationSeconds: 0,
       };
-      await this.database.execute(
+      const result = await this.database.execute(
         `INSERT INTO focus_sessions(id, task_id, project_id, label, started_at, ended_at, duration_seconds)
-         VALUES (?, ?, ?, ?, ?, NULL, 0)`,
+         SELECT ?, ?, ?, ?, ?, NULL, 0
+         WHERE NOT EXISTS (SELECT 1 FROM focus_sessions WHERE ended_at IS NULL)`,
         [session.id, session.taskId, session.projectId, session.label, session.startedAt],
       );
+      if (result.rowsAffected === 0) {
+        throw new WorkRepositoryError("已经有一项专注正在进行", "invalid_data");
+      }
       return session;
     } catch (error) {
       if (error instanceof WorkRepositoryError) throw error;
