@@ -195,6 +195,46 @@ test("stores one-level project branches and can detach them without losing conte
   database.close();
 });
 
+test("deletes a project tree while preserving and detaching linked history", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-08-16T10:00:00.000Z"),
+  });
+  const parent = await repository.get("project-research-direction");
+  assert.ok(parent);
+  const branch = await repository.saveProject({
+    ...parent.project,
+    id: "project-delete-test-branch",
+    title: "待随主线删除的支线",
+    projectType: "side",
+    parentProjectId: parent.project.id,
+    supportsMilestoneId: parent.milestones[0].id,
+    createdAt: "",
+    updatedAt: "",
+  });
+  database.exec("CREATE TABLE articles (id TEXT PRIMARY KEY, project_id TEXT NOT NULL DEFAULT '')");
+  database.exec("CREATE TABLE focus_sessions (id TEXT PRIMARY KEY, project_id TEXT)");
+  database.exec("CREATE TABLE task_plans (task_id TEXT PRIMARY KEY)");
+  database.prepare("INSERT INTO articles(id, project_id) VALUES (?, ?), (?, ?)").run(
+    "article-parent", parent.project.id, "article-branch", branch.id,
+  );
+  database.prepare("INSERT INTO focus_sessions(id, project_id) VALUES (?, ?)").run("focus-parent", parent.project.id);
+  database.prepare("INSERT INTO task_plans(task_id) VALUES (?)").run(parent.tasks[0].id);
+
+  await repository.removeProject(parent.project.id);
+
+  const remaining = await repository.list();
+  assert.equal(remaining.some((project) => project.id === parent.project.id), false);
+  assert.equal(remaining.some((project) => project.id === branch.id), false);
+  assert.equal(database.prepare("SELECT project_id FROM articles WHERE id = ?").get("article-parent")?.project_id, "");
+  assert.equal(database.prepare("SELECT project_id FROM articles WHERE id = ?").get("article-branch")?.project_id, "");
+  assert.equal(database.prepare("SELECT project_id FROM focus_sessions WHERE id = ?").get("focus-parent")?.project_id, null);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM task_plans").get()?.count, 0);
+  assert.equal((await repository.get("project-life-workbench-v01"))?.project.title, "人生攻略库");
+  database.close();
+});
+
 test("rolls back project workspace when a child record cannot be saved", async () => {
   const database = new DatabaseSync(":memory:");
   const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), {

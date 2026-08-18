@@ -475,6 +475,55 @@ export class SqliteProjectRepository implements ProjectRepository {
     }
   }
 
+  async removeProject(id: string): Promise<void> {
+    try {
+      await this.initialize();
+      const rows = await this.database.select<{ id: string }>(
+        "SELECT id FROM projects WHERE id = ? LIMIT 1",
+        [id],
+      );
+      if (!rows[0]) throw new ProjectRepositoryError("没有找到这个项目", "invalid_data");
+      const tables = await this.database.select<{ name: string }>(
+        "SELECT name FROM sqlite_schema WHERE type = 'table'",
+      );
+      const tableNames = new Set(tables.map((table) => table.name));
+      const relatedProjectIds = "SELECT id FROM projects WHERE id = ? OR parent_project_id = ?";
+      const statements: SqliteStatement[] = [];
+      if (tableNames.has("articles")) {
+        statements.push({
+          sql: `UPDATE articles SET project_id = '' WHERE project_id IN (${relatedProjectIds})`,
+          bindValues: [id, id],
+        });
+      }
+      if (tableNames.has("focus_sessions")) {
+        statements.push({
+          sql: `UPDATE focus_sessions SET project_id = NULL WHERE project_id IN (${relatedProjectIds})`,
+          bindValues: [id, id],
+        });
+      }
+      if (tableNames.has("task_plans")) {
+        statements.push({
+          sql: `DELETE FROM task_plans WHERE task_id IN (
+            SELECT id FROM project_tasks WHERE project_id IN (${relatedProjectIds})
+          )`,
+          bindValues: [id, id],
+        });
+      }
+      for (const table of ["project_proposals", "project_logs", "project_tasks", "project_milestones"]) {
+        statements.push({
+          sql: `DELETE FROM ${table} WHERE project_id IN (${relatedProjectIds})`,
+          bindValues: [id, id],
+        });
+      }
+      statements.push({ sql: "DELETE FROM projects WHERE parent_project_id = ?", bindValues: [id] });
+      statements.push({ sql: "DELETE FROM projects WHERE id = ?", bindValues: [id] });
+      await executeSqliteTransaction(this.database, statements);
+    } catch (error) {
+      if (error instanceof ProjectRepositoryError) throw error;
+      throw new ProjectRepositoryError("删除项目失败，原内容已保留", "save_failed", error);
+    }
+  }
+
   async removeMilestone(id: string): Promise<void> {
     try {
       await this.initialize();

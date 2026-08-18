@@ -103,12 +103,14 @@ test("persists articles and sync metadata in a real SQLite database", async () =
   ]);
   assert.equal((await repository.listPendingChanges()).length, 0);
 
+  const updatedBody = "这条想法已经补充了一次。\n保留手动换行。\n\n";
   const updated = await repository.save({
     ...created,
-    body: "这条想法已经补充了一次。",
+    body: updatedBody,
   });
   assert.equal(updated.storage.version, 2);
   assert.equal(updated.storage.syncStatus, "pending");
+  assert.equal(updated.body, updatedBody);
 
   await repository.remove(updated.id);
   assert.equal((await repository.list()).length, 1);

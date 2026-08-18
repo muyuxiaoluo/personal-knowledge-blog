@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent as ReactClipboardEvent,
   type CSSProperties,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -43,6 +44,15 @@ export type ThemeMode = "minimal" | "magic" | "immersive";
 type DeskSection = "home" | "tasks" | "projects" | "notes" | "explore" | "inbox" | "review" | "settings";
 type NoteView = "recent" | "knowledge" | "ideas" | "methods" | "experience" | "decisions" | "review";
 type UndoOffer = { message: string; run: () => Promise<void> };
+type ArticleEditorField = "title" | "body" | "tags" | "sourceUrl";
+type ArticleEditorSelection = {
+  field: ArticleEditorField;
+  start: number;
+  end: number;
+  inputScrollTop: number;
+  editorScrollTop: number;
+};
+type ArticleEditorHistoryEntry = { article: Article; selection: ArticleEditorSelection | null };
 
 type DesktopWorkbenchProps = {
   repository: ArticleRepository;
@@ -422,8 +432,8 @@ export function DesktopWorkbench({
 
   async function saveDraft() {
     const title = draft.title.trim();
-    const body = draft.body.trim();
-    if (!title || !body) {
+    const body = draft.body;
+    if (!title || !body.trim()) {
       showMessage("请先填写标题和正文。");
       return;
     }
@@ -744,7 +754,9 @@ export function DesktopWorkbench({
         />
       )}
 
-      {!documentMode && themeMode !== "minimal" && <MagicParticles intensity={themeMode === "immersive" ? 24 : 14} />}
+      {!documentMode && themeMode !== "minimal" && (
+        <MagicParticles intensity={themeMode === "immersive" ? 12 : 8} />
+      )}
 
       {documentMode ? (
         <section className="document-stage">
@@ -797,7 +809,7 @@ export function DesktopWorkbench({
           {section === "home" && <HomeDashboard today={today} tasks={workspaceTasks} articles={articles} weeklyFocus={weeklyFocus} onSaveWeeklyFocus={saveWeeklyFocus} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
           {section === "tasks" && <TasksPage today={today} tasks={workspaceTasks} projects={projects} projectDetails={projectDetails} onAddTask={addTask} onRestoreTask={restoreTask} onOpenProject={openProject} {...taskActions} />}
           {section === "explore" && <ExplorePage articles={articles} onSaveLink={saveExternalLink} onArchive={archiveSource} onDelete={removeArticle} />}
-          {section === "inbox" && <InboxPage articles={articles} projects={projects} onOpenArticle={openArticle} onNewCapture={() => setQuickCaptureOpen(true)} onMoveArticle={moveInboxArticle} onConvertToAction={convertInboxToAction} onConvertToProposal={convertInboxToProposal} />}
+          {section === "inbox" && <InboxPage articles={articles} projects={projects} onOpenArticle={openArticle} onNewCapture={() => setQuickCaptureOpen(true)} onMoveArticle={moveInboxArticle} onConvertToAction={convertInboxToAction} onConvertToProposal={convertInboxToProposal} onDelete={removeArticle} />}
           {section === "review" && <ReviewPage projects={projects} projectDetails={projectDetails} articles={articles} tasks={workspaceTasks} weeklyFocus={weeklyFocus} closeouts={closeouts} today={today} onSaveCloseout={saveCloseout} />}
           {section === "settings" && <SettingsPage themeMode={themeMode} backingUp={backingUp} onThemeChange={onThemeChange} onCreateBackup={onCreateBackup} onRestoreBackup={onRestoreBackup} />}
         </section>
@@ -871,8 +883,6 @@ function MagicParticles({ intensity }: { intensity: number }) {
     const style = {
       "--particle-x": `${(index * 37 + 11) % 96}%`,
       "--particle-y": `${(index * 53 + 7) % 92}%`,
-      "--particle-delay": `${-(index % 9) * 1.7}s`,
-      "--particle-duration": `${12 + index % 8}s`,
       "--particle-size": `${2 + index % 4}px`,
     } as CSSProperties;
     return <i key={index} style={style} />;
@@ -1033,10 +1043,18 @@ function ArticleEditor({ draft, projects, saving, appendMode, onChange, onCancel
   onCancel: () => void;
   onSave: () => void;
 }) {
+  const editorScrollRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
-  const undoHistoryRef = useRef<Article[]>([]);
-  const redoHistoryRef = useRef<Article[]>([]);
+  const tagsRef = useRef<HTMLInputElement>(null);
+  const sourceUrlRef = useRef<HTMLInputElement>(null);
+  const beforeInputSelectionRef = useRef<ArticleEditorSelection | null>(null);
+  const pasteStatusTimerRef = useRef<number | null>(null);
+  const undoHistoryRef = useRef<ArticleEditorHistoryEntry[]>([]);
+  const redoHistoryRef = useRef<ArticleEditorHistoryEntry[]>([]);
   const [historyAvailability, setHistoryAvailability] = useState({ canUndo: false, canRedo: false });
+  const [previewVisible, setPreviewVisible] = useState(true);
+  const [pasteStatus, setPasteStatus] = useState("");
   const natures = getNatures(draft);
   const sourceUrl = draft.source.find((item) => /^https?:\/\//i.test(item)) || "";
   const sourceKind = draft.source.find((item) => !/^https?:\/\//i.test(item)) || "自写";
@@ -1049,6 +1067,10 @@ function ArticleEditor({ draft, projects, saving, appendMode, onChange, onCancel
     window.setTimeout(() => input.scrollIntoView({ block: "end", behavior: "smooth" }), 0);
   }, [appendMode]);
 
+  useEffect(() => () => {
+    if (pasteStatusTimerRef.current) window.clearTimeout(pasteStatusTimerRef.current);
+  }, []);
+
   function syncHistoryAvailability() {
     setHistoryAvailability({
       canUndo: undoHistoryRef.current.length > 0,
@@ -1056,24 +1078,61 @@ function ArticleEditor({ draft, projects, saving, appendMode, onChange, onCancel
     });
   }
 
-  function commit(next: Article) {
-    undoHistoryRef.current.push(draft);
+  function inputForField(field: ArticleEditorField) {
+    if (field === "title") return titleRef.current;
+    if (field === "body") return bodyRef.current;
+    if (field === "tags") return tagsRef.current;
+    return sourceUrlRef.current;
+  }
+
+  function captureSelection(field: ArticleEditorField, input: HTMLInputElement | HTMLTextAreaElement) {
+    return {
+      field,
+      start: input.selectionStart ?? 0,
+      end: input.selectionEnd ?? input.selectionStart ?? 0,
+      inputScrollTop: input.scrollTop,
+      editorScrollTop: editorScrollRef.current?.scrollTop ?? 0,
+    } satisfies ArticleEditorSelection;
+  }
+
+  function selectionForTarget(target: EventTarget | null) {
+    if (target === titleRef.current && titleRef.current) return captureSelection("title", titleRef.current);
+    if (target === bodyRef.current && bodyRef.current) return captureSelection("body", bodyRef.current);
+    if (target === tagsRef.current && tagsRef.current) return captureSelection("tags", tagsRef.current);
+    if (target === sourceUrlRef.current && sourceUrlRef.current) return captureSelection("sourceUrl", sourceUrlRef.current);
+    return null;
+  }
+
+  function rememberSelection(field: ArticleEditorField, input: HTMLInputElement | HTMLTextAreaElement) {
+    beforeInputSelectionRef.current = captureSelection(field, input);
+  }
+
+  function takePreviousSelection() {
+    const selection = beforeInputSelectionRef.current ?? selectionForTarget(document.activeElement);
+    beforeInputSelectionRef.current = null;
+    return selection;
+  }
+
+  function commit(next: Article, previousSelection: ArticleEditorSelection | null = takePreviousSelection()) {
+    undoHistoryRef.current.push({ article: draft, selection: previousSelection });
     if (undoHistoryRef.current.length > 150) undoHistoryRef.current.shift();
     redoHistoryRef.current = [];
     onChange(next);
     syncHistoryAvailability();
   }
 
-  function restoreInputSelection(target: EventTarget | null) {
-    if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
-    const start = target.selectionStart;
-    const end = target.selectionEnd;
+  function restoreInputSelection(selection: ArticleEditorSelection | null) {
+    if (!selection) return;
     window.requestAnimationFrame(() => {
-      target.focus();
-      if (start === null || end === null) return;
-      const nextStart = Math.min(start, target.value.length);
-      const nextEnd = Math.min(end, target.value.length);
-      target.setSelectionRange(nextStart, nextEnd);
+      const input = inputForField(selection.field);
+      if (!input) return;
+      input.focus({ preventScroll: true });
+      input.setSelectionRange(
+        Math.min(selection.start, input.value.length),
+        Math.min(selection.end, input.value.length),
+      );
+      input.scrollTop = selection.inputScrollTop;
+      if (editorScrollRef.current) editorScrollRef.current.scrollTop = selection.editorScrollTop;
     });
   }
 
@@ -1082,14 +1141,18 @@ function ArticleEditor({ draft, projects, saving, appendMode, onChange, onCancel
     const to = direction === "undo" ? redoHistoryRef.current : undoHistoryRef.current;
     const next = from.pop();
     if (!next) return false;
-    to.push(draft);
-    onChange(next);
+    to.push({ article: draft, selection: selectionForTarget(focusTarget) ?? selectionForTarget(document.activeElement) });
+    onChange(next.article);
     syncHistoryAvailability();
-    restoreInputSelection(focusTarget);
+    restoreInputSelection(next.selection);
     return true;
   }
 
   function handleEditorKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    const currentSelection = selectionForTarget(event.target);
+    if (currentSelection && !(event.ctrlKey || event.metaKey || event.altKey)) {
+      beforeInputSelectionRef.current = currentSelection;
+    }
     if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
     const key = event.key.toLowerCase();
     const direction = key === "y" || (key === "z" && event.shiftKey) ? "redo" : key === "z" ? "undo" : null;
@@ -1115,33 +1178,122 @@ function ArticleEditor({ draft, projects, saving, appendMode, onChange, onCancel
     if (!input) return;
     const start = input.selectionStart;
     const end = input.selectionEnd;
+    const previousSelection = captureSelection("body", input);
     const selected = draft.body.slice(start, end);
-    update("body", `${draft.body.slice(0, start)}${before}${selected}${after}${draft.body.slice(end)}`);
-    window.setTimeout(() => { input.focus(); input.setSelectionRange(start + before.length, end + before.length); }, 0);
+    commit(
+      { ...draft, body: `${draft.body.slice(0, start)}${before}${selected}${after}${draft.body.slice(end)}` },
+      previousSelection,
+    );
+    restoreInputSelection({
+      ...previousSelection,
+      start: start + before.length,
+      end: end + before.length,
+    });
+  }
+
+  function showPasteStatus(message: string) {
+    setPasteStatus(message);
+    if (pasteStatusTimerRef.current) window.clearTimeout(pasteStatusTimerRef.current);
+    pasteStatusTimerRef.current = window.setTimeout(() => setPasteStatus(""), 3600);
+  }
+
+  async function pasteImages(event: ReactClipboardEvent<HTMLTextAreaElement>) {
+    const imageFiles = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
+    if (!imageFiles.length) return;
+    event.preventDefault();
+
+    const supportedFiles = imageFiles.filter((file) => /^image\/(?:png|jpe?g|gif|webp|bmp)$/i.test(file.type));
+    if (supportedFiles.length !== imageFiles.length) {
+      showPasteStatus("暂不支持该图片格式，请使用 PNG、JPG、GIF、WebP 或 BMP。");
+      return;
+    }
+    if (supportedFiles.some((file) => file.size > 8 * 1024 * 1024)) {
+      showPasteStatus("单张粘贴图片不能超过 8 MB。");
+      return;
+    }
+
+    const input = event.currentTarget;
+    const previousSelection = captureSelection("body", input);
+    const bodyBeforePaste = draft.body;
+    showPasteStatus("正在插入图片…");
+
+    try {
+      const dataUrls = await Promise.all(supportedFiles.map(readImageAsDataUrl));
+      const referenceBase = `clipboard-${Date.now()}`;
+      const references = dataUrls.map((dataUrl, index) => ({
+        id: `${referenceBase}-${index + 1}`,
+        dataUrl,
+      }));
+      const imageMarkdown = references
+        .map((reference, index) => `![粘贴图片${references.length > 1 ? index + 1 : ""}][${reference.id}]`)
+        .join("\n\n");
+      const insertedBody = `${bodyBeforePaste.slice(0, previousSelection.start)}${imageMarkdown}${bodyBeforePaste.slice(previousSelection.end)}`;
+      const referenceGap = insertedBody.endsWith("\n\n") ? "" : insertedBody.endsWith("\n") ? "\n" : "\n\n";
+      const referenceMarkdown = references.map((reference) => `[${reference.id}]: ${reference.dataUrl}`).join("\n");
+      commit({ ...draft, body: `${insertedBody}${referenceGap}${referenceMarkdown}` }, previousSelection);
+      restoreInputSelection({
+        ...previousSelection,
+        start: previousSelection.start + imageMarkdown.length,
+        end: previousSelection.start + imageMarkdown.length,
+      });
+      showPasteStatus(references.length > 1 ? `已插入 ${references.length} 张图片。` : "图片已插入，可在右侧预览。");
+    } catch {
+      showPasteStatus("图片读取失败，请重新复制后再试。");
+    }
   }
 
   return (
     <div className="workbench-editor immersive-editor" onKeyDown={handleEditorKeyDown}>
       <header className="editor-toolbar"><div><button onClick={onCancel}>← 取消</button><span>{draft.id ? "编辑笔记" : "新建笔记"}</span></div><div className="editor-toolbar-actions"><div className="editor-history-actions" aria-label="编辑历史"><button type="button" disabled={!historyAvailability.canUndo} onClick={() => stepHistory("undo")} title="撤回（Ctrl+Z）">↶ 撤回</button><button type="button" disabled={!historyAvailability.canRedo} onClick={() => stepHistory("redo")} title="重做（Ctrl+Shift+Z / Ctrl+Y）">↷ 重做</button></div><small><kbd>Ctrl</kbd> + <kbd>S</kbd></small><button className="primary" disabled={saving} onClick={onSave}>{saving ? "保存中…" : "保存"}</button></div></header>
-      <div className="editor-scroll"><div className="editor-paper">
-        <input className="editor-title" autoFocus={!appendMode} value={draft.title} onChange={(event) => update("title", event.target.value)} placeholder="这篇笔记的标题" />
-        <div className="markdown-toolbar" aria-label="Markdown 格式工具"><button type="button" onClick={() => insertMarkdown("## ")}>标题</button><button type="button" onClick={() => insertMarkdown("**", "**")}>加粗</button><button type="button" onClick={() => insertMarkdown("> ")}>引用</button><button type="button" onClick={() => insertMarkdown("- ")}>列表</button><button type="button" onClick={() => insertMarkdown("[", "](https://)")}>链接</button><span>Markdown 会在阅读时完整排版</span></div>
-        <textarea ref={bodyRef} className="editor-body" value={draft.body} onChange={(event) => update("body", event.target.value)} placeholder="从这里开始写。可以直接使用标题、列表、引用、链接、表格和任务清单……" />
+      <div className="editor-scroll" ref={editorScrollRef}><div className="editor-paper">
         <section className="editor-metadata new-note-metadata">
           <header><div><strong>笔记关系</strong><span>都可以留空，保存不会被分类打断</span></div></header>
           <fieldset><legend>内容性质 · 可多选</legend><div className="nature-picker">{natureOptions.map((nature) => <button className={natures.includes(nature) ? "active" : ""} type="button" key={nature} onClick={() => toggleNature(nature)}>{nature}</button>)}</div></fieldset>
           <div className="metadata-grid">
             <label><span>所属领域</span><select value={articleLifeDomain(draft)} onChange={(event) => update("category", event.target.value)}>{LIFE_DOMAIN_OPTIONS.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label>
-            <label><span>主题</span><input value={draft.tags.join("，")} onChange={(event) => update("tags", splitTags(event.target.value))} placeholder="科研，创作，工具……" /></label>
+            <label><span>主题</span><input ref={tagsRef} value={draft.tags.join("，")} onBeforeInput={(event) => rememberSelection("tags", event.currentTarget)} onChange={(event) => update("tags", splitTags(event.target.value))} placeholder="科研，创作，工具……" /></label>
             <label><span>关联项目</span><select value={draft.projectId || projects.find((project) => project.title === draft.project)?.id || ""} onChange={(event) => { const project = projects.find((item) => item.id === event.target.value); commit({ ...draft, projectId: project?.id || "", project: project?.title || "" }); }}><option value="">不关联项目</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></label>
             <label><span>来源</span><select value={sourceKind} onChange={(event) => updateSource(event.target.value)}>{sourceOptions.map((source) => <option key={source}>{source}</option>)}</select></label>
-            <label><span>来源链接</span><input type="url" value={sourceUrl} onChange={(event) => updateSource(sourceKind, event.target.value)} placeholder="可选" /></label>
+            <label><span>来源链接</span><input ref={sourceUrlRef} type="url" value={sourceUrl} onBeforeInput={(event) => rememberSelection("sourceUrl", event.currentTarget)} onChange={(event) => updateSource(sourceKind, event.target.value)} placeholder="可选" /></label>
           </div>
           <small className="metadata-auto-note">摘要、创建时间、修改时间和版本信息由系统自动维护。</small>
+        </section>
+        <section className="editor-writing-pane">
+          <input ref={titleRef} className="editor-title" autoFocus={!appendMode} value={draft.title} onBeforeInput={(event) => rememberSelection("title", event.currentTarget)} onChange={(event) => update("title", event.target.value)} placeholder="这篇笔记的标题" />
+          <div className="markdown-toolbar" aria-label="Markdown 格式工具">
+            <div className="markdown-format-actions">
+              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertMarkdown("# ")}>一级标题</button>
+              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertMarkdown("## ")}>二级标题</button>
+              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertMarkdown("**", "**")}>加粗</button>
+              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertMarkdown("> ")}>引用</button>
+              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertMarkdown("- ")}>列表</button>
+              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => insertMarkdown("[", "](https://)")}>链接</button>
+            </div>
+            <div className="editor-preview-toggle" aria-label="预览模式">
+              <button className={!previewVisible ? "active" : ""} type="button" onClick={() => setPreviewVisible(false)}>专注写作</button>
+              <button className={previewVisible ? "active" : ""} type="button" onClick={() => setPreviewVisible(true)}>分屏预览</button>
+            </div>
+          </div>
+          <div className={`editor-compose ${previewVisible ? "with-preview" : ""}`}>
+            <div className="editor-source-pane">
+              <div className="editor-pane-label"><strong>正文</strong><span className={pasteStatus ? "status" : ""}>{pasteStatus || "支持直接 Ctrl+V 粘贴图片"}</span></div>
+              <textarea ref={bodyRef} className="editor-body" value={draft.body} onBeforeInput={(event) => rememberSelection("body", event.currentTarget)} onChange={(event) => update("body", event.target.value)} onPaste={(event) => void pasteImages(event)} placeholder="从这里开始写。可以直接使用标题、列表、引用、链接、表格和任务清单……" />
+            </div>
+            {previewVisible && <section className="editor-live-preview" aria-label="实时预览"><div className="editor-pane-label"><strong>实时预览</strong><span>与阅读页同步</span></div><div className="editor-preview-document"><h1>{draft.title || "未命名笔记"}</h1>{draft.body.trim() ? <MarkdownDocument body={draft.body} title={draft.title} /> : <p className="editor-preview-empty">开始输入后，这里会显示最终排版。</p>}</div></section>}
+          </div>
         </section>
       </div></div>
     </div>
   );
+}
+
+function readImageAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("Invalid image data")));
+    reader.addEventListener("error", () => reject(reader.error ?? new Error("Unable to read image")));
+    reader.readAsDataURL(file);
+  });
 }
 
 function matchesNoteView(article: StoredArticle, view: NoteView) {

@@ -1,4 +1,4 @@
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 export function MarkdownDocument({ body, title }: { body: string; title?: string }) {
@@ -6,6 +6,11 @@ export function MarkdownDocument({ body, title }: { body: string; title?: string
     <div className="desktop-markdown">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={(url, key) => (
+          key === "src" && /^data:image\/(?:png|jpe?g|gif|webp|bmp);base64,/i.test(url)
+            ? url
+            : defaultUrlTransform(url)
+        )}
         components={{
           a: ({ children, ...props }) => (
             <a {...props} target="_blank" rel="noreferrer">{children}</a>

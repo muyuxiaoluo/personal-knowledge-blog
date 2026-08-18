@@ -338,7 +338,7 @@ function SourceItem({ article, archived = false, onArchive, onDelete }: {
   </article>;
 }
 
-export function InboxPage({ articles, projects, onOpenArticle, onNewCapture, onMoveArticle, onConvertToAction, onConvertToProposal }: {
+export function InboxPage({ articles, projects, onOpenArticle, onNewCapture, onMoveArticle, onConvertToAction, onConvertToProposal, onDelete }: {
   articles: StoredArticle[];
   projects: ProjectSummary[];
   onOpenArticle: (article: StoredArticle) => void;
@@ -346,6 +346,7 @@ export function InboxPage({ articles, projects, onOpenArticle, onNewCapture, onM
   onMoveArticle: (article: StoredArticle, destination: "note" | "explore") => Promise<void>;
   onConvertToAction: (article: StoredArticle, projectId: string) => Promise<void>;
   onConvertToProposal: (article: StoredArticle, projectId: string) => Promise<void>;
+  onDelete: (article: StoredArticle) => Promise<void>;
 }) {
   const thoughts = articles.filter(isThoughtInboxArticle);
   return (
@@ -355,13 +356,13 @@ export function InboxPage({ articles, projects, onOpenArticle, onNewCapture, onM
         <button onClick={onNewCapture}>＋ 随手记一条</button>
       </header>
       <div className="inbox-groups">
-        <InboxGroup title="零散想法" items={thoughts} projects={projects} empty="目前没有待整理的想法。" onOpenArticle={onOpenArticle} onMoveArticle={onMoveArticle} onConvertToAction={onConvertToAction} onConvertToProposal={onConvertToProposal} />
+        <InboxGroup title="零散想法" items={thoughts} projects={projects} empty="目前没有待整理的想法。" onOpenArticle={onOpenArticle} onMoveArticle={onMoveArticle} onConvertToAction={onConvertToAction} onConvertToProposal={onConvertToProposal} onDelete={onDelete} />
       </div>
     </div>
   );
 }
 
-function InboxGroup({ title, items, projects, empty, onOpenArticle, onMoveArticle, onConvertToAction, onConvertToProposal }: {
+function InboxGroup({ title, items, projects, empty, onOpenArticle, onMoveArticle, onConvertToAction, onConvertToProposal, onDelete }: {
   title: string;
   items: StoredArticle[];
   projects: ProjectSummary[];
@@ -370,22 +371,26 @@ function InboxGroup({ title, items, projects, empty, onOpenArticle, onMoveArticl
   onMoveArticle: (article: StoredArticle, destination: "note" | "explore") => Promise<void>;
   onConvertToAction: (article: StoredArticle, projectId: string) => Promise<void>;
   onConvertToProposal: (article: StoredArticle, projectId: string) => Promise<void>;
+  onDelete: (article: StoredArticle) => Promise<void>;
 }) {
-  return <section className="workspace-card inbox-group"><CardHeader title={title} subtitle={`${items.length} 条`} />{items.length ? <div>{items.map((article) => <InboxItem key={article.id} article={article} projects={projects} onOpenArticle={onOpenArticle} onMoveArticle={onMoveArticle} onConvertToAction={onConvertToAction} onConvertToProposal={onConvertToProposal} />)}</div> : <p className="compact-empty">{empty}</p>}</section>;
+  return <section className="workspace-card inbox-group"><CardHeader title={title} subtitle={`${items.length} 条`} />{items.length ? <div>{items.map((article) => <InboxItem key={article.id} article={article} projects={projects} onOpenArticle={onOpenArticle} onMoveArticle={onMoveArticle} onConvertToAction={onConvertToAction} onConvertToProposal={onConvertToProposal} onDelete={onDelete} />)}</div> : <p className="compact-empty">{empty}</p>}</section>;
 }
 
-function InboxItem({ article, projects, onOpenArticle, onMoveArticle, onConvertToAction, onConvertToProposal }: {
+function InboxItem({ article, projects, onOpenArticle, onMoveArticle, onConvertToAction, onConvertToProposal, onDelete }: {
   article: StoredArticle;
   projects: ProjectSummary[];
   onOpenArticle: (article: StoredArticle) => void;
   onMoveArticle: (article: StoredArticle, destination: "note" | "explore") => Promise<void>;
   onConvertToAction: (article: StoredArticle, projectId: string) => Promise<void>;
   onConvertToProposal: (article: StoredArticle, projectId: string) => Promise<void>;
+  onDelete: (article: StoredArticle) => Promise<void>;
 }) {
   const [projectId, setProjectId] = useState(projects.find((project) => project.status === "active")?.id ?? "");
+  const quickCapture = article.source.includes("快速记录");
+  const preview = article.summary || plainExcerpt(article.body);
   return <article className="inbox-item">
-    <button className="inbox-item-main" onClick={() => onOpenArticle(article)}><i>{sourceMark(article)}</i><span><strong>{article.title}</strong><p>{article.summary || plainExcerpt(article.body)}</p><small>{formatRelativeDate(article.updated || article.created)}</small></span><em>打开 →</em></button>
-    <div className="inbox-item-actions"><button onClick={() => void onMoveArticle(article, "note")}>转笔记</button><button onClick={() => void onMoveArticle(article, "explore")}>转探索</button><select aria-label="选择项目" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">选择项目</option>{projects.filter((project) => project.status !== "completed").map((project) => <option value={project.id} key={project.id}>{project.title}</option>)}</select><button disabled={!projectId} onClick={() => void onConvertToAction(article, projectId)}>转行动</button><button disabled={!projectId} onClick={() => void onConvertToProposal(article, projectId)}>转提案</button></div>
+    <button className="inbox-item-main" onClick={() => onOpenArticle(article)}><i>{sourceMark(article)}</i><span className="inbox-item-copy"><strong>{quickCapture ? preview : article.title}</strong>{!quickCapture && preview && preview !== article.title && <p>{preview}</p>}<small>{article.source[0] || article.type} · {formatRelativeDate(article.updated || article.created)}</small></span><em>查看详情 →</em></button>
+    <div className="inbox-item-actions"><button onClick={() => void onMoveArticle(article, "note")}>转笔记</button><button onClick={() => void onMoveArticle(article, "explore")}>转探索</button><select aria-label="选择项目" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">选择项目</option>{projects.filter((project) => project.status !== "completed").map((project) => <option value={project.id} key={project.id}>{project.title}</option>)}</select><button disabled={!projectId} onClick={() => void onConvertToAction(article, projectId)}>转行动</button><button disabled={!projectId} onClick={() => void onConvertToProposal(article, projectId)}>转提案</button><button className="danger" aria-label={`删除 ${article.title}`} onClick={() => void onDelete(article)}>删除</button></div>
   </article>;
 }
 

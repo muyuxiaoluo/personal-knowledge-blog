@@ -314,8 +314,8 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
 
   async save(article: Article): Promise<StoredArticle> {
     const title = article.title.trim();
-    const body = article.body.trim();
-    if (!title || !body) {
+    const body = article.body;
+    if (!title || !body.trim()) {
       throw new ArticleRepositoryError("标题和正文不能为空", "invalid_data");
     }
 

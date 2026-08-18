@@ -15,6 +15,7 @@ export interface ProjectRepository {
   get(id: string): Promise<ProjectDetail | null>;
   saveProject(project: Project): Promise<Project>;
   saveWorkspace(project: Project, milestones: Milestone[], task: ProjectTask | null, branches?: Project[]): Promise<Project>;
+  removeProject(id: string): Promise<void>;
   saveMilestone(milestone: Milestone): Promise<Milestone>;
   removeMilestone(id: string): Promise<void>;
   saveTask(task: ProjectTask): Promise<ProjectTask>;
