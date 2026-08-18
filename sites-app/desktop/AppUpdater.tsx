@@ -45,7 +45,7 @@ async function checkWithPreferredProxy() {
 }
 
 export function AppUpdater() {
-  const [currentVersion, setCurrentVersion] = useState("0.5.3");
+  const [currentVersion, setCurrentVersion] = useState("0.5.4");
   const [phase, setPhase] = useState<UpdatePhase>("idle");
   const [available, setAvailable] = useState<AvailableUpdate | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -114,6 +114,20 @@ export function AppUpdater() {
       if (updateRef.current) void updateRef.current.close();
     };
   }, [checkForUpdates]);
+
+  useEffect(() => {
+    if (!dialogOpen) return;
+
+    /** 弹窗打开期间监听 Escape：下载/安装中不可关闭，其余情况与 × 按钮行为一致。 */
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      if (phase === "downloading" || phase === "installing") return;
+      setDialogOpen(false);
+    }
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [dialogOpen, phase]);
 
   async function installUpdate() {
     const update = updateRef.current;

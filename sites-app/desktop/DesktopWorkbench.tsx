@@ -293,8 +293,10 @@ export function DesktopWorkbench({
   }, []);
 
   useEffect(() => {
+    /** 全局键盘处理：modal 弹层（更新/账户）打开时忽略 Escape，避免穿透到背后文档。 */
     function handleKeyboard(event: KeyboardEvent) {
       if (event.key === "Escape") {
+        if (document.querySelector(".update-backdrop, .account-backdrop")) return;
         if (quickCaptureOpen) closeQuickCapture();
         else if (selectedId || editing) requestCloseDocument();
         return;

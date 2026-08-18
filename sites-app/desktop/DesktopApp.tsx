@@ -473,10 +473,18 @@ function AccountDock({
 
   useEffect(() => {
     if (!open) return;
+    /**
+     * 更新弹窗（.update-backdrop）通过 portal 渲染在 document.body 下，不在菜单节点内。
+     * 若弹窗打开期间关闭菜单，AppUpdater 会随菜单一起被卸载，导致弹窗立即消失、
+     * 无法点击"下载并安装"（pointerdown 先于 click 卸载按钮），因此此时忽略外部点击。
+     */
     function closeOutside(event: PointerEvent) {
+      if (document.querySelector(".update-backdrop")) return;
       if (!dockRef.current?.contains(event.target as Node)) setOpen(false);
     }
+    /** Escape 关闭菜单；更新弹窗打开期间同样忽略，避免弹窗被一并卸载。 */
     function closeOnEscape(event: KeyboardEvent) {
+      if (document.querySelector(".update-backdrop")) return;
       if (event.key === "Escape") setOpen(false);
     }
     document.addEventListener("pointerdown", closeOutside);
