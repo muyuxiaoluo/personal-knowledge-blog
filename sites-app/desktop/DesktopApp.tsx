@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isRegistered, register } from "@tauri-apps/plugin-global-shortcut";
 import Database from "@tauri-apps/plugin-sql";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppUpdater } from "./AppUpdater";
 import { DesktopWorkbench, type ThemeMode } from "./DesktopWorkbench";
@@ -17,8 +18,15 @@ import { initialProjectSeeds } from "../app/data/project-seeds";
 import { SqliteArticleRepository } from "../app/data/sqlite-article-repository";
 import { SqliteProjectRepository } from "../app/data/sqlite-project-repository";
 import { SqliteWorkRepository } from "../app/data/sqlite-work-repository";
+import { WorkspacePreferencesRepository } from "../app/data/workspace-preferences-repository";
+import {
+  readLegacyQuickLinks,
+  workspaceTitle,
+  type QuickLink,
+} from "../app/workspace-preferences";
 import seedArticles from "../app/generated/articles.json";
 import type { Article } from "../app/types";
+import { useConfirmDialog } from "./DesktopControls";
 
 const defaultServerUrl = "https://mind.47-108-88-117.sslip.io";
 const quickCaptureShortcut = "CommandOrControl+Shift+Space";
@@ -32,6 +40,7 @@ type DesktopRuntime = {
   articleRepository: SqliteArticleRepository;
   projectRepository: SqliteProjectRepository;
   workRepository: SqliteWorkRepository;
+  preferencesRepository: WorkspacePreferencesRepository;
   database: Database;
 };
 
@@ -53,6 +62,7 @@ type SyncNotice = {
 };
 
 export function DesktopApp() {
+  const confirm = useConfirmDialog();
   const [runtime, setRuntime] = useState<DesktopRuntime | null>(null);
   const [startupError, setStartupError] = useState("");
   const [showAccount, setShowAccount] = useState(false);
@@ -70,6 +80,8 @@ export function DesktopApp() {
   const [revision, setRevision] = useState(0);
   const [mutationRevision, setMutationRevision] = useState(0);
   const [workbenchEditing, setWorkbenchEditing] = useState(false);
+  const [displayName, setDisplayName] = useState("");
+  const [quickLinks, setQuickLinks] = useState<QuickLink[]>([]);
   const [notice, setNotice] = useState<SyncNotice>({
     tone: "quiet",
     text: "本地资料库准备中…",
@@ -91,8 +103,13 @@ export function DesktopApp() {
     if (!isTauri()) return;
     let unlisten: UnlistenFn | undefined;
     let disposed = false;
-    void listen("request-app-quit", () => {
-      if (workbenchEditing && !window.confirm("当前编辑还没有结束，确认退出应用吗？")) return;
+    void listen("request-app-quit", async () => {
+      if (workbenchEditing && !await confirm({
+        title: "退出前放弃未保存内容？",
+        description: "当前编辑还没有结束。退出后，尚未保存的内容不会保留。",
+        confirmLabel: "放弃并退出",
+        tone: "warning",
+      })) return;
       void invoke("quit_app");
     })
       .then((dispose) => {
@@ -104,7 +121,7 @@ export function DesktopApp() {
       disposed = true;
       unlisten?.();
     };
-  }, [workbenchEditing]);
+  }, [confirm, workbenchEditing]);
 
   useEffect(() => {
     if (!isTauri() || shortcutInitialization) return;
@@ -141,14 +158,20 @@ export function DesktopApp() {
           seedProjects: initialProjectSeeds,
         });
         const workRepository = new SqliteWorkRepository(transactionalDatabase);
+        const preferencesRepository = new WorkspacePreferencesRepository(transactionalDatabase);
         await Promise.all([
           articleRepository.list(),
           projectRepository.list(),
           workRepository.listPlans(),
         ]);
+        const preferences = await preferencesRepository.getPreferences();
+        const resolvedQuickLinks = preferences.quickLinks ?? readLegacyQuickLinks(localStorage);
+        if (!preferences.quickLinks) await preferencesRepository.saveQuickLinks(resolvedQuickLinks);
         const pending = await articleRepository.listPendingChanges();
         if (!active) return;
-        setRuntime({ articleRepository, projectRepository, workRepository, database });
+        setRuntime({ articleRepository, projectRepository, workRepository, preferencesRepository, database });
+        setDisplayName(preferences.displayName);
+        setQuickLinks(resolvedQuickLinks);
         setPendingCount(pending.length);
         setNotice({ tone: "quiet", text: "" });
       })
@@ -160,6 +183,12 @@ export function DesktopApp() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    const title = workspaceTitle(displayName);
+    document.title = title;
+    if (isTauri()) void getCurrentWindow().setTitle(title).catch(() => undefined);
+  }, [displayName]);
 
   const syncClient = useMemo(
     () =>
@@ -280,7 +309,12 @@ export function DesktopApp() {
       setNotice({ tone: "warning", text: "还没有可恢复的本地备份。" });
       return;
     }
-    if (!window.confirm(`确认恢复最近备份吗？\n\n${latest.path}\n\n当前资料库会先自动保存一个安全副本，随后应用将重启。`)) return;
+    if (!await confirm({
+      title: "恢复最近一次备份？",
+      description: <><p>{latest.path}</p><p>当前资料库会先自动保存一个安全副本，随后应用将重启。</p></>,
+      confirmLabel: "恢复并重启",
+      tone: "warning",
+    })) return;
     setBackingUp(true);
     setNotice({ tone: "quiet", text: "正在安全恢复本地备份…" });
     try {
@@ -290,7 +324,13 @@ export function DesktopApp() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "恢复备份失败";
       setBackingUp(false);
-      window.alert(`${message}\n\n资料库连接已经关闭，应用将立即重启以恢复正常使用。`);
+      await confirm({
+        title: "恢复没有完成",
+        description: <><p>{message}</p><p>资料库连接已经关闭，应用将立即重启以恢复正常使用。</p></>,
+        confirmLabel: "立即重启",
+        cancelLabel: "关闭提示",
+        tone: "warning",
+      });
       await relaunch().catch(() => {
         setNotice({ tone: "warning", text: `${message}；请手动重新启动应用。` });
       });
@@ -315,7 +355,7 @@ export function DesktopApp() {
   if (!runtime) {
     return (
       <main className="desktop-startup">
-        <span>人生攻略库</span>
+        <span>个人工作台</span>
         <h1>正在打开你的书桌</h1>
         <p>内容只会先保存在这台设备上。</p>
       </main>
@@ -330,12 +370,22 @@ export function DesktopApp() {
         repository={runtime.articleRepository}
         projectRepository={runtime.projectRepository}
         workRepository={runtime.workRepository}
+        displayName={displayName}
+        quickLinks={quickLinks}
         dataRevision={revision}
         themeMode={themeMode}
         backingUp={backingUp}
         onThemeChange={changeTheme}
         onCreateBackup={() => void createBackup()}
         onRestoreBackup={() => void restoreLatestBackup()}
+        onSaveDisplayName={async (name) => {
+          await runtime.preferencesRepository.saveDisplayName(name);
+          setDisplayName(name.trim().slice(0, 24));
+        }}
+        onSaveQuickLinks={async (links) => {
+          setQuickLinks(links);
+          await runtime.preferencesRepository.saveQuickLinks(links);
+        }}
         onEditingStateChange={setWorkbenchEditing}
         accountDock={
           <AccountDock

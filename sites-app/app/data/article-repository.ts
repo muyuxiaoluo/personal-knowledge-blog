@@ -20,6 +20,7 @@ export interface ArticleRepository {
   list(): Promise<StoredArticle[]>;
   save(article: Article): Promise<StoredArticle>;
   remove(id: string): Promise<void>;
+  restore(id: string): Promise<StoredArticle>;
 }
 
 export interface SyncCapableArticleRepository extends ArticleRepository {

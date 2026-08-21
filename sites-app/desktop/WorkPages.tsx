@@ -2,7 +2,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { isSourceArticle, isThoughtInboxArticle, pickRediscoverySource } from "../app/article-helpers";
-import { calendarDayDifference, formatRelativeDueDate } from "../app/date-helpers";
+import { calendarDayDifference, classifyDeadlineUrgency, formatRelativeDueDate } from "../app/date-helpers";
 import type {
   ProjectDetail,
   ProjectStatus,
@@ -11,6 +11,8 @@ import type {
 } from "../app/project-types";
 import type { StoredArticle } from "../app/types";
 import type { DailyCloseout, FocusSession, TaskPlan, WeeklyFocus } from "../app/work-types";
+import { type QuickLink, type QuickLinkCategory } from "../app/workspace-preferences";
+import { DateField, SelectMenu, useConfirmDialog } from "./DesktopControls";
 
 export type WorkspaceTask = ProjectTask & {
   projectTitle: string;
@@ -47,6 +49,8 @@ export function HomeDashboard({
   tasks,
   articles,
   weeklyFocus,
+  quickLinks,
+  onSaveQuickLinks,
   onSaveWeeklyFocus,
   onOpenArticle,
   onOpenProject,
@@ -57,6 +61,8 @@ export function HomeDashboard({
   tasks: WorkspaceTask[];
   articles: StoredArticle[];
   weeklyFocus: WeeklyFocus | null;
+  quickLinks: QuickLink[];
+  onSaveQuickLinks: (links: QuickLink[]) => Promise<void>;
   onSaveWeeklyFocus: (primaryOutcome: string, secondaryOutcome: string) => Promise<void>;
   onOpenArticle: (article: StoredArticle) => void;
   onOpenProject: (projectId: string) => void;
@@ -69,8 +75,9 @@ export function HomeDashboard({
     setPrimaryOutcome(weeklyFocus?.primaryOutcome ?? "");
     setSecondaryOutcome(weeklyFocus?.secondaryOutcome ?? "");
   }, [weeklyFocus]);
+  // 与“添加行动”下拉框保持一致：只要项目未完成（含支线、等待中、已暂停），其任务都可以被安排到今天。
   const available = tasks
-    .filter((task) => task.status !== "done" && task.status !== "waiting" && task.projectStatus === "active")
+    .filter((task) => task.status !== "done" && task.status !== "waiting" && task.projectStatus !== "completed")
     .sort((left, right) => taskRank(left, today) - taskRank(right, today));
   const planned = available.filter((task) => task.plan?.plannedDate === today);
   const primaryTask = planned[0] ?? null;
@@ -110,7 +117,7 @@ export function HomeDashboard({
           {primaryTask ? (
             <div className="home-strategy-body">
               <div className="home-action-core">
-                <p><span>阶段 {primaryTask.stageIndex}/{primaryTask.stageCount}</span><b>{primaryTask.stageTitle || "未关联阶段"}</b>{actionDueDate(primaryTask) && <time>{formatDueDate(actionDueDate(primaryTask))}</time>}</p>
+                <p><span>阶段 {primaryTask.stageIndex}/{primaryTask.stageCount}</span><b>{primaryTask.stageTitle || "未关联阶段"}</b>{actionDueDate(primaryTask) && <time className={classifyDeadlineUrgency(actionDueDate(primaryTask), today)?.tone ?? ""}>{deadlineLabel(primaryTask, today)}</time>}</p>
                 <h1>{actionDisplayTitle(primaryTask)}</h1>
                 <StageProgress task={primaryTask} />
                 <details className="action-disclosure">
@@ -141,7 +148,7 @@ export function HomeDashboard({
             {alternatives.map((task) => (
               <button key={task.id} onClick={onOpenTasks}>
                 <span><strong>{actionDisplayTitle(task)}</strong><small>{task.projectTitle} · {task.stageTitle || "未关联阶段"}</small></span>
-                <em>{actionDueDate(task) ? formatDueDate(actionDueDate(task)) : "稍后"}</em>
+                <em className={actionDueDate(task) ? classifyDeadlineUrgency(actionDueDate(task), today)?.tone ?? "" : ""}>{actionDueDate(task) ? deadlineLabel(task, today) : "稍后"}</em>
               </button>
             ))}
           </section>}
@@ -149,7 +156,7 @@ export function HomeDashboard({
       </div>
 
       <div className="home-bottom-grid">
-        <QuickLinks />
+        <QuickLinks links={quickLinks} onSave={onSaveQuickLinks} />
         <section className="workspace-card home-context-card">
           <CardHeader title="一条相关旧经验" subtitle={primaryTask ? `与你今天推进的「${primaryTask.projectTitle}」有关` : "安排今日行动后再寻找"} />
           {echo ? (
@@ -181,6 +188,7 @@ export function TasksPage({
   projectDetails,
   onAddTask,
   onRestoreTask,
+  onRemoveTask,
   onOpenProject,
   ...taskActions
 }: {
@@ -190,9 +198,10 @@ export function TasksPage({
   projectDetails: ProjectDetail[];
   onAddTask: (input: NewActionInput) => Promise<void>;
   onRestoreTask: (task: WorkspaceTask) => void;
+  onRemoveTask: (task: WorkspaceTask) => void;
   onOpenProject: (projectId: string) => void;
 } & TaskActions) {
-  const [tab, setTab] = useState<"today" | "soon" | "candidate" | "waiting" | "done">("today");
+  const [tab, setTab] = useState<"today" | "overdue" | "soon" | "candidate" | "waiting" | "done">("today");
   const [showComposer, setShowComposer] = useState(false);
   const initialProjectId = projects.find((item) => item.status === "active")?.id || "";
   const [projectId, setProjectId] = useState(initialProjectId);
@@ -201,13 +210,23 @@ export function TasksPage({
   const [details, setDetails] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [planOnSave, setPlanOnSave] = useState(false);
-  const available = tasks.filter((task) => task.status !== "done" && task.status !== "waiting" && task.projectStatus === "active").sort((a, b) => taskRank(a, today) - taskRank(b, today));
+  useEffect(() => {
+    if (!showComposer) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowComposer(false);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [showComposer]);
+  // 与“添加行动”下拉框保持一致：只要项目未完成（含支线、等待中、已暂停），其任务都可以被安排到今天。
+  const available = tasks.filter((task) => task.status !== "done" && task.status !== "waiting" && task.projectStatus !== "completed").sort((a, b) => taskRank(a, today) - taskRank(b, today));
   const plannedToday = available.filter((task) => task.plan?.plannedDate === today);
+  const overdue = available.filter((task) => task.plan?.plannedDate !== today && deadlineDifference(task, today) !== null && deadlineDifference(task, today)! < 0);
   const soon = available.filter((task) => task.plan?.plannedDate !== today && isDueSoon(task, today));
-  const candidates = available.filter((task) => task.plan?.plannedDate !== today && !isDueSoon(task, today));
+  const candidates = available.filter((task) => task.plan?.plannedDate !== today && !isDueSoon(task, today) && !overdue.some((item) => item.id === task.id));
   const waiting = tasks.filter((task) => task.status === "waiting");
   const done = tasks.filter((task) => task.status === "done");
-  const visible = tab === "today" ? plannedToday : tab === "soon" ? soon : tab === "candidate" ? candidates : tab === "waiting" ? waiting : done;
+  const visible = tab === "today" ? plannedToday : tab === "overdue" ? overdue : tab === "soon" ? soon : tab === "candidate" ? candidates : tab === "waiting" ? waiting : done;
   const selectedProject = projectDetails.find((detail) => detail.project.id === projectId);
 
   function chooseProject(value: string) {
@@ -232,6 +251,7 @@ export function TasksPage({
 
       <nav className="task-tabs" aria-label="行动视图">
         <button className={tab === "today" ? "active" : ""} onClick={() => setTab("today")}>今天 <span>{plannedToday.length}</span></button>
+        <button className={tab === "overdue" ? "active overdue" : ""} onClick={() => setTab("overdue")}>已逾期 <span>{overdue.length}</span></button>
         <button className={tab === "soon" ? "active" : ""} onClick={() => setTab("soon")}>临近截止 <span>{soon.length}</span></button>
         <button className={tab === "candidate" ? "active" : ""} onClick={() => setTab("candidate")}>候选 <span>{candidates.length}</span></button>
         <button className={tab === "waiting" ? "active" : ""} onClick={() => setTab("waiting")}>等待反馈 <span>{waiting.length}</span></button>
@@ -239,7 +259,7 @@ export function TasksPage({
       </nav>
 
       <section className="task-list-shell action-list-shell">
-        <header><div><strong>{tab === "today" ? "今天已经选择" : tab === "soon" ? "需要留意的截止" : tab === "candidate" ? "从项目阶段中挑选" : tab === "waiting" ? "暂时不用盯着" : "已经留下的结果"}</strong></div></header>
+        <header><div><strong>{tab === "today" ? "今天已经选择" : tab === "overdue" ? "需要立即处理或调整日期" : tab === "soon" ? "未来两天需要留意" : tab === "candidate" ? "从项目阶段中挑选" : tab === "waiting" ? "暂时不用盯着" : "已经留下的结果"}</strong></div></header>
         <div className="task-list-large">
           {visible.length ? visible.map((task) => (
             <ActionRow
@@ -249,6 +269,7 @@ export function TasksPage({
               done={tab === "done"}
               onOpenProject={onOpenProject}
               onRestoreTask={onRestoreTask}
+              onRemoveTask={onRemoveTask}
               {...taskActions}
             />
           )) : <EmptyState title={tab === "done" ? "还没有已完成行动" : "这个视图暂时是空的"} body="行动会归属到项目阶段，而不是孤零零地堆在这里。" />}
@@ -260,11 +281,11 @@ export function TasksPage({
           <aside className="task-drawer action-drawer" role="dialog" aria-modal="true" aria-label="添加行动">
             <header><div><span>新的行动</span><h2>添加阶段行动</h2></div><button onClick={() => setShowComposer(false)} aria-label="关闭">×</button></header>
             <form onSubmit={submit}>
-              <label><span>所属项目</span><select value={projectId} onChange={(event) => chooseProject(event.target.value)}><option value="">选择项目</option>{projects.filter((project) => project.status !== "completed").map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></label>
-              <label><span>所属阶段</span><select value={milestoneId} onChange={(event) => setMilestoneId(event.target.value)}><option value="">暂不关联</option>{selectedProject?.milestones.map((milestone) => <option key={milestone.id} value={milestone.id}>{milestone.status === "current" ? "当前 · " : ""}{milestone.title}</option>)}</select></label>
+              <label><span>所属项目</span><SelectMenu label="所属项目" value={projectId} onChange={chooseProject} options={[{ value: "", label: "选择项目" }, ...projects.filter((project) => project.status !== "completed").map((project) => ({ value: project.id, label: project.title }))]} /></label>
+              <label><span>所属阶段</span><SelectMenu label="所属阶段" value={milestoneId} onChange={setMilestoneId} options={[{ value: "", label: "暂不关联" }, ...(selectedProject?.milestones ?? []).map((milestone) => ({ value: milestone.id, label: `${milestone.status === "current" ? "当前 · " : ""}${milestone.title}` }))]} /></label>
               <label><span>下一步要做什么</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：比较三个方向并写下结论" /></label>
               <label><span>具体做法</span><textarea value={details} onChange={(event) => setDetails(event.target.value)} placeholder="真正准备开始时，需要按什么顺序做？" /></label>
-              <label><span>截止时间 · 可选</span><input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} /></label>
+              <DateField label="截止时间" value={dueDate} onChange={setDueDate} />
               <label className="task-today-toggle"><input type="checkbox" checked={planOnSave} onChange={(event) => setPlanOnSave(event.target.checked)} /><span><strong>安排到今天</strong><small>不会启动计时，也可以随时撤销</small></span></label>
               <footer><button type="button" onClick={() => setShowComposer(false)}>取消</button><button className="primary" disabled={!title.trim() || !projectId}>保存行动</button></footer>
             </form>
@@ -386,11 +407,13 @@ function InboxItem({ article, projects, onOpenArticle, onMoveArticle, onConvertT
   onDelete: (article: StoredArticle) => Promise<void>;
 }) {
   const [projectId, setProjectId] = useState(projects.find((project) => project.status === "active")?.id ?? "");
+  const [organizingProject, setOrganizingProject] = useState(false);
   const quickCapture = article.source.includes("快速记录");
   const preview = article.summary || plainExcerpt(article.body);
   return <article className="inbox-item">
     <button className="inbox-item-main" onClick={() => onOpenArticle(article)}><i>{sourceMark(article)}</i><span className="inbox-item-copy"><strong>{quickCapture ? preview : article.title}</strong>{!quickCapture && preview && preview !== article.title && <p>{preview}</p>}<small>{article.source[0] || article.type} · {formatRelativeDate(article.updated || article.created)}</small></span><em>查看详情 →</em></button>
-    <div className="inbox-item-actions"><button onClick={() => void onMoveArticle(article, "note")}>转笔记</button><button onClick={() => void onMoveArticle(article, "explore")}>转探索</button><select aria-label="选择项目" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">选择项目</option>{projects.filter((project) => project.status !== "completed").map((project) => <option value={project.id} key={project.id}>{project.title}</option>)}</select><button disabled={!projectId} onClick={() => void onConvertToAction(article, projectId)}>转行动</button><button disabled={!projectId} onClick={() => void onConvertToProposal(article, projectId)}>转提案</button><button className="danger" aria-label={`删除 ${article.title}`} onClick={() => void onDelete(article)}>删除</button></div>
+    <div className="inbox-item-actions"><button onClick={() => void onMoveArticle(article, "note")}>整理为笔记</button><button onClick={() => void onMoveArticle(article, "explore")}>放入探索库</button><button className={organizingProject ? "active" : ""} onClick={() => setOrganizingProject((value) => !value)}>纳入项目{organizingProject ? " ↑" : "…"}</button><button className="danger" aria-label={`删除 ${article.title}`} onClick={() => void onDelete(article)}>删除</button></div>
+    {organizingProject && <section className="inbox-project-panel"><div><strong>把它放进哪个项目？</strong><p>转为行动适合已经明确要做的事；转为提案适合还需要判断价值和成本的想法。</p></div><SelectMenu label="选择项目" value={projectId} onChange={setProjectId} options={[{ value: "", label: "选择项目" }, ...projects.filter((project) => project.status !== "completed").map((project) => ({ value: project.id, label: project.title }))]} /><footer><button disabled={!projectId} onClick={() => void onConvertToAction(article, projectId)}>转为行动</button><button disabled={!projectId} onClick={() => void onConvertToProposal(article, projectId)}>转为提案</button></footer></section>}
   </article>;
 }
 
@@ -435,7 +458,7 @@ export function ReviewPage({ projects, projectDetails, articles, tasks, weeklyFo
   return (
     <div className="review-page workspace-scroll">
       <header className="workspace-page-heading"><div><h1>本周回顾</h1><p>{weeklyFocus?.primaryOutcome ? `本周主结果：${weeklyFocus.primaryOutcome}` : "查看留下了什么结果、判断与经验，而不是用计时证明自己很忙。"}</p></div></header>
-      <div className="review-metrics"><article><span>行动结果</span><strong>{weekCompleted.length}</strong><small>项行动在本周完成</small></article><article><span>累计阶段</span><strong>{completedStages}</strong><small>个项目阶段已经走过</small></article><article><span>知识沉淀</span><strong>{weekArticles.length}</strong><small>条笔记或资料有更新</small></article></div>
+      <div className="review-metrics"><article><span>本周完成行动</span><strong>{weekCompleted.length}</strong><small>项行动在本周完成</small></article><article><span>全部累计阶段</span><strong>{completedStages}</strong><small>个项目阶段已经走过</small></article><article><span>本周更新笔记</span><strong>{weekArticles.length}</strong><small>条笔记或资料有更新</small></article></div>
       <div className="review-grid">
         <section className="workspace-card review-project-time"><CardHeader title="项目进展" subtitle={weekProgress.length ? `${progressGroups.length} 个项目 · ${weekProgress.length} 条记录` : "完成与接续记录"} />{progressGroups.length ? <div className="review-project-groups">{progressGroups.map((group) => <article className="review-project-group" key={group.projectId}><header><strong>{group.projectTitle}</strong><span>{group.items.length} 条</span></header><div>{group.items.map((item) => <div className="review-progress-row" key={item.id}><i>{item.kind}</i><span><strong>{item.title}</strong><small>{item.detail}</small></span></div>)}</div></article>)}</div> : <div className="review-compact-empty"><strong>本周还没有项目进展</strong><p>完成行动或写下“今天做到哪里”，这里就会按项目归拢。</p></div>}</section>
         <section className="workspace-card review-growth"><CardHeader title="本周留下了什么" subtitle="最近更新的经验、思考和资料" />{weekArticles.slice(0, 6).map((article) => <p key={article.id}><span>{natureLabel(article)}</span><strong>{article.title}</strong><small>{formatRelativeDate(article.updated || article.created)}</small></p>)}{!weekArticles.length && <EmptyState title="还没有新的沉淀" body="完成工作后留一句发现，也是一种可见的成长。" />}</section>
@@ -451,19 +474,20 @@ export function ReviewPage({ projects, projectDetails, articles, tasks, weeklyFo
   );
 }
 
-function ActionRow({ task, today, done, onOpenProject, onRestoreTask, onCompleteTask, onPlanToday, onRemoveFromToday, onStartFocus, onStopFocus, activeSession }: { task: WorkspaceTask; today: string; done: boolean; onOpenProject: (projectId: string) => void; onRestoreTask: (task: WorkspaceTask) => void } & TaskActions) {
+function ActionRow({ task, today, done, onOpenProject, onRestoreTask, onRemoveTask, onCompleteTask, onPlanToday, onRemoveFromToday, onStartFocus, onStopFocus, activeSession }: { task: WorkspaceTask; today: string; done: boolean; onOpenProject: (projectId: string) => void; onRestoreTask: (task: WorkspaceTask) => void; onRemoveTask: (task: WorkspaceTask) => void } & TaskActions) {
   const plannedToday = task.plan?.plannedDate === today;
   const title = actionDisplayTitle(task);
+  const urgency = actionDueDate(task) ? classifyDeadlineUrgency(actionDueDate(task), today) : null;
   return (
     <article className={`workspace-task action-row ${plannedToday ? "is-today" : ""} ${done ? "is-done" : ""}`}>
       <div className="action-row-main">
         <header><button className="action-context" onClick={() => onOpenProject(task.projectId)}>{task.projectTitle} <i>›</i></button><span>阶段 {task.stageIndex}/{task.stageCount}</span>{plannedToday && <b>已安排到今天</b>}</header>
         <h2>{title}</h2>
         {task.stageTitle && title !== task.stageTitle && <p className="action-stage-title">当前阶段：{task.stageTitle}</p>}
-        <div className="action-row-meta"><span className={actionDueDate(task) ? "has-due" : ""}>{actionDueDate(task) ? formatDueDate(actionDueDate(task)) : "无硬性截止"}</span><StageProgress task={task} compact /></div>
+        <div className="action-row-meta"><span className={`${actionDueDate(task) ? "has-due" : ""} ${urgency?.tone ?? ""}`}>{urgency?.label ?? (actionDueDate(task) ? formatDueDate(actionDueDate(task)) : "无硬性截止")}</span><StageProgress task={task} compact /></div>
         <details className="action-disclosure"><summary>展开具体做法</summary><div><p>{task.details || "还没有补充具体做法。"}</p>{task.waitingFor && <p><strong>正在等待</strong>{task.waitingFor}</p>}</div></details>
       </div>
-      <div className="action-row-actions">{done ? <button onClick={() => onRestoreTask(task)}>恢复</button> : <><button onClick={() => onCompleteTask(task)}>✓ 完成</button>{activeSession?.taskId === task.id ? <button onClick={onStopFocus}>■ 结束投入</button> : !activeSession && <button onClick={() => onStartFocus(task)}>▷ 开始投入</button>}{plannedToday ? <button onClick={() => onRemoveFromToday(task)}>取消今日安排</button> : <button onClick={() => onPlanToday(task)}>安排到今天</button>}</>}</div>
+      <div className="action-row-actions">{done ? <button onClick={() => onRestoreTask(task)}>恢复</button> : <><button onClick={() => onCompleteTask(task)}>✓ 完成</button>{activeSession?.taskId === task.id ? <button onClick={onStopFocus}>■ 结束投入</button> : !activeSession && <button onClick={() => onStartFocus(task)}>▷ 开始投入</button>}{plannedToday ? <button onClick={() => onRemoveFromToday(task)}>取消今日安排</button> : <button onClick={() => onPlanToday(task)}>安排到今天</button>}<button className="danger" onClick={() => onRemoveTask(task)}>删除</button></>}</div>
     </article>
   );
 }
@@ -474,12 +498,10 @@ function StageProgress({ task, compact = false }: { task: WorkspaceTask; compact
   return <div className={`stage-progress ${compact ? "compact" : ""}`}><i><b style={{ width: `${ratio}%` }} /></i><span>{task.stageCompletedTasks}/{task.stageTaskCount || 0} 个阶段行动完成</span></div>;
 }
 
-type QuickLinkCategory = "research" | "creative" | "content" | "general";
-type QuickLink = { id: string; title: string; url: string; category: QuickLinkCategory; pinned: boolean; order: number };
 const quickLinkCategories: Record<QuickLinkCategory, string> = { research: "科研学习", creative: "创作开发", content: "内容平台", general: "常用工具" };
 
-function QuickLinks() {
-  const [links, setLinks] = useState<QuickLink[]>(readQuickLinks);
+function QuickLinks({ links, onSave }: { links: QuickLink[]; onSave: (links: QuickLink[]) => Promise<void> }) {
+  const confirm = useConfirmDialog();
   const [expanded, setExpanded] = useState(false);
   const [adding, setAdding] = useState(false);
   const [title, setTitle] = useState("");
@@ -489,9 +511,9 @@ function QuickLinks() {
   const [deleted, setDeleted] = useState<{ link: QuickLink; index: number } | null>(null);
   const pinned = [...links].filter((link) => link.pinned).sort((a, b) => a.order - b.order).slice(0, 4);
 
-  function save(next: QuickLink[]) { setLinks(next); localStorage.setItem("life-strategy.quick-links-v2", JSON.stringify(next)); }
+  function save(next: QuickLink[]) { void onSave(next); }
   function submit(event: FormEvent) { event.preventDefault(); if (!title.trim() || !url.trim()) return; const normalized = /^https?:\/\//i.test(url) ? url : `https://${url}`; save([...links, { id: `link-${Date.now()}`, title: title.trim(), url: normalized, category, pinned: pinned.length < 4, order: links.length }]); setTitle(""); setUrl(""); setAdding(false); }
-  function remove(link: QuickLink) { if (!window.confirm(`确认删除工具“${link.title}”吗？`)) return; const index = links.findIndex((item) => item.id === link.id); save(links.filter((item) => item.id !== link.id)); setDeleted({ link, index }); }
+  async function remove(link: QuickLink) { if (!await confirm({ title: `删除工具“${link.title}”？`, description: "只会删除这个快捷入口，不会影响对应网站或本地数据。", confirmLabel: "删除入口", tone: "danger" })) return; const index = links.findIndex((item) => item.id === link.id); save(links.filter((item) => item.id !== link.id)); setDeleted({ link, index }); }
   function undoDelete() { if (!deleted) return; const next = [...links]; next.splice(deleted.index, 0, deleted.link); save(next); setDeleted(null); }
   function togglePin(link: QuickLink) { if (!link.pinned && pinned.length >= 4) { setOpenError("首页最多置顶四个工具，请先取消一个置顶。"); return; } setOpenError(""); save(links.map((item) => item.id === link.id ? { ...item, pinned: !item.pinned } : item)); }
   async function openLink(target: string) { setOpenError(""); try { await openExternalUrl(target); } catch { setOpenError("未能打开该入口，请检查网址或系统默认浏览器设置。"); } }
@@ -501,15 +523,15 @@ function QuickLinks() {
       <CardHeader title="常用工具" subtitle="固定常用入口，也可以随时整理" action={expanded ? "完成" : "管理工具"} onAction={() => setExpanded((value) => !value)} />
       {pinned.length ? <div className="pinned-tools">{pinned.map((link) => <article key={link.id}>
         <button className="pinned-tool-open" type="button" onClick={() => void openLink(link.url)}><i>{link.title.slice(0, 1)}</i><span><strong>{link.title}</strong><small>{safeHost(link.url)}</small></span><em>↗</em></button>
-        <div><button className="pinned" onClick={() => togglePin(link)} title="取消置顶" aria-label={`取消置顶 ${link.title}`}>★</button><button className="danger" onClick={() => remove(link)} title="删除" aria-label={`删除 ${link.title}`}>删除</button></div>
+        <div><button className="pinned" onClick={() => togglePin(link)} title="取消置顶" aria-label={`取消置顶 ${link.title}`}>★</button><button className="danger" onClick={() => void remove(link)} title="删除" aria-label={`删除 ${link.title}`}>删除</button></div>
       </article>)}</div> : <p className="tool-empty">还没有置顶工具，展开管理面板选择常用入口。</p>}
       {expanded && <div className="tool-library">
         <header><div><strong>管理全部工具</strong><span>{links.length} 个入口 · 最多置顶 4 个</span></div><button onClick={() => setAdding((value) => !value)}>{adding ? "取消添加" : "＋ 添加工具"}</button></header>
-        {adding && <form className="tool-add-form" onSubmit={submit}><label><span>名称</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：Zotero" /></label><label><span>网址</span><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://..." /></label><label><span>分类</span><select value={category} onChange={(event) => setCategory(event.target.value as QuickLinkCategory)}>{Object.entries(quickLinkCategories).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><button>保存工具</button></form>}
+        {adding && <form className="tool-add-form" onSubmit={submit}><label><span>名称</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：Zotero" /></label><label><span>网址</span><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://..." /></label><label><span>分类</span><SelectMenu label="工具分类" value={category} onChange={(value) => setCategory(value as QuickLinkCategory)} options={Object.entries(quickLinkCategories).map(([value, label]) => ({ value, label }))} /></label><button>保存工具</button></form>}
         <div className="tool-groups">{Object.entries(quickLinkCategories).map(([value, label]) => {
           const categoryLinks = links.filter((link) => link.category === value);
           if (!categoryLinks.length) return null;
-          return <section className="tool-group" key={value}><header><strong>{label}</strong><span>{categoryLinks.length}</span></header><div>{categoryLinks.map((link) => <article className="tool-row" key={link.id}><button className="tool-row-open" onClick={() => void openLink(link.url)}><i>{link.title.slice(0, 1)}</i><span><strong>{link.title}</strong><small>{link.url}</small></span></button><div><button className={link.pinned ? "pinned" : ""} onClick={() => togglePin(link)}>{link.pinned ? "取消置顶" : "置顶"}</button><button className="danger" onClick={() => remove(link)}>删除</button></div></article>)}</div></section>;
+          return <section className="tool-group" key={value}><header><strong>{label}</strong><span>{categoryLinks.length}</span></header><div>{categoryLinks.map((link) => <article className="tool-row" key={link.id}><button className="tool-row-open" onClick={() => void openLink(link.url)}><i>{link.title.slice(0, 1)}</i><span><strong>{link.title}</strong><small>{link.url}</small></span></button><div><button className={link.pinned ? "pinned" : ""} onClick={() => togglePin(link)}>{link.pinned ? "取消置顶" : "置顶"}</button><button className="danger" onClick={() => void remove(link)}>删除</button></div></article>)}</div></section>;
         })}</div>
         {deleted && <div className="tool-undo"><span>已删除“{deleted.link.title}”</span><button onClick={undoDelete}>撤销</button></div>}
       </div>}
@@ -518,31 +540,15 @@ function QuickLinks() {
   );
 }
 
-function readQuickLinks(): QuickLink[] {
-  try {
-    const current = localStorage.getItem("life-strategy.quick-links-v2");
-    if (current) return JSON.parse(current) as QuickLink[];
-    const legacy = localStorage.getItem("life-strategy.quick-links");
-    if (legacy) return (JSON.parse(legacy) as Array<{ title: string; url: string }>).map((link, index) => ({ id: `legacy-${index}`, ...link, category: inferLinkCategory(link.url), pinned: index < 4, order: index }));
-  } catch { /* fall through to defaults */ }
-  return defaultQuickLinks;
-}
-
-const defaultQuickLinks: QuickLink[] = [
-  { id: "bilibili", title: "哔哩哔哩", url: "https://www.bilibili.com", category: "content", pinned: true, order: 0 },
-  { id: "douyin", title: "抖音", url: "https://www.douyin.com", category: "content", pinned: false, order: 1 },
-  { id: "zotero", title: "Zotero", url: "https://www.zotero.org", category: "research", pinned: true, order: 2 },
-  { id: "github", title: "GitHub", url: "https://github.com", category: "creative", pinned: true, order: 3 },
-  { id: "arxiv", title: "arXiv", url: "https://arxiv.org", category: "research", pinned: true, order: 4 },
-  { id: "scholar", title: "Google 学术", url: "https://scholar.google.com", category: "research", pinned: false, order: 5 },
-];
 
 function CardHeader({ title, subtitle, action, onAction }: { title: string; subtitle: string; action?: string; onAction?: () => void }) { return <header className="card-header"><div><strong>{title}</strong><span>{subtitle}</span></div>{action && <button onClick={onAction}>{action} →</button>}</header>; }
 function EmptyState({ title, body }: { title: string; body: string }) { return <div className="workspace-empty"><strong>{title}</strong><p>{body}</p></div>; }
 async function openExternalUrl(url: string) { if (isTauri()) { await openUrl(url); return; } window.open(url, "_blank", "noopener,noreferrer"); }
 function taskRank(task: WorkspaceTask, today: string) { const todayRank = task.plan?.plannedDate === today ? 0 : task.status === "next" ? 4 : 10; const dueDifference = actionDueDate(task) ? calendarDayDifference(actionDueDate(task), today) : null; const dueRank = dueDifference === null ? 30 : Math.max(0, dueDifference); return todayRank + dueRank / 100 + task.sortOrder / 1000; }
-function isDueSoon(task: WorkspaceTask, today: string) { const due = actionDueDate(task); if (!due) return false; const difference = calendarDayDifference(due, today); return difference !== null && difference <= 2; }
+function deadlineDifference(task: WorkspaceTask, today: string) { const due = actionDueDate(task); return due ? calendarDayDifference(due, today) : null; }
+function isDueSoon(task: WorkspaceTask, today: string) { const difference = deadlineDifference(task, today); return difference !== null && difference >= 0 && difference <= 2; }
 function actionDueDate(task: WorkspaceTask) { return task.dueDate || task.stageDueDate; }
+function deadlineLabel(task: WorkspaceTask, today: string) { const due = actionDueDate(task); return due ? classifyDeadlineUrgency(due, today)?.label ?? formatDueDate(due) : ""; }
 function formatDueDate(value: string) { return formatRelativeDueDate(value); }
 function selectContextualEcho(articles: StoredArticle[], task: WorkspaceTask | null, today: string) {
   if (!task) return null;
@@ -552,7 +558,6 @@ function selectContextualEcho(articles: StoredArticle[], task: WorkspaceTask | n
   const best = scored[0];
   return best ? { article: best.article, reason: best.matched.length ? `与 ${best.matched.slice(0, 2).join("、")} 相关` : "与当前项目相关" } : null;
 }
-function inferLinkCategory(url: string): QuickLinkCategory { const value = url.toLocaleLowerCase(); if (/arxiv|scholar|zotero/.test(value)) return "research"; if (/github|figma|notion/.test(value)) return "creative"; if (/bilibili|douyin|youtube/.test(value)) return "content"; return "general"; }
 function safeHost(url: string) { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; } }
 function greeting() { const hour = new Date().getHours(); if (hour < 6) return "夜深了"; if (hour < 11) return "早上好"; if (hour < 14) return "中午好"; if (hour < 18) return "下午好"; return "晚上好"; }
 function formatLongDate(value: string) { return new Date(`${value}T12:00:00`).toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "long" }); }

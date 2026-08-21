@@ -118,6 +118,12 @@ test("persists articles and sync metadata in a real SQLite database", async () =
   assert.equal(pending.length, 1);
   assert.equal(pending[0].operation, "delete");
   assert.ok(pending[0].article.storage.deletedAt);
+  const restored = await repository.restore(updated.id);
+  assert.equal(restored.storage.deletedAt, null);
+  assert.equal(restored.storage.version, updated.storage.version + 2);
+  assert.equal((await repository.list()).length, 2);
+  pending = await repository.listPendingChanges();
+  assert.equal(pending[0].operation, "upsert");
 
   assert.equal(await repository.getSyncCursor(), "");
   await repository.setSyncCursor("server-sequence-42");

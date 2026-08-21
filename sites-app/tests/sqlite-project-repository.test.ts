@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { initialProjectSeeds } from "../app/data/project-seeds";
 import { SqliteProjectRepository } from "../app/data/sqlite-project-repository";
+import { rootProjectStatusCounts } from "../app/project-selectors";
 import type {
   SqliteDatabase,
   SqliteExecuteResult,
@@ -38,6 +39,7 @@ test("seeds staged projects and persists project progress", async () => {
 
   const seeded = await repository.list();
   assert.equal(seeded.length, 5);
+  assert.deepEqual(rootProjectStatusCounts(seeded), { active: 4, waiting: 0, paused: 1, completed: 0 });
   assert.equal(seeded[0].title, "科研方向选择");
   assert.equal(seeded[0].category, "learning");
   assert.equal(seeded[0].isDraft, true);
@@ -107,6 +109,18 @@ test("seeds staged projects and persists project progress", async () => {
   assert.equal(withProposal?.proposals[0].status, "experiment");
   assert.equal(withProposal?.proposals[0].reviewNote, "先用手动评审流程验证。");
 
+  const removableProposal = await repository.saveProposal({
+    ...proposal,
+    id: "proposal-remove-test",
+    title: "临时待删除提案",
+    status: "pending",
+    reviewNote: "",
+  });
+  await repository.removeProposal(removableProposal.id);
+  const afterProposalRemoval = await repository.get(savedProject.id);
+  assert.equal(afterProposalRemoval?.proposals.some((item) => item.id === removableProposal.id), false);
+  assert.equal(afterProposalRemoval?.proposals.some((item) => item.id === proposal.id), true);
+
   const reopened = new SqliteProjectRepository(adapter, {
     seedProjects: initialProjectSeeds,
   });
@@ -140,6 +154,39 @@ test("rolls back task completion when the progress log cannot be written", async
 
   await assert.rejects(() => repository.completeTask(detail.tasks[0].id, `完成行动：${detail.tasks[0].title}`));
   assert.notEqual((await repository.get(detail.tasks[0].projectId))?.tasks[0].status, "done");
+  database.close();
+});
+
+test("soft deletes an action, clears its plan, preserves focus history, and restores the plan", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-08-21T10:00:00.000Z"),
+  });
+  const detail = await repository.get("project-life-workbench-v01");
+  assert.ok(detail);
+  const task = detail.tasks[0];
+  database.exec(`CREATE TABLE task_plans (
+    task_id TEXT PRIMARY KEY, planned_date TEXT, priority TEXT,
+    estimate_minutes INTEGER, sort_order INTEGER, updated_at TEXT
+  )`);
+  database.exec(`CREATE TABLE focus_sessions (
+    id TEXT PRIMARY KEY, task_id TEXT, project_id TEXT, label TEXT,
+    started_at TEXT, ended_at TEXT, duration_seconds INTEGER
+  )`);
+  database.prepare("INSERT INTO task_plans VALUES (?, ?, ?, ?, ?, ?)").run(task.id, "2026-08-21", "high", 30, 1, "2026-08-21T09:00:00.000Z");
+  database.prepare("INSERT INTO focus_sessions VALUES (?, ?, ?, ?, ?, ?, ?)").run("focus-history", task.id, task.projectId, task.title, "2026-08-20T09:00:00.000Z", "2026-08-20T09:30:00.000Z", 1800);
+
+  await repository.removeTask(task.id);
+  assert.equal((await repository.get(task.projectId))?.tasks.some((item) => item.id === task.id), false);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM task_plans WHERE task_id = ?").get(task.id)?.count, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM focus_sessions WHERE task_id = ?").get(task.id)?.count, 1);
+
+  await repository.restoreTask(task.id);
+  assert.equal((await repository.get(task.projectId))?.tasks.some((item) => item.id === task.id), true);
+  const restored = database.prepare("SELECT * FROM task_plans WHERE task_id = ?").get(task.id);
+  assert.equal(restored?.planned_date, "2026-08-21");
+  assert.equal(restored?.priority, "high");
   database.close();
 });
 

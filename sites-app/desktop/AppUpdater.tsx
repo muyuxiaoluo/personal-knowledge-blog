@@ -45,7 +45,7 @@ async function checkWithPreferredProxy() {
 }
 
 export function AppUpdater() {
-  const [currentVersion, setCurrentVersion] = useState("0.5.4");
+  const [currentVersion, setCurrentVersion] = useState("0.6.0");
   const [phase, setPhase] = useState<UpdatePhase>("idle");
   const [available, setAvailable] = useState<AvailableUpdate | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);

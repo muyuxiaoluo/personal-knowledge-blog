@@ -78,8 +78,15 @@ async fn execute_sqlite_transaction(
 fn backup_dir(app: &tauri::AppHandle) -> PathBuf {
     app.path()
         .document_dir()
-        .map(|path| path.join("人生攻略库备份"))
+        .map(|path| path.join("个人工作台备份"))
         .unwrap_or_else(|_| fallback_backup_dir(app))
+}
+
+fn legacy_backup_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path()
+        .document_dir()
+        .ok()
+        .map(|path| path.join("人生攻略库备份"))
 }
 
 #[tauri::command]
@@ -103,15 +110,22 @@ fn reserve_backup_path(app: tauri::AppHandle) -> Result<BackupPath, String> {
 
 #[tauri::command]
 fn latest_backup_path(app: tauri::AppHandle) -> Result<Option<BackupPath>, String> {
-    let directory = backup_dir(&app);
-    if !directory.exists() {
-        return Ok(None);
+    let mut directories = vec![backup_dir(&app)];
+    if let Some(legacy) = legacy_backup_dir(&app) {
+        directories.push(legacy);
     }
-    let mut candidates = fs::read_dir(&directory)
-        .map_err(|error| format!("无法读取备份目录：{error}"))?
-        .filter_map(Result::ok)
-        .filter(|entry| is_primary_backup_name(&entry.file_name().to_string_lossy()))
-        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    for directory in directories
+        .into_iter()
+        .filter(|directory| directory.exists())
+    {
+        candidates.extend(
+            fs::read_dir(&directory)
+                .map_err(|error| format!("无法读取备份目录：{error}"))?
+                .filter_map(Result::ok)
+                .filter(|entry| is_primary_backup_name(&entry.file_name().to_string_lossy())),
+        );
+    }
     candidates.sort_by_key(|entry| {
         entry
             .metadata()
@@ -134,14 +148,20 @@ fn is_primary_backup_name(name: &str) -> bool {
 #[tauri::command]
 fn restore_backup(app: tauri::AppHandle, source_path: String) -> Result<(), String> {
     let source = PathBuf::from(&source_path);
-    let allowed_dir = backup_dir(&app)
-        .canonicalize()
-        .map_err(|error| format!("无法定位备份目录：{error}"))?;
     let canonical_source = source
         .canonicalize()
         .map_err(|error| format!("无法读取备份文件：{error}"))?;
-    if !canonical_source.starts_with(&allowed_dir) {
-        return Err("只能恢复人生攻略库备份目录中的文件。".into());
+    let mut allowed_dirs = vec![backup_dir(&app)];
+    if let Some(legacy) = legacy_backup_dir(&app) {
+        allowed_dirs.push(legacy);
+    }
+    let allowed = allowed_dirs
+        .iter()
+        .filter(|directory| directory.exists())
+        .filter_map(|directory| directory.canonicalize().ok())
+        .any(|directory| canonical_source.starts_with(directory));
+    if !allowed {
+        return Err("只能恢复个人工作台备份目录中的文件。".into());
     }
     let mut header = [0_u8; 16];
     File::open(&canonical_source)
@@ -160,7 +180,11 @@ fn restore_backup(app: tauri::AppHandle, source_path: String) -> Result<(), Stri
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("无法生成安全备份时间：{error}"))?
         .as_secs();
-    let safety_copy = allowed_dir.join(format!("mind-garden-before-restore-{timestamp}.sqlite3"));
+    let current_backup_dir = backup_dir(&app);
+    fs::create_dir_all(&current_backup_dir)
+        .map_err(|error| format!("无法创建安全备份目录：{error}"))?;
+    let safety_copy =
+        current_backup_dir.join(format!("mind-garden-before-restore-{timestamp}.sqlite3"));
     let temporary = database.with_extension("restore.tmp");
     fs::copy(&canonical_source, &temporary)
         .map_err(|error| format!("无法准备恢复文件：{error}"))?;
@@ -228,16 +252,27 @@ pub fn run() {
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
                 app.handle()
                     .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
+                app.handle().plugin(tauri_plugin_autostart::init(
+                    tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                    Some(vec!["--hidden"]),
+                ))?;
+                // 开机自启动会附带 --hidden 参数：此时隐藏主窗口，仅保留托盘图标，
+                // 用户可以从托盘菜单“打开个人工作台”随时唤出界面。
+                if std::env::args().any(|arg| arg == "--hidden") {
+                    if let Some(window) = app.get_webview_window("main") {
+                        window.hide()?;
+                    }
+                }
 
                 let show_item =
-                    MenuItem::with_id(app, "show", "打开人生攻略库", true, None::<&str>)?;
+                    MenuItem::with_id(app, "show", "打开个人工作台", true, None::<&str>)?;
                 let capture_item =
                     MenuItem::with_id(app, "capture", "快速记录", true, None::<&str>)?;
                 let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
                 let menu = Menu::with_items(app, &[&show_item, &capture_item, &quit_item])?;
 
                 let mut tray = TrayIconBuilder::new()
-                    .tooltip("人生攻略库")
+                    .tooltip("个人工作台")
                     .menu(&menu)
                     .show_menu_on_left_click(false)
                     .on_menu_event(|app, event| match event.id.as_ref() {

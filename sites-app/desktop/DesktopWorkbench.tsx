@@ -1,4 +1,10 @@
+import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import {
+  disable as disableAutostart,
+  enable as enableAutostart,
+  isEnabled as readAutostartEnabled,
+} from "@tauri-apps/plugin-autostart";
 import {
   useCallback,
   useEffect,
@@ -17,8 +23,10 @@ import { localDate } from "../app/date-helpers";
 import { inferLifeDomain, LIFE_DOMAIN_LABELS, LIFE_DOMAIN_OPTIONS, type LifeDomain } from "../app/domain-taxonomy";
 import type { ProjectRepository } from "../app/data/project-repository";
 import type { WorkRepository } from "../app/data/work-repository";
+import { rootProjectStatusCounts } from "../app/project-selectors";
 import type { ProjectDetail, ProjectProposal, ProjectSummary, ProjectTask } from "../app/project-types";
 import type { Article, StoredArticle } from "../app/types";
+import { workspaceTitle, type QuickLink } from "../app/workspace-preferences";
 import type { DailyCloseout, FocusSession, TaskPlan, WeeklyFocus } from "../app/work-types";
 import { MarkdownDocument } from "./MarkdownDocument";
 import { ProjectWorkspace } from "./ProjectWorkspace";
@@ -29,6 +37,7 @@ import {
   validateUpdateProxyPort,
 } from "./updateProxy";
 import { WorkbenchIcon, type WorkbenchIconName } from "./WorkbenchIcon";
+import { SearchField, SelectMenu, useConfirmDialog } from "./DesktopControls";
 import {
   ExplorePage,
   HomeDashboard,
@@ -58,6 +67,8 @@ type DesktopWorkbenchProps = {
   repository: ArticleRepository;
   projectRepository: ProjectRepository;
   workRepository: WorkRepository;
+  displayName: string;
+  quickLinks: QuickLink[];
   dataRevision: number;
   onRepositoryChange?: () => void;
   onEditingStateChange?: (editing: boolean) => void;
@@ -67,6 +78,8 @@ type DesktopWorkbenchProps = {
   onThemeChange: (mode: ThemeMode) => void;
   onCreateBackup: () => void;
   onRestoreBackup: () => void;
+  onSaveDisplayName: (name: string) => Promise<void>;
+  onSaveQuickLinks: (links: QuickLink[]) => Promise<void>;
 };
 
 const sections: Array<{
@@ -126,6 +139,8 @@ export function DesktopWorkbench({
   repository,
   projectRepository,
   workRepository,
+  displayName,
+  quickLinks,
   dataRevision,
   onRepositoryChange,
   onEditingStateChange,
@@ -135,7 +150,10 @@ export function DesktopWorkbench({
   onThemeChange,
   onCreateBackup,
   onRestoreBackup,
+  onSaveDisplayName,
+  onSaveQuickLinks,
 }: DesktopWorkbenchProps) {
+  const confirm = useConfirmDialog();
   const [articles, setArticles] = useState<StoredArticle[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectDetails, setProjectDetails] = useState<ProjectDetail[]>([]);
@@ -346,10 +364,11 @@ export function DesktopWorkbench({
     });
   }, [articles, noteDomain, noteView, query]);
 
+  const projectCounts = rootProjectStatusCounts(projects);
   const counts: Record<DeskSection, number | null> = {
     home: null,
     tasks: workspaceTasks.filter((task) => task.status !== "done" && task.plan?.plannedDate === today).length,
-    projects: projects.filter((project) => project.status === "active" || project.status === "waiting").length,
+    projects: projectCounts.active,
     notes: articles.filter((article) => !isSourceArticle(article) && !isThoughtInboxArticle(article)).length,
     explore: articles.filter(isSourceArticle).filter((article) => article.branch !== "已归档").length,
     inbox: inboxCount,
@@ -402,14 +421,14 @@ export function DesktopWorkbench({
     setDraft({ ...emptyDraft });
   }
 
-  function requestCloseDocument() {
-    if (editing && draftDirty && !window.confirm("当前修改还没有保存，确认放弃吗？")) return false;
+  async function requestCloseDocument() {
+    if (editing && draftDirty && !await confirm({ title: "放弃未保存的修改？", description: "这次编辑的内容尚未保存，关闭后无法恢复。", confirmLabel: "放弃修改", tone: "warning" })) return false;
     closeDocument();
     return true;
   }
 
-  function closeQuickCapture() {
-    if (quickText.trim() && !window.confirm("这条快速记录还没有保存，确认放弃吗？")) return false;
+  async function closeQuickCapture() {
+    if (quickText.trim() && !await confirm({ title: "放弃这条快速记录？", description: "尚未保存的文字会丢失。", confirmLabel: "放弃记录", tone: "warning" })) return false;
     setQuickText("");
     setQuickCaptureOpen(false);
     return true;
@@ -507,18 +526,25 @@ export function DesktopWorkbench({
 
   async function removeArticle(article: StoredArticle) {
     const source = isSourceArticle(article);
-    if (!window.confirm(source
-      ? `确认永久删除收藏《${article.title}》吗？此操作无法撤销。`
-      : `确认移除《${article.title}》吗？`)) return;
+    if (!await confirm({
+      title: `删除《${article.title}》？`,
+      description: source ? "这条收藏会从探索库删除，删除后可在提示消失前撤销。" : "这篇笔记会被删除，删除后可在提示消失前撤销。",
+      confirmLabel: "删除",
+      tone: "danger",
+    })) return;
     setSaving(true);
     try {
       await repository.remove(article.id);
       await refreshArticles();
       closeDocument();
       onRepositoryChange?.();
-      showMessage(source ? "收藏已经删除。" : "内容已经移除。 ");
+      offerUndo(source ? "收藏已经删除" : "笔记已经删除", async () => {
+        await repository.restore(article.id);
+        await refreshArticles();
+        onRepositoryChange?.();
+      });
     } catch (error) {
-      showMessage(error instanceof Error ? error.message : "移除失败");
+      showMessage(error instanceof Error ? error.message : "删除失败");
     } finally {
       setSaving(false);
     }
@@ -596,6 +622,26 @@ export function DesktopWorkbench({
       });
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "无法恢复任务");
+    }
+  }
+
+  async function removeTask(task: ProjectTask) {
+    if (!await confirm({
+      title: `删除行动“${task.title}”？`,
+      description: "它会从项目和今日安排中移除；已产生的专注记录会保留。删除后可在 8 秒内撤销。",
+      confirmLabel: "删除行动",
+      tone: "danger",
+    })) return;
+    try {
+      if (activeSession?.taskId === task.id) await workRepository.stopSession(activeSession.id);
+      await projectRepository.removeTask(task.id);
+      await Promise.all([refreshProjects(), refreshWork()]);
+      offerUndo("行动已经删除", async () => {
+        await projectRepository.restoreTask(task.id);
+        await Promise.all([refreshProjects(), refreshWork()]);
+      });
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "无法删除行动");
     }
   }
 
@@ -745,10 +791,11 @@ export function DesktopWorkbench({
   return (
     <main className={rootClass}>
       {!documentMode && (
-        <WorkbenchSidebar
-          section={section}
-          counts={counts}
-          inboxCount={inboxCount}
+      <WorkbenchSidebar
+        section={section}
+        counts={counts}
+        inboxCount={inboxCount}
+        title={workspaceTitle(displayName)}
           collapsed={sidebarCollapsed}
           onSwitch={switchSection}
           onToggle={toggleSidebar}
@@ -792,6 +839,8 @@ export function DesktopWorkbench({
           projects={projects}
           initialProjectId={requestedProjectId}
           onProjectsChange={refreshProjects}
+          onBackToHall={() => setRequestedProjectId(null)}
+          onRemoveTask={removeTask}
         />
       ) : section === "notes" ? (
         <NotesWorkspace
@@ -808,12 +857,12 @@ export function DesktopWorkbench({
         />
       ) : (
         <section className="workspace-main-stage">
-          {section === "home" && <HomeDashboard today={today} tasks={workspaceTasks} articles={articles} weeklyFocus={weeklyFocus} onSaveWeeklyFocus={saveWeeklyFocus} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
-          {section === "tasks" && <TasksPage today={today} tasks={workspaceTasks} projects={projects} projectDetails={projectDetails} onAddTask={addTask} onRestoreTask={restoreTask} onOpenProject={openProject} {...taskActions} />}
+          {section === "home" && <HomeDashboard today={today} tasks={workspaceTasks} articles={articles} weeklyFocus={weeklyFocus} quickLinks={quickLinks} onSaveQuickLinks={onSaveQuickLinks} onSaveWeeklyFocus={saveWeeklyFocus} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
+          {section === "tasks" && <TasksPage today={today} tasks={workspaceTasks} projects={projects} projectDetails={projectDetails} onAddTask={addTask} onRestoreTask={restoreTask} onRemoveTask={removeTask} onOpenProject={openProject} {...taskActions} />}
           {section === "explore" && <ExplorePage articles={articles} onSaveLink={saveExternalLink} onArchive={archiveSource} onDelete={removeArticle} />}
           {section === "inbox" && <InboxPage articles={articles} projects={projects} onOpenArticle={openArticle} onNewCapture={() => setQuickCaptureOpen(true)} onMoveArticle={moveInboxArticle} onConvertToAction={convertInboxToAction} onConvertToProposal={convertInboxToProposal} onDelete={removeArticle} />}
           {section === "review" && <ReviewPage projects={projects} projectDetails={projectDetails} articles={articles} tasks={workspaceTasks} weeklyFocus={weeklyFocus} closeouts={closeouts} today={today} onSaveCloseout={saveCloseout} />}
-          {section === "settings" && <SettingsPage themeMode={themeMode} backingUp={backingUp} onThemeChange={onThemeChange} onCreateBackup={onCreateBackup} onRestoreBackup={onRestoreBackup} />}
+          {section === "settings" && <SettingsPage displayName={displayName} themeMode={themeMode} backingUp={backingUp} onSaveDisplayName={onSaveDisplayName} onThemeChange={onThemeChange} onCreateBackup={onCreateBackup} onRestoreBackup={onRestoreBackup} />}
         </section>
       )}
 
@@ -847,6 +896,7 @@ function WorkbenchSidebar({
   onSwitch,
   onToggle,
   accountDock,
+  title,
 }: {
   section: DeskSection;
   counts: Record<DeskSection, number | null>;
@@ -855,11 +905,12 @@ function WorkbenchSidebar({
   onSwitch: (section: DeskSection) => void;
   onToggle: () => void;
   accountDock: ReactNode;
+  title: string;
 }) {
   return (
     <aside className="workbench-sidebar">
       <button className="sidebar-collapse-toggle" onClick={onToggle} aria-label={collapsed ? "展开侧栏" : "收起侧栏"} title={collapsed ? "展开侧栏" : "收起侧栏"}>{collapsed ? "›" : "‹"}</button>
-      <div className="sidebar-brand"><span className="sidebar-brand-mark"><WorkbenchIcon name="brand" /></span><span><strong>人生攻略库</strong><small>理清方向，留下成长</small></span></div>
+      <div className="sidebar-brand"><span className="sidebar-brand-mark"><WorkbenchIcon name="brand" /></span><span><strong title={title}>{title}</strong><small>理清方向，留下成长</small></span></div>
       <nav className="sidebar-navigation" aria-label="工作台导航">
         {(["action", "knowledge"] as const).map((group) => (
           <div className="sidebar-group" key={group}>
@@ -891,15 +942,67 @@ function MagicParticles({ intensity }: { intensity: number }) {
   })}</div>;
 }
 
-function SettingsPage({ themeMode, backingUp, onThemeChange, onCreateBackup, onRestoreBackup }: {
+function SettingsPage({ displayName, themeMode, backingUp, onSaveDisplayName, onThemeChange, onCreateBackup, onRestoreBackup }: {
+  displayName: string;
   themeMode: ThemeMode;
   backingUp: boolean;
   onThemeChange: (mode: ThemeMode) => void;
   onCreateBackup: () => void;
   onRestoreBackup: () => void;
+  onSaveDisplayName: (name: string) => Promise<void>;
 }) {
+  const [nameDraft, setNameDraft] = useState(displayName);
+  const [nameMessage, setNameMessage] = useState("");
   const [updateProxyPort, setUpdateProxyPort] = useState(loadUpdateProxyPort);
   const [proxyMessage, setProxyMessage] = useState("");
+  const [autostartOn, setAutostartOn] = useState(false);
+  const [autostartBusy, setAutostartBusy] = useState(false);
+  const [autostartMessage, setAutostartMessage] = useState("");
+
+  useEffect(() => setNameDraft(displayName), [displayName]);
+
+  async function saveName(event: FormEvent) {
+    event.preventDefault();
+    await onSaveDisplayName(nameDraft);
+    setNameMessage(nameDraft.trim() ? `工作台将显示为“${workspaceTitle(nameDraft)}”。` : "已恢复为“个人工作台”。");
+  }
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    readAutostartEnabled()
+      .then((enabled) => {
+        if (!cancelled) setAutostartOn(enabled);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /** 切换开机自启动：写入系统启动项，成功后回显状态，失败时保留原开关并提示。 */
+  async function toggleAutostart() {
+    if (autostartBusy) return;
+    setAutostartBusy(true);
+    setAutostartMessage("");
+    try {
+      if (autostartOn) {
+        await disableAutostart();
+        setAutostartOn(false);
+        setAutostartMessage("已关闭，下次开机不会再自动启动。");
+      } else {
+        await enableAutostart();
+        setAutostartOn(true);
+        setAutostartMessage("已开启，下次开机后会自动启动并停留在托盘。");
+      }
+    } catch (error) {
+      setAutostartMessage(
+        error instanceof Error ? `设置未生效：${error.message}` : "设置开机自启动失败，请稍后重试。",
+      );
+    } finally {
+      setAutostartBusy(false);
+    }
+  }
 
   function saveProxySettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -923,9 +1026,39 @@ function SettingsPage({ themeMode, backingUp, onThemeChange, onCreateBackup, onR
     <div className="settings-page workspace-scroll">
       <header className="workspace-page-heading"><div><h1>设置</h1><p>统一管理外观、数据与以后新增的工作台偏好。</p></div></header>
       <div className="settings-grid">
+        <section className="workspace-card settings-section settings-identity-section">
+          <header><span>身份</span><h2>工作台称呼</h2><p>只用于这台设备上的标题展示，不会修改同步账户。</p></header>
+          <form className="settings-name-form" onSubmit={saveName}>
+            <label htmlFor="workspace-display-name">你的名称</label>
+            <div><input id="workspace-display-name" maxLength={24} value={nameDraft} onChange={(event) => { setNameDraft(event.target.value); setNameMessage(""); }} placeholder="例如：小洛" /><button type="submit">保存称呼</button></div>
+            <small>预览：{workspaceTitle(nameDraft)} · 最多 24 个字符</small>
+            <p role="status">{nameMessage}</p>
+          </form>
+        </section>
         <section className="workspace-card settings-section">
           <header><span>外观</span><h2>主题与阅读氛围</h2><p>只改变视觉强度，不影响资料内容。</p></header>
           <div className="settings-theme-options">{([ ["minimal", "简洁", "更少装饰，优先清晰阅读"], ["magic", "魔法", "保留主题氛围与轻量粒子"], ["immersive", "沉浸", "完整背景与更强视觉层次"] ] as const).map(([value, label, description]) => <button className={themeMode === value ? "active" : ""} key={value} onClick={() => onThemeChange(value)}><i>{themeMode === value ? "✓" : ""}</i><span><strong>{label}</strong><small>{description}</small></span></button>)}</div>
+        </section>
+        <section className="workspace-card settings-section settings-startup-section">
+          <header><span>启动</span><h2>开机自启动</h2><p>登录系统后自动在后台启动应用，随时可以在这里关闭。</p></header>
+          <div className="settings-toggle-row">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autostartOn}
+              disabled={autostartBusy}
+              className={autostartOn ? "settings-switch on" : "settings-switch"}
+              onClick={() => void toggleAutostart()}
+              aria-describedby="settings-autostart-message"
+            >
+              <i />
+            </button>
+            <div>
+              <strong>{autostartBusy ? "正在保存…" : autostartOn ? "已开启" : "已关闭"}</strong>
+              <small>开启后，电脑开机登录时会自动启动个人工作台并停留在系统托盘。</small>
+            </div>
+          </div>
+          <p className="settings-toggle-message" id="settings-autostart-message" role="status">{autostartMessage}</p>
         </section>
         <section className="workspace-card settings-section settings-data-section">
           <header><span>数据</span><h2>备份与恢复</h2><p>项目、行动、笔记和回顾会一起保存在完整本地备份中。</p></header>
@@ -983,12 +1116,12 @@ function NotesWorkspace({ articles, loading, query, view, domain, onQuery, onVie
       <section className="notes-filter-pane">
         <header><div><span>知识积累</span><button className="notes-help-toggle" aria-label="查看笔记分类说明" aria-expanded={helpOpen} onClick={() => setHelpOpen((value) => !value)}>?</button></div><h1>笔记</h1><p>先看内容性质，也可以按生活领域缩小范围。</p></header>
         <nav>{noteViews.map((item) => <button className={view === item.id ? "active" : ""} key={item.id} onClick={() => onView(item.id)}><span>{item.label}</span></button>)}</nav>
-        <label className="notes-domain-filter"><span>所属领域</span><select value={domain} onChange={(event) => onDomain(event.target.value as "all" | LifeDomain)}><option value="all">不限领域</option>{LIFE_DOMAIN_OPTIONS.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label>
+        <label className="notes-domain-filter"><span>所属领域</span><SelectMenu label="按领域筛选笔记" value={domain} onChange={(value) => onDomain(value as "all" | LifeDomain)} options={[{ value: "all", label: "不限领域" }, ...LIFE_DOMAIN_OPTIONS]} /></label>
         {helpOpen && <aside className="notes-help-popover" role="dialog" aria-label="笔记分类说明"><header><strong>笔记如何分类</strong><button aria-label="关闭说明" onClick={() => setHelpOpen(false)}>×</button></header><p>领域说明内容与生活的哪一部分有关；性质说明这篇内容本身是什么。</p><dl><div><dt>领域</dt><dd>与项目共用学习、工作、创作、生活等九个稳定入口。</dd></div><div><dt>性质</dt><dd>知识、想法、方法、经验、决策或复盘，可以多选。</dd></div><div><dt>主题</dt><dd>继续自由填写更具体的关键词。</dd></div></dl></aside>}
       </section>
       <section className="notes-list-stage">
         <header className="notes-list-header"><div><strong>{query ? "搜索结果" : noteViews.find((item) => item.id === view)?.label}</strong><span>{articles.length} 条</span></div><button onClick={onNew}>＋ 新建</button></header>
-        <label className="desktop-search"><span>⌕</span><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="搜索标题、正文、主题…" />{query && <button onClick={() => onQuery("")} aria-label="清空搜索">×</button>}</label>
+        <SearchField value={query} onChange={onQuery} placeholder="搜索标题、正文、主题…" label="搜索笔记" />
         <div className="notes-card-list">
           {loading ? <div className="list-empty"><span>正在读取笔记…</span></div> : articles.length ? articles.map((article) => (
             <button key={article.id} onClick={() => onOpen(article)}>
@@ -1017,7 +1150,7 @@ function ArticleReader({ article, saving, onBack, onEdit, onAppend, onRemove }: 
     <article className="desktop-reader immersive-reader">
       <header className="reader-toolbar">
         <button className="reader-back" onClick={onBack}>← 返回笔记</button>
-        <div><span>最后修改于 {formatDate(article.updated || article.created)}</span><button disabled={saving} onClick={onRemove}>移除</button><button className="primary" onClick={onEdit}>编辑</button></div>
+        <div><span>最后修改于 {formatDate(article.updated || article.created)}</span><button className="danger" disabled={saving} onClick={onRemove}>删除</button><button className="primary" onClick={onEdit}>编辑</button></div>
       </header>
       <div className="reader-scroll">
         <div className="reader-document">
@@ -1248,18 +1381,18 @@ function ArticleEditor({ draft, projects, saving, appendMode, onChange, onCancel
     <div className="workbench-editor immersive-editor" onKeyDown={handleEditorKeyDown}>
       <header className="editor-toolbar"><div><button onClick={onCancel}>← 取消</button><span>{draft.id ? "编辑笔记" : "新建笔记"}</span></div><div className="editor-toolbar-actions"><div className="editor-history-actions" aria-label="编辑历史"><button type="button" disabled={!historyAvailability.canUndo} onClick={() => stepHistory("undo")} title="撤回（Ctrl+Z）">↶ 撤回</button><button type="button" disabled={!historyAvailability.canRedo} onClick={() => stepHistory("redo")} title="重做（Ctrl+Shift+Z / Ctrl+Y）">↷ 重做</button></div><small><kbd>Ctrl</kbd> + <kbd>S</kbd></small><button className="primary" disabled={saving} onClick={onSave}>{saving ? "保存中…" : "保存"}</button></div></header>
       <div className="editor-scroll" ref={editorScrollRef}><div className="editor-paper">
-        <section className="editor-metadata new-note-metadata">
-          <header><div><strong>笔记关系</strong><span>都可以留空，保存不会被分类打断</span></div></header>
+        <details className="editor-metadata new-note-metadata">
+          <summary><div><strong>整理关系</strong><span>领域、性质、项目与来源都可以稍后补充</span></div><em>展开整理</em></summary>
           <fieldset><legend>内容性质 · 可多选</legend><div className="nature-picker">{natureOptions.map((nature) => <button className={natures.includes(nature) ? "active" : ""} type="button" key={nature} onClick={() => toggleNature(nature)}>{nature}</button>)}</div></fieldset>
           <div className="metadata-grid">
-            <label><span>所属领域</span><select value={articleLifeDomain(draft)} onChange={(event) => update("category", event.target.value)}>{LIFE_DOMAIN_OPTIONS.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label>
+            <label><span>所属领域</span><SelectMenu label="所属领域" value={articleLifeDomain(draft)} onChange={(value) => update("category", value)} options={LIFE_DOMAIN_OPTIONS} /></label>
             <label><span>主题</span><input ref={tagsRef} value={draft.tags.join("，")} onBeforeInput={(event) => rememberSelection("tags", event.currentTarget)} onChange={(event) => update("tags", splitTags(event.target.value))} placeholder="科研，创作，工具……" /></label>
-            <label><span>关联项目</span><select value={draft.projectId || projects.find((project) => project.title === draft.project)?.id || ""} onChange={(event) => { const project = projects.find((item) => item.id === event.target.value); commit({ ...draft, projectId: project?.id || "", project: project?.title || "" }); }}><option value="">不关联项目</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></label>
-            <label><span>来源</span><select value={sourceKind} onChange={(event) => updateSource(event.target.value)}>{sourceOptions.map((source) => <option key={source}>{source}</option>)}</select></label>
+            <label><span>关联项目</span><SelectMenu label="关联项目" value={draft.projectId || projects.find((project) => project.title === draft.project)?.id || ""} onChange={(value) => { const project = projects.find((item) => item.id === value); commit({ ...draft, projectId: project?.id || "", project: project?.title || "" }); }} options={[{ value: "", label: "不关联项目" }, ...projects.map((project) => ({ value: project.id, label: project.title }))]} /></label>
+            <label><span>来源</span><SelectMenu label="来源" value={sourceKind} onChange={updateSource} options={sourceOptions.map((source) => ({ value: source, label: source }))} /></label>
             <label><span>来源链接</span><input ref={sourceUrlRef} type="url" value={sourceUrl} onBeforeInput={(event) => rememberSelection("sourceUrl", event.currentTarget)} onChange={(event) => updateSource(sourceKind, event.target.value)} placeholder="可选" /></label>
           </div>
           <small className="metadata-auto-note">摘要、创建时间、修改时间和版本信息由系统自动维护。</small>
-        </section>
+        </details>
         <section className="editor-writing-pane">
           <input ref={titleRef} className="editor-title" autoFocus={!appendMode} value={draft.title} onBeforeInput={(event) => rememberSelection("title", event.currentTarget)} onChange={(event) => update("title", event.target.value)} placeholder="这篇笔记的标题" />
           <div className="markdown-toolbar" aria-label="Markdown 格式工具">

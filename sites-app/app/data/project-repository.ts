@@ -19,10 +19,13 @@ export interface ProjectRepository {
   saveMilestone(milestone: Milestone): Promise<Milestone>;
   removeMilestone(id: string): Promise<void>;
   saveTask(task: ProjectTask): Promise<ProjectTask>;
+  removeTask(id: string): Promise<void>;
+  restoreTask(id: string): Promise<void>;
   updateTaskStatus(id: string, status: ProjectTaskStatus): Promise<void>;
   completeTask(id: string, logBody: string): Promise<void>;
   saveProposal(proposal: ProjectProposal): Promise<ProjectProposal>;
   updateProposalStatus(id: string, status: ProposalStatus, reviewNote: string): Promise<void>;
+  removeProposal(id: string): Promise<void>;
   addLog(projectId: string, body: string): Promise<ProjectLog>;
   confirmProject(id: string): Promise<void>;
 }

@@ -68,6 +68,17 @@ type ProjectTaskRow = {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  deleted_at: string | null;
+  deleted_plan_json: string;
+};
+
+type TaskPlanSnapshotRow = {
+  task_id: string;
+  planned_date: string;
+  priority: string;
+  estimate_minutes: number;
+  sort_order: number;
+  updated_at: string;
 };
 
 type ProjectLogRow = {
@@ -139,7 +150,9 @@ const migrations = [
     sort_order INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    completed_at TEXT
+    completed_at TEXT,
+    deleted_at TEXT,
+    deleted_plan_json TEXT NOT NULL DEFAULT ''
   )`,
   `CREATE TABLE IF NOT EXISTS project_logs (
     id TEXT PRIMARY KEY NOT NULL,
@@ -201,6 +214,8 @@ export class SqliteProjectRepository implements ProjectRepository {
     await this.ensureColumn("project_tasks", "details", "TEXT NOT NULL DEFAULT ''");
     await this.ensureColumn("project_tasks", "benefit", "TEXT NOT NULL DEFAULT ''");
     await this.ensureColumn("project_tasks", "due_date", "TEXT NOT NULL DEFAULT ''");
+    await this.ensureColumn("project_tasks", "deleted_at", "TEXT");
+    await this.ensureColumn("project_tasks", "deleted_plan_json", "TEXT NOT NULL DEFAULT ''");
     await this.database.execute(
       `UPDATE projects
        SET category = CASE category
@@ -577,6 +592,63 @@ export class SqliteProjectRepository implements ProjectRepository {
     }
   }
 
+  async removeTask(id: string): Promise<void> {
+    try {
+      await this.initialize();
+      const rows = await this.database.select<ProjectTaskRow>(
+        "SELECT * FROM project_tasks WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+        [id],
+      );
+      if (!rows[0]) throw new ProjectRepositoryError("没有找到这条行动", "invalid_data");
+      const tableRows = await this.database.select<{ name: string }>(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'task_plans'",
+      );
+      const plan = tableRows[0]
+        ? (await this.database.select<TaskPlanSnapshotRow>("SELECT * FROM task_plans WHERE task_id = ? LIMIT 1", [id]))[0]
+        : undefined;
+      const now = this.now();
+      const statements: SqliteStatement[] = [{
+        sql: "UPDATE project_tasks SET deleted_at = ?, deleted_plan_json = ?, updated_at = ? WHERE id = ?",
+        bindValues: [now, plan ? JSON.stringify(plan) : "", now, id],
+      }];
+      if (tableRows[0]) statements.push({ sql: "DELETE FROM task_plans WHERE task_id = ?", bindValues: [id] });
+      statements.push({ sql: "UPDATE projects SET updated_at = ? WHERE id = ?", bindValues: [now, rows[0].project_id] });
+      await executeSqliteTransaction(this.database, statements);
+    } catch (error) {
+      if (error instanceof ProjectRepositoryError) throw error;
+      throw new ProjectRepositoryError("删除行动失败，原内容已保留", "save_failed", error);
+    }
+  }
+
+  async restoreTask(id: string): Promise<void> {
+    try {
+      await this.initialize();
+      const rows = await this.database.select<ProjectTaskRow>(
+        "SELECT * FROM project_tasks WHERE id = ? AND deleted_at IS NOT NULL LIMIT 1",
+        [id],
+      );
+      if (!rows[0]) throw new ProjectRepositoryError("没有找到可恢复的行动", "invalid_data");
+      const now = this.now();
+      const statements: SqliteStatement[] = [{
+        sql: "UPDATE project_tasks SET deleted_at = NULL, deleted_plan_json = '', updated_at = ? WHERE id = ?",
+        bindValues: [now, id],
+      }];
+      const plan = parseTaskPlanSnapshot(rows[0].deleted_plan_json);
+      if (plan) statements.push({
+        sql: `INSERT INTO task_plans(task_id, planned_date, priority, estimate_minutes, sort_order, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?)
+              ON CONFLICT(task_id) DO UPDATE SET planned_date = excluded.planned_date, priority = excluded.priority,
+                estimate_minutes = excluded.estimate_minutes, sort_order = excluded.sort_order, updated_at = excluded.updated_at`,
+        bindValues: [plan.task_id, plan.planned_date, plan.priority, plan.estimate_minutes, plan.sort_order, now],
+      });
+      statements.push({ sql: "UPDATE projects SET updated_at = ? WHERE id = ?", bindValues: [now, rows[0].project_id] });
+      await executeSqliteTransaction(this.database, statements);
+    } catch (error) {
+      if (error instanceof ProjectRepositoryError) throw error;
+      throw new ProjectRepositoryError("恢复行动失败", "save_failed", error);
+    }
+  }
+
   async updateTaskStatus(id: string, status: ProjectTaskStatus): Promise<void> {
     try {
       await this.initialize();
@@ -688,6 +760,25 @@ export class SqliteProjectRepository implements ProjectRepository {
     }
   }
 
+  async removeProposal(id: string): Promise<void> {
+    try {
+      await this.initialize();
+      const rows = await this.database.select<ProjectProposalRow>(
+        "SELECT * FROM project_proposals WHERE id = ? LIMIT 1",
+        [id],
+      );
+      if (!rows[0]) throw new ProjectRepositoryError("没有找到这条想法", "invalid_data");
+      const now = this.now();
+      await executeSqliteTransaction(this.database, [
+        { sql: "DELETE FROM project_proposals WHERE id = ?", bindValues: [id] },
+        { sql: "UPDATE projects SET updated_at = ? WHERE id = ?", bindValues: [now, rows[0].project_id] },
+      ]);
+    } catch (error) {
+      if (error instanceof ProjectRepositoryError) throw error;
+      throw new ProjectRepositoryError("删除项目想法失败", "save_failed", error);
+    }
+  }
+
   async addLog(projectId: string, body: string): Promise<ProjectLog> {
     const text = body.trim();
     if (!text) throw new ProjectRepositoryError("推进记录不能为空", "invalid_data");
@@ -736,7 +827,7 @@ export class SqliteProjectRepository implements ProjectRepository {
 
   private async listTasks(projectId: string) {
     const rows = await this.database.select<ProjectTaskRow>(
-      `SELECT * FROM project_tasks WHERE project_id = ?
+      `SELECT * FROM project_tasks WHERE project_id = ? AND deleted_at IS NULL
        ORDER BY CASE status WHEN 'next' THEN 0 WHEN 'waiting' THEN 1 WHEN 'later' THEN 2 ELSE 3 END, sort_order ASC, updated_at DESC`,
       [projectId],
     );
@@ -1068,11 +1159,30 @@ function taskWriteStatement(task: ProjectTask): SqliteStatement {
       benefit = excluded.benefit, due_date = excluded.due_date, status = excluded.status,
       waiting_for = excluded.waiting_for, resume_action = excluded.resume_action,
       context = excluded.context, sort_order = excluded.sort_order,
-      updated_at = excluded.updated_at, completed_at = excluded.completed_at`,
+      updated_at = excluded.updated_at, completed_at = excluded.completed_at,
+      deleted_at = NULL, deleted_plan_json = ''`,
     bindValues: [task.id, task.projectId, task.milestoneId, task.title, task.actionType,
       task.details, task.benefit, task.dueDate, task.status, task.waitingFor,
       task.resumeAction, task.context, task.sortOrder, task.createdAt, task.updatedAt, task.completedAt],
   };
+}
+
+function parseTaskPlanSnapshot(value: string): TaskPlanSnapshotRow | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<TaskPlanSnapshotRow>;
+    if (!parsed.task_id || !parsed.planned_date || !parsed.priority) return null;
+    return {
+      task_id: parsed.task_id,
+      planned_date: parsed.planned_date,
+      priority: parsed.priority,
+      estimate_minutes: Number(parsed.estimate_minutes) || 0,
+      sort_order: Number(parsed.sort_order) || 0,
+      updated_at: parsed.updated_at || "",
+    };
+  } catch {
+    return null;
+  }
 }
 
 function slugify(value: string) {

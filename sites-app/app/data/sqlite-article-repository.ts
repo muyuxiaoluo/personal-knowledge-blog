@@ -467,6 +467,34 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
     );
   }
 
+  async restore(id: string): Promise<StoredArticle> {
+    try {
+      await this.initialize();
+      return await this.runMutation(async () => {
+        const now = isoDate(this.now());
+        const result = await this.database.execute(
+          `UPDATE articles
+           SET deleted_at = NULL, updated_at = ?, version = version + 1,
+               device_id = ?, sync_status = 'pending'
+           WHERE id = ? AND deleted_at IS NOT NULL`,
+          [now, this.resolvedDeviceId, id],
+        );
+        if (result.rowsAffected === 0) {
+          throw new ArticleRepositoryError("没有找到可恢复的内容", "invalid_data");
+        }
+        const rows = await this.database.select<ArticleRow>(
+          `SELECT ${articleColumns} FROM articles WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        if (!rows[0]) throw new ArticleRepositoryError("没有找到可恢复的内容", "invalid_data");
+        return rowToArticle(rows[0]);
+      });
+    } catch (error) {
+      if (error instanceof ArticleRepositoryError) throw error;
+      throw new ArticleRepositoryError("恢复本地内容失败", "save_failed", error);
+    }
+  }
+
   async applyRemoteChanges(
     changes: ArticleChange[],
   ): Promise<RemoteApplyResult> {
