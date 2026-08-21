@@ -26,3 +26,14 @@ deploy-artifacts/
 
 # Windows shortcuts are machine-local.
 *.lnk
+
+# AI 助手本地工具链
+.agents/
+
+# 本地调试与启动脚本
+sites-app/scripts/sync-dev-db.ps1
+启动开发调试.bat
+
+# repomix 临时输出
+repomix-output.xml
+repomix.config.json
