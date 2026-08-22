@@ -1,5 +1,5 @@
 import type { QuickLink, WorkspacePreferences } from "../workspace-preferences";
-import { normalizeDisplayName } from "../workspace-preferences";
+import { normalizeDisplayName, normalizeQuickLinks } from "../workspace-preferences";
 import type { SqliteDatabase } from "./sqlite-article-repository";
 
 const displayNameKey = "workspace_display_name";
@@ -57,9 +57,7 @@ function parseQuickLinks(value: string | undefined): QuickLink[] | null {
   try {
     const parsed = JSON.parse(value);
     if (!Array.isArray(parsed)) return null;
-    return parsed.filter((item): item is QuickLink => Boolean(
-      item && typeof item.id === "string" && typeof item.title === "string" && typeof item.url === "string",
-    ));
+    return normalizeQuickLinks(parsed);
   } catch {
     return null;
   }

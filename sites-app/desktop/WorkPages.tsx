@@ -11,8 +11,9 @@ import type {
 } from "../app/project-types";
 import type { StoredArticle } from "../app/types";
 import type { DailyCloseout, FocusSession, TaskPlan, WeeklyFocus } from "../app/work-types";
-import { type QuickLink, type QuickLinkCategory } from "../app/workspace-preferences";
-import { DateField, SelectMenu, useConfirmDialog } from "./DesktopControls";
+import type { IntegrationRepository } from "../app/data/integration-repository";
+import { DateField, SelectMenu } from "./DesktopControls";
+import { HomeIntegrationCards } from "./ToolCenter";
 
 export type WorkspaceTask = ProjectTask & {
   projectTitle: string;
@@ -49,8 +50,8 @@ export function HomeDashboard({
   tasks,
   articles,
   weeklyFocus,
-  quickLinks,
-  onSaveQuickLinks,
+  integrationRepository,
+  onOpenTools,
   onSaveWeeklyFocus,
   onOpenArticle,
   onOpenProject,
@@ -61,8 +62,8 @@ export function HomeDashboard({
   tasks: WorkspaceTask[];
   articles: StoredArticle[];
   weeklyFocus: WeeklyFocus | null;
-  quickLinks: QuickLink[];
-  onSaveQuickLinks: (links: QuickLink[]) => Promise<void>;
+  integrationRepository: IntegrationRepository;
+  onOpenTools: () => void;
   onSaveWeeklyFocus: (primaryOutcome: string, secondaryOutcome: string) => Promise<void>;
   onOpenArticle: (article: StoredArticle) => void;
   onOpenProject: (projectId: string) => void;
@@ -156,7 +157,7 @@ export function HomeDashboard({
       </div>
 
       <div className="home-bottom-grid">
-        <QuickLinks links={quickLinks} onSave={onSaveQuickLinks} />
+        <HomeIntegrationCards repository={integrationRepository} onOpenTools={onOpenTools} />
         <section className="workspace-card home-context-card">
           <CardHeader title="一条相关旧经验" subtitle={primaryTask ? `与你今天推进的「${primaryTask.projectTitle}」有关` : "安排今日行动后再寻找"} />
           {echo ? (
@@ -498,49 +499,6 @@ function StageProgress({ task, compact = false }: { task: WorkspaceTask; compact
   return <div className={`stage-progress ${compact ? "compact" : ""}`}><i><b style={{ width: `${ratio}%` }} /></i><span>{task.stageCompletedTasks}/{task.stageTaskCount || 0} 个阶段行动完成</span></div>;
 }
 
-const quickLinkCategories: Record<QuickLinkCategory, string> = { research: "科研学习", creative: "创作开发", content: "内容平台", general: "常用工具" };
-
-function QuickLinks({ links, onSave }: { links: QuickLink[]; onSave: (links: QuickLink[]) => Promise<void> }) {
-  const confirm = useConfirmDialog();
-  const [expanded, setExpanded] = useState(false);
-  const [adding, setAdding] = useState(false);
-  const [title, setTitle] = useState("");
-  const [url, setUrl] = useState("");
-  const [category, setCategory] = useState<QuickLinkCategory>("general");
-  const [openError, setOpenError] = useState("");
-  const [deleted, setDeleted] = useState<{ link: QuickLink; index: number } | null>(null);
-  const pinned = [...links].filter((link) => link.pinned).sort((a, b) => a.order - b.order).slice(0, 4);
-
-  function save(next: QuickLink[]) { void onSave(next); }
-  function submit(event: FormEvent) { event.preventDefault(); if (!title.trim() || !url.trim()) return; const normalized = /^https?:\/\//i.test(url) ? url : `https://${url}`; save([...links, { id: `link-${Date.now()}`, title: title.trim(), url: normalized, category, pinned: pinned.length < 4, order: links.length }]); setTitle(""); setUrl(""); setAdding(false); }
-  async function remove(link: QuickLink) { if (!await confirm({ title: `删除工具“${link.title}”？`, description: "只会删除这个快捷入口，不会影响对应网站或本地数据。", confirmLabel: "删除入口", tone: "danger" })) return; const index = links.findIndex((item) => item.id === link.id); save(links.filter((item) => item.id !== link.id)); setDeleted({ link, index }); }
-  function undoDelete() { if (!deleted) return; const next = [...links]; next.splice(deleted.index, 0, deleted.link); save(next); setDeleted(null); }
-  function togglePin(link: QuickLink) { if (!link.pinned && pinned.length >= 4) { setOpenError("首页最多置顶四个工具，请先取消一个置顶。"); return; } setOpenError(""); save(links.map((item) => item.id === link.id ? { ...item, pinned: !item.pinned } : item)); }
-  async function openLink(target: string) { setOpenError(""); try { await openExternalUrl(target); } catch { setOpenError("未能打开该入口，请检查网址或系统默认浏览器设置。"); } }
-
-  return (
-    <section className={`workspace-card quick-links-card tool-shelf ${expanded ? "expanded" : ""}`}>
-      <CardHeader title="常用工具" subtitle="固定常用入口，也可以随时整理" action={expanded ? "完成" : "管理工具"} onAction={() => setExpanded((value) => !value)} />
-      {pinned.length ? <div className="pinned-tools">{pinned.map((link) => <article key={link.id}>
-        <button className="pinned-tool-open" type="button" onClick={() => void openLink(link.url)}><i>{link.title.slice(0, 1)}</i><span><strong>{link.title}</strong><small>{safeHost(link.url)}</small></span><em>↗</em></button>
-        <div><button className="pinned" onClick={() => togglePin(link)} title="取消置顶" aria-label={`取消置顶 ${link.title}`}>★</button><button className="danger" onClick={() => void remove(link)} title="删除" aria-label={`删除 ${link.title}`}>删除</button></div>
-      </article>)}</div> : <p className="tool-empty">还没有置顶工具，展开管理面板选择常用入口。</p>}
-      {expanded && <div className="tool-library">
-        <header><div><strong>管理全部工具</strong><span>{links.length} 个入口 · 最多置顶 4 个</span></div><button onClick={() => setAdding((value) => !value)}>{adding ? "取消添加" : "＋ 添加工具"}</button></header>
-        {adding && <form className="tool-add-form" onSubmit={submit}><label><span>名称</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：Zotero" /></label><label><span>网址</span><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://..." /></label><label><span>分类</span><SelectMenu label="工具分类" value={category} onChange={(value) => setCategory(value as QuickLinkCategory)} options={Object.entries(quickLinkCategories).map(([value, label]) => ({ value, label }))} /></label><button>保存工具</button></form>}
-        <div className="tool-groups">{Object.entries(quickLinkCategories).map(([value, label]) => {
-          const categoryLinks = links.filter((link) => link.category === value);
-          if (!categoryLinks.length) return null;
-          return <section className="tool-group" key={value}><header><strong>{label}</strong><span>{categoryLinks.length}</span></header><div>{categoryLinks.map((link) => <article className="tool-row" key={link.id}><button className="tool-row-open" onClick={() => void openLink(link.url)}><i>{link.title.slice(0, 1)}</i><span><strong>{link.title}</strong><small>{link.url}</small></span></button><div><button className={link.pinned ? "pinned" : ""} onClick={() => togglePin(link)}>{link.pinned ? "取消置顶" : "置顶"}</button><button className="danger" onClick={() => void remove(link)}>删除</button></div></article>)}</div></section>;
-        })}</div>
-        {deleted && <div className="tool-undo"><span>已删除“{deleted.link.title}”</span><button onClick={undoDelete}>撤销</button></div>}
-      </div>}
-      {openError && <p className="quick-link-error" role="alert">{openError}</p>}
-    </section>
-  );
-}
-
-
 function CardHeader({ title, subtitle, action, onAction }: { title: string; subtitle: string; action?: string; onAction?: () => void }) { return <header className="card-header"><div><strong>{title}</strong><span>{subtitle}</span></div>{action && <button onClick={onAction}>{action} →</button>}</header>; }
 function EmptyState({ title, body }: { title: string; body: string }) { return <div className="workspace-empty"><strong>{title}</strong><p>{body}</p></div>; }
 async function openExternalUrl(url: string) { if (isTauri()) { await openUrl(url); return; } window.open(url, "_blank", "noopener,noreferrer"); }
@@ -558,7 +516,6 @@ function selectContextualEcho(articles: StoredArticle[], task: WorkspaceTask | n
   const best = scored[0];
   return best ? { article: best.article, reason: best.matched.length ? `与 ${best.matched.slice(0, 2).join("、")} 相关` : "与当前项目相关" } : null;
 }
-function safeHost(url: string) { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; } }
 function greeting() { const hour = new Date().getHours(); if (hour < 6) return "夜深了"; if (hour < 11) return "早上好"; if (hour < 14) return "中午好"; if (hour < 18) return "下午好"; return "晚上好"; }
 function formatLongDate(value: string) { return new Date(`${value}T12:00:00`).toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "long" }); }
 function formatDate(value: string) { return value ? value.slice(0, 10).replaceAll("-", ".") : "未记录日期"; }

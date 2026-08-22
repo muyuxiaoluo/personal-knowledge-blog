@@ -9,6 +9,10 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 
+mod deepseek;
+mod integrations;
+mod webviews;
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BackupPath {
@@ -237,6 +241,8 @@ fn quit_app(app: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(deepseek::DeepSeekBridgeState::default())
+        .manage(webviews::ToolWindowState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_sql::Builder::default().build())
@@ -311,7 +317,27 @@ pub fn run() {
             restore_backup,
             execute_sqlite_transaction,
             show_main_window,
-            quit_app
+            quit_app,
+            deepseek::deepseek_prepare,
+            deepseek::deepseek_get_status,
+            deepseek::deepseek_send_message,
+            deepseek::deepseek_stop_generation,
+            deepseek::deepseek_new_conversation,
+            deepseek::deepseek_restore_conversation,
+            deepseek::deepseek_delete_conversation,
+            deepseek::deepseek_show_official,
+            deepseek::deepseek_release,
+            integrations::secret_status,
+            integrations::secret_set,
+            integrations::secret_delete,
+            integrations::github_fetch_repository,
+            integrations::deepseek_fetch_balance,
+            integrations::qwen_fetch_balance,
+            integrations::qwen_fetch_monitor_usage,
+            webviews::tool_browser_open,
+            webviews::entertainment_open,
+            webviews::usage_console_open,
+            webviews::usage_console_snapshot
         ])
         .run(tauri::generate_context!())
         .expect("error while running the life strategy library");

@@ -19,6 +19,8 @@ import { SqliteArticleRepository } from "../app/data/sqlite-article-repository";
 import { SqliteProjectRepository } from "../app/data/sqlite-project-repository";
 import { SqliteWorkRepository } from "../app/data/sqlite-work-repository";
 import { WorkspacePreferencesRepository } from "../app/data/workspace-preferences-repository";
+import { SqliteAiRepository } from "../app/data/sqlite-ai-repository";
+import { IntegrationRepository } from "../app/data/integration-repository";
 import {
   readLegacyQuickLinks,
   workspaceTitle,
@@ -41,6 +43,8 @@ type DesktopRuntime = {
   projectRepository: SqliteProjectRepository;
   workRepository: SqliteWorkRepository;
   preferencesRepository: WorkspacePreferencesRepository;
+  aiRepository: SqliteAiRepository;
+  integrationRepository: IntegrationRepository;
   database: Database;
 };
 
@@ -159,17 +163,21 @@ export function DesktopApp() {
         });
         const workRepository = new SqliteWorkRepository(transactionalDatabase);
         const preferencesRepository = new WorkspacePreferencesRepository(transactionalDatabase);
+        const aiRepository = new SqliteAiRepository(transactionalDatabase);
+        const integrationRepository = new IntegrationRepository(transactionalDatabase);
         await Promise.all([
           articleRepository.list(),
           projectRepository.list(),
           workRepository.listPlans(),
+          aiRepository.cleanupExpired(),
+          integrationRepository.listGitHubRepositories(),
         ]);
         const preferences = await preferencesRepository.getPreferences();
         const resolvedQuickLinks = preferences.quickLinks ?? readLegacyQuickLinks(localStorage);
         if (!preferences.quickLinks) await preferencesRepository.saveQuickLinks(resolvedQuickLinks);
         const pending = await articleRepository.listPendingChanges();
         if (!active) return;
-        setRuntime({ articleRepository, projectRepository, workRepository, preferencesRepository, database });
+        setRuntime({ articleRepository, projectRepository, workRepository, preferencesRepository, aiRepository, integrationRepository, database });
         setDisplayName(preferences.displayName);
         setQuickLinks(resolvedQuickLinks);
         setPendingCount(pending.length);
@@ -370,6 +378,8 @@ export function DesktopApp() {
         repository={runtime.articleRepository}
         projectRepository={runtime.projectRepository}
         workRepository={runtime.workRepository}
+        aiRepository={runtime.aiRepository}
+        integrationRepository={runtime.integrationRepository}
         displayName={displayName}
         quickLinks={quickLinks}
         dataRevision={revision}
