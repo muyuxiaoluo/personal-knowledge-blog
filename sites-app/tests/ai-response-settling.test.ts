@@ -31,6 +31,13 @@ test("saves sooner after a real generating-to-ready transition", () => {
     changed: true,
     hasGenerated: true,
     observedGenerating: true,
+    stableForMs: OBSERVED_GENERATION_STABILITY_MS - 1,
+  }), false);
+  assert.equal(isAiResponseSettled({
+    generating: false,
+    changed: true,
+    hasGenerated: true,
+    observedGenerating: true,
     stableForMs: OBSERVED_GENERATION_STABILITY_MS,
   }), true);
   assert.equal(isAiResponseSettled({

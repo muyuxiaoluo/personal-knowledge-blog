@@ -22,6 +22,7 @@ import { WorkspacePreferencesRepository } from "../app/data/workspace-preference
 import { SqliteAiRepository } from "../app/data/sqlite-ai-repository";
 import { IntegrationRepository } from "../app/data/integration-repository";
 import {
+  addDefaultEntertainmentLinks,
   readLegacyQuickLinks,
   workspaceTitle,
   type QuickLink,
@@ -173,7 +174,7 @@ export function DesktopApp() {
           integrationRepository.listGitHubRepositories(),
         ]);
         const preferences = await preferencesRepository.getPreferences();
-        const resolvedQuickLinks = preferences.quickLinks ?? readLegacyQuickLinks(localStorage);
+        const resolvedQuickLinks = preferences.quickLinks ?? addDefaultEntertainmentLinks(readLegacyQuickLinks(localStorage));
         if (!preferences.quickLinks) await preferencesRepository.saveQuickLinks(resolvedQuickLinks);
         const pending = await articleRepository.listPendingChanges();
         if (!active) return;

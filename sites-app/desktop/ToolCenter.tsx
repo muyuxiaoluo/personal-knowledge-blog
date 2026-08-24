@@ -1,7 +1,9 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import type { IntegrationRepository } from "../app/data/integration-repository";
 import type {
+  GitHubCommit,
+  GitHubRelease,
   GitHubRepositoryConfig,
   GitHubRepositorySnapshot,
   ModelBalance,
@@ -159,11 +161,7 @@ function AiTools({ links, onOpenAi }: { links: QuickLink[]; onOpenAi: () => void
 }
 
 function EntertainmentTools({ links, onSave, onNotice }: { links: QuickLink[]; onSave: (links: QuickLink[]) => Promise<void>; onNotice: (message: string) => void }) {
-  const presets: QuickLink[] = [
-    { id: "bilibili-preset", title: "哔哩哔哩", url: "https://www.bilibili.com", category: "content", area: "entertainment", openMode: "internal", allowInsecureHttp: false, pinned: false, order: 0 },
-    { id: "douyin-preset", title: "抖音", url: "https://www.douyin.com", category: "content", area: "entertainment", openMode: "internal", allowInsecureHttp: false, pinned: false, order: 1 },
-  ];
-  return <><section className="tool-section entertainment-presets"><header><div><span>娱乐窗口</span><h2>常用平台</h2><p>使用独立单例窗口，关闭后释放页面资源。</p></div></header><div className="tool-link-grid">{presets.map((link) => <button key={link.id} onClick={() => void openQuickLink(link).catch((error) => onNotice(describeError(error)))}><BrandMark link={link} /><span><strong>{link.title}</strong><small>{hostOf(link.url)}</small></span><em>项目内打开</em></button>)}</div></section><div className="tool-section-spacer" /><LinkLibrary area="entertainment" links={links} onSave={onSave} onNotice={onNotice} /></>;
+  return <LinkLibrary area="entertainment" links={links} onSave={onSave} onNotice={onNotice} />;
 }
 
 function DevelopmentTools({ repository, repositories, snapshots, errors, busyKey, onReload, onRefresh, onNotice }: {
@@ -209,26 +207,44 @@ function DevelopmentTools({ repository, repositories, snapshots, errors, busyKey
 
   return <section className="tool-section github-tools">
     <header><div><span>GitHub</span><h2>私有仓库动态</h2><p>只读取你配置的仓库提交和 Release，不统计 Star 或 Fork。</p></div><button onClick={() => void openInternalUrl("https://github.com").catch((error) => onNotice(describeError(error)))}>打开 GitHub</button></header>
-    <details className="configuration-guide" open>
-      <summary><span>第一次使用：这三项分别填什么？</span><small>展开查看完整步骤</small></summary>
-      <div className="configuration-guide-body">
+    <SecretEditor
+      kind="github_pat"
+      label="Fine-grained PAT"
+      hint="建议仅授予所选仓库 Contents: read 权限"
+      placeholder="github_pat_..."
+      onNotice={onNotice}
+      help={<>
         <ol>
           <li><strong>创建只读凭据</strong><p>打开 GitHub 的 Fine-grained token 页面，Resource owner 选择你的账号；Repository access 选择“Only select repositories”并勾选要展示的仓库。</p></li>
           <li><strong>只给读取权限</strong><p>在 Repository permissions 中把 Contents 设为 Read-only。生成后复制以 <code>github_pat_</code> 开头的完整内容，粘贴到下方 Fine-grained PAT。</p></li>
           <li><strong>填写仓库地址</strong><p>如果仓库网址是 <code>github.com/muyuxiaoluo/my-project</code>，仓库所有者填 <code>muyuxiaoluo</code>，仓库名称填 <code>my-project</code>，不要粘贴整段网址。</p></li>
         </ol>
-        <div className="configuration-guide-actions"><button onClick={() => void openInternalUrl("https://github.com/settings/personal-access-tokens/new").catch((error) => onNotice(describeError(error)))}>去 GitHub 创建凭据</button><button onClick={() => void openInternalUrl("https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens").catch((error) => onNotice(describeError(error)))}>查看官方说明</button></div>
+        <div className="configuration-guide-actions"><button type="button" onClick={() => void openInternalUrl("https://github.com/settings/personal-access-tokens/new").catch((error) => onNotice(describeError(error)))}>去 GitHub 创建凭据</button><button type="button" onClick={() => void openInternalUrl("https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens").catch((error) => onNotice(describeError(error)))}>查看官方说明</button></div>
         <p className="configuration-safety">凭据只保存在 Windows 系统凭据管理器中，保存后本项目不会把完整内容重新显示出来。</p>
-      </div>
-    </details>
-    <SecretEditor kind="github_pat" label="Fine-grained PAT" hint="建议仅授予所选仓库 Contents: read 权限" placeholder="github_pat_..." onNotice={onNotice} />
+      </>}
+    />
     <form className="github-add-form" onSubmit={add}><label><span>仓库所有者</span><input value={owner} onChange={(event) => setOwner(event.target.value)} placeholder="例如：muyuxiaoluo" /></label><label><span>仓库名称</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：life-strategy-library" /></label><button>添加仓库</button></form>
     <div className="github-repository-list">{repositories.map((config) => {
       const snapshot = snapshots[config.id];
       const error = errors[config.id];
-      return <article key={config.id} className={`github-repository-card${error ? " has-error" : ""}`}><header><div><strong>{config.displayName || `${config.owner}/${config.name}`}</strong><span>{error ? "本次刷新失败" : snapshot ? `更新于 ${relativeTime(snapshot.fetchedAt)}` : "尚未读取"}</span></div><div><button onClick={() => void togglePinned(config)}>{config.homePinned ? "取消首页" : "放到首页"}</button><button onClick={() => void onRefresh(config)} disabled={busyKey === `github:${config.id}`}>{busyKey === `github:${config.id}` ? "刷新中…" : "刷新"}</button><button className="danger" onClick={() => void repository.deleteGitHubRepository(config.id).then(onReload)}>删除</button></div></header>{error && <GitHubRepositoryError config={config} message={error} onNotice={onNotice} />}{snapshot ? <><section><h3>最近提交</h3>{snapshot.commits.map((commit) => <button key={commit.sha} onClick={() => void openInternalUrl(commit.url)}><strong>{commit.message}</strong><small>{commit.author} · {relativeTime(commit.committedAt)}</small></button>)}</section><section><h3>Release</h3>{snapshot.releases.length ? snapshot.releases.map((release) => <button key={release.id} onClick={() => void openInternalUrl(release.url)}><strong>{release.name}</strong><small>{release.tagName} · {relativeTime(release.publishedAt)}</small></button>) : <p>暂无 Release</p>}</section></> : !error && <p className="tool-placeholder">保存只读 PAT 后刷新，即可读取公开或私有仓库信息。</p>}</article>;
+      return <article key={config.id} className={`github-repository-card${error ? " has-error" : ""}`}><header><div><strong>{config.displayName || `${config.owner}/${config.name}`}</strong><span>{error ? "本次刷新失败" : snapshot ? `更新于 ${relativeTime(snapshot.fetchedAt)}` : "尚未读取"}</span></div><div><button onClick={() => void togglePinned(config)}>{config.homePinned ? "取消首页" : "放到首页"}</button><button onClick={() => void onRefresh(config)} disabled={busyKey === `github:${config.id}`}>{busyKey === `github:${config.id}` ? "刷新中…" : "刷新"}</button><button className="danger" onClick={() => void repository.deleteGitHubRepository(config.id).then(onReload)}>删除</button></div></header>{error && <GitHubRepositoryError config={config} message={error} onNotice={onNotice} />}{snapshot ? <><GitHubCommitItems commits={snapshot.commits} /><GitHubReleaseItems releases={snapshot.releases} /></> : !error && <p className="tool-placeholder">保存只读 PAT 后刷新，即可读取公开或私有仓库信息。</p>}</article>;
     })}</div>
   </section>;
+}
+
+function GitHubCommitItems({ commits }: { commits: GitHubCommit[] }) {
+  const recent = commits.slice(0, 2);
+  const earlier = commits.slice(2);
+  const renderCommit = (commit: GitHubCommit) => <button key={commit.sha} onClick={() => void openInternalUrl(commit.url)}><strong>{commit.message}</strong><small>{commit.author} · {relativeTime(commit.committedAt)}</small></button>;
+  return <section><h3>最近提交</h3>{recent.map(renderCommit)}{earlier.length > 0 && <details className="github-more-items"><summary>更早的 {earlier.length} 次提交</summary><div>{earlier.map(renderCommit)}</div></details>}</section>;
+}
+
+function GitHubReleaseItems({ releases }: { releases: GitHubRelease[] }) {
+  if (!releases.length) return <section><h3>Release</h3><p>暂无 Release</p></section>;
+  const recent = releases.slice(0, 2);
+  const earlier = releases.slice(2);
+  const renderRelease = (release: GitHubRelease) => <button key={release.id} onClick={() => void openInternalUrl(release.url)}><strong>{release.name}</strong><small>{release.tagName} · {relativeTime(release.publishedAt)}</small></button>;
+  return <section><h3>Release</h3>{recent.map(renderRelease)}{earlier.length > 0 && <details className="github-more-items"><summary>更早的 {earlier.length} 个 Release</summary><div>{earlier.map(renderRelease)}</div></details>}</section>;
 }
 
 function GitHubRepositoryError({ config, message, onNotice }: {
@@ -264,22 +280,13 @@ function AccountTools({ balances, usage, busyKey, onRefreshBalance, onReadUsage,
   const [rangeStart, setRangeStart] = useState(initialStart);
   const [rangeEnd, setRangeEnd] = useState(today);
   return <section className="tool-section account-tools"><header><div><span>模型账户</span><h2>余额与 Token 用量</h2><p>这些配置只服务于余额与用量卡片，不影响 AI 助手对话。</p></div></header>
-    <div className="optional-configuration-note"><strong>如果你只想使用 AI 对话，这一页可以完全不配置。</strong><p>DeepSeek 网页对话依赖官网登录状态，不需要 API Key。下面四项都是可选的账户统计能力。</p></div>
-    <div className="configuration-guide-grid">
-      <details className="configuration-guide" open>
-        <summary><span>DeepSeek API Key 怎么填？</span><small>可选 · 只查询 API 余额</small></summary>
-        <div className="configuration-guide-body"><ol><li><strong>打开 DeepSeek 开放平台</strong><p>登录后进入“API Keys / API 密钥”，创建一个新 Key。</p></li><li><strong>复制并粘贴</strong><p>把以 <code>sk-</code> 开头的完整 Key 粘贴到“DeepSeek API Key”。它不会用于本项目中的网页问答，也不会产生推理调用。</p></li></ol><div className="configuration-guide-actions"><button onClick={() => void openInternalUrl("https://platform.deepseek.com/api_keys").catch((error) => onNotice(describeError(error)))}>打开 API Key 页面</button><button onClick={() => void openInternalUrl("https://api-docs.deepseek.com/zh-cn/api/get-user-balance/").catch((error) => onNotice(describeError(error)))}>余额接口说明</button></div></div>
-      </details>
-      <details className="configuration-guide">
-        <summary><span>阿里云 AccessKey 怎么填？</span><small>可选 · 查询阿里云账户余额</small></summary>
-        <div className="configuration-guide-body"><ol><li><strong>建议新建只读 RAM 用户</strong><p>不要使用主账号 AccessKey。为 RAM 用户授予 <code>AliyunBSSReadOnlyAccess</code>，用于只读查询费用与账户余额。</p></li><li><strong>创建 AccessKey</strong><p>在 RAM 用户的认证管理中创建 AccessKey。把 AccessKey ID（通常以 <code>LTAI</code> 开头）和只显示一次的 AccessKey Secret 分别粘贴到对应输入框。</p></li></ol><div className="configuration-guide-actions"><button onClick={() => void openInternalUrl("https://ram.console.aliyun.com/manage/ak").catch((error) => onNotice(describeError(error)))}>打开 AccessKey 管理</button><button onClick={() => void openInternalUrl("https://help.aliyun.com/en/user-center/developer-reference/api-calling-authorization").catch((error) => onNotice(describeError(error)))}>查看只读权限说明</button></div></div>
-      </details>
-      <details className="configuration-guide">
-        <summary><span>Qwen 监控 HTTP API 地址在哪？</span><small>高级功能 · 可能收费</small></summary>
-        <div className="configuration-guide-body"><ol><li><strong>先决定是否真的需要</strong><p>普通用量查看不需要这一项。你可以直接点击下方“打开官方用量页”，登录后再读取当前页面。</p></li><li><strong>需要自动统计时再开启</strong><p>进入阿里云百炼“模型监控”，在右上角“模型监控配置”中手动开启高级监控；然后进入云监控 Prometheus 实例详情。</p></li><li><strong>复制完整 HTTP API 地址</strong><p>选择公网访问地址，复制整段以 <code>https://</code> 开头的 HTTP API 地址粘贴到下方。不要填百炼控制台网页地址，也不要自己拼接接口路径。</p></li></ol><div className="configuration-guide-actions"><button onClick={() => void openInternalUrl("https://help.aliyun.com/zh/model-studio/model-telemetry").catch((error) => onNotice(describeError(error)))}>查看阿里云图文步骤</button><button onClick={() => void desktopApi.usage.open("qwen").catch((error) => onNotice(describeError(error)))}>打开百炼控制台</button></div><p className="configuration-warning">高级监控由你在阿里云侧手动开通并可能产生费用，本项目不会代你开通。HTTP API 使用与 Prometheus 实例同一账号的 AccessKey ID 和 Secret。</p></div>
-      </details>
+    <p className="account-configuration-summary">以下均为可选的统计配置；只使用网页 AI 对话时无需填写。点击字段旁的 <b>?</b> 查看来源和填写步骤。</p>
+    <div className="credential-grid">
+      <SecretEditor kind="deepseek_api_key" label="DeepSeek API Key" hint="仅用于查询 API 余额，不会用于模型推理" placeholder="sk-..." onNotice={onNotice} help={<><ol><li><strong>打开 DeepSeek 开放平台</strong><p>登录后进入“API Keys / API 密钥”，创建一个新 Key。</p></li><li><strong>复制并粘贴</strong><p>把以 <code>sk-</code> 开头的完整 Key 粘贴到此处。它不会用于网页问答，也不会产生推理调用。</p></li></ol><div className="configuration-guide-actions"><button type="button" onClick={() => void openInternalUrl("https://platform.deepseek.com/api_keys").catch((error) => onNotice(describeError(error)))}>打开 API Key 页面</button><button type="button" onClick={() => void openInternalUrl("https://api-docs.deepseek.com/zh-cn/api/get-user-balance/").catch((error) => onNotice(describeError(error)))}>余额接口说明</button></div></>} />
+      <SecretEditor kind="aliyun_access_key_id" label="阿里云 AccessKey ID" hint="建议使用只读 RAM 用户" placeholder="通常以 LTAI 开头" onNotice={onNotice} help={<AliyunAccessKeyHelp onNotice={onNotice} />} />
+      <SecretEditor kind="aliyun_access_key_secret" label="阿里云 AccessKey Secret" hint="保存在 Windows 系统凭据管理器" placeholder="粘贴只显示一次的 Secret" onNotice={onNotice} help={<AliyunAccessKeyHelp onNotice={onNotice} />} />
+      <SecretEditor kind="qwen_monitor_credential" label="Qwen 监控 HTTP API 地址" hint="仅在手动开启高级监控后填写" placeholder="https://..." inputType="url" onNotice={onNotice} help={<><ol><li><strong>普通查看不需要填写</strong><p>可直接使用下方“打开官方用量页”和“读取当前页面”。</p></li><li><strong>需要自动统计时再开启</strong><p>在阿里云百炼“模型监控”中手动开启高级监控，然后进入云监控 Prometheus 实例详情。</p></li><li><strong>复制完整 HTTP API 地址</strong><p>复制公网访问地址中以 <code>https://</code> 开头的完整 HTTP API 地址；不要填写控制台网页地址。</p></li></ol><div className="configuration-guide-actions"><button type="button" onClick={() => void openInternalUrl("https://help.aliyun.com/zh/model-studio/model-telemetry").catch((error) => onNotice(describeError(error)))}>查看阿里云图文步骤</button><button type="button" onClick={() => void desktopApi.usage.open("qwen").catch((error) => onNotice(describeError(error)))}>打开百炼控制台</button></div><p className="configuration-warning">高级监控可能产生费用，本项目不会代你开通。</p></>} />
     </div>
-    <div className="credential-grid"><SecretEditor kind="deepseek_api_key" label="DeepSeek API Key" hint="仅用于查询 API 余额，不会用于模型推理" placeholder="sk-..." onNotice={onNotice} /><SecretEditor kind="aliyun_access_key_id" label="阿里云 AccessKey ID" hint="建议使用只读 RAM 用户" placeholder="通常以 LTAI 开头" onNotice={onNotice} /><SecretEditor kind="aliyun_access_key_secret" label="阿里云 AccessKey Secret" hint="保存在 Windows 系统凭据管理器" placeholder="粘贴只显示一次的 Secret" onNotice={onNotice} /><SecretEditor kind="qwen_monitor_credential" label="Qwen 监控 HTTP API 地址" hint="仅在你手动开启百炼高级监控后，从实例详情复制" placeholder="https://..." inputType="url" onNotice={onNotice} /></div>
     <div className="account-provider-grid">{(["deepseek", "qwen"] as const).map((provider) => {
       const balance = balances[provider]; const modelUsage = usage[provider]; const label = provider === "deepseek" ? "DeepSeek" : "Qwen / 阿里云";
       return <article key={provider}><header><div><span>{label}</span><strong>{balance ? `${balance.currency} ${balance.amount || "0"}` : "尚未读取余额"}</strong><small>{balance?.message || (balance ? `更新于 ${relativeTime(balance.fetchedAt)}` : "配置凭据后手动刷新")}</small></div><button onClick={() => void onRefreshBalance(provider)} disabled={busyKey === `balance:${provider}`}>{busyKey === `balance:${provider}` ? "读取中…" : "刷新余额"}</button></header><section><div><h3>最近读取的 Token</h3><button onClick={() => void desktopApi.usage.open(provider).catch((error) => onNotice(describeError(error)))}>打开官方用量页</button><button onClick={() => void onReadUsage(provider)} disabled={busyKey === `usage:${provider}`}>读取当前页面</button></div>{provider === "qwen" && <div className="qwen-monitor-range"><label><span>开始</span><input type="date" value={rangeStart} max={rangeEnd} onChange={(event) => setRangeStart(event.target.value)} /></label><label><span>结束</span><input type="date" value={rangeEnd} min={rangeStart} max={today} onChange={(event) => setRangeEnd(event.target.value)} /></label><button onClick={() => void onReadQwenMonitor(rangeStart, rangeEnd)} disabled={busyKey === "usage:qwen-monitor" || !rangeStart || !rangeEnd}>{busyKey === "usage:qwen-monitor" ? "查询中…" : "从高级监控读取"}</button></div>}{modelUsage?.rows.length ? <ul>{modelUsage.rows.map((row, index) => <li key={`${row.model}-${index}`}><span>{row.model}</span><strong>{formatNumber(row.totalTokens)}</strong><small>输入 {formatNumber(row.inputTokens)} · 输出 {formatNumber(row.outputTokens)}</small></li>)}</ul> : <p>打开官方控制台、完成登录并进入用量明细后，再读取当前页面。</p>}</section></article>;
@@ -287,14 +294,31 @@ function AccountTools({ balances, usage, busyKey, onRefreshBalance, onReadUsage,
   </section>;
 }
 
-function SecretEditor({ kind, label, hint, placeholder = "粘贴凭据", inputType = "password", onNotice }: { kind: SecretKind; label: string; hint: string; placeholder?: string; inputType?: "password" | "url"; onNotice: (message: string) => void }) {
+function AliyunAccessKeyHelp({ onNotice }: { onNotice: (message: string) => void }) {
+  return <><ol><li><strong>建议新建只读 RAM 用户</strong><p>不要使用主账号 AccessKey。为 RAM 用户授予 <code>AliyunBSSReadOnlyAccess</code>，只读取费用与账户余额。</p></li><li><strong>创建 AccessKey</strong><p>在 RAM 用户的认证管理中创建 AccessKey。把通常以 <code>LTAI</code> 开头的 ID 和只显示一次的 Secret 分别粘贴到对应字段。</p></li></ol><div className="configuration-guide-actions"><button type="button" onClick={() => void openInternalUrl("https://ram.console.aliyun.com/manage/ak").catch((error) => onNotice(describeError(error)))}>打开 AccessKey 管理</button><button type="button" onClick={() => void openInternalUrl("https://help.aliyun.com/en/user-center/developer-reference/api-calling-authorization").catch((error) => onNotice(describeError(error)))}>查看只读权限说明</button></div></>;
+}
+
+function ConfigurationHelp({ title, children }: { title: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return <>
+    <button type="button" className="configuration-help-trigger" aria-label={`查看${title}`} title={title} onClick={() => setOpen(true)}>?</button>
+    {open && <div className="configuration-help-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
+      <section className="configuration-help-dialog" role="dialog" aria-modal="true" aria-label={title}>
+        <header><div><span>配置帮助</span><h2>{title}</h2></div><button type="button" aria-label="关闭配置帮助" onClick={() => setOpen(false)}>×</button></header>
+        <div className="configuration-guide-body">{children}</div>
+      </section>
+    </div>}
+  </>;
+}
+
+function SecretEditor({ kind, label, hint, placeholder = "粘贴凭据", inputType = "password", onNotice, help }: { kind: SecretKind; label: string; hint: string; placeholder?: string; inputType?: "password" | "url"; onNotice: (message: string) => void; help?: ReactNode }) {
   const [configured, setConfigured] = useState(false);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => { if (isTauri()) void desktopApi.secrets.status(kind).then(setConfigured).catch(() => setConfigured(false)); }, [kind]);
   async function save(event: FormEvent) { event.preventDefault(); if (!value.trim()) return; setBusy(true); try { await desktopApi.secrets.set(kind, value); setValue(""); setConfigured(true); onNotice(`${label} 已安全保存。`); } catch (error) { onNotice(describeError(error)); } finally { setBusy(false); } }
   async function remove() { setBusy(true); try { await desktopApi.secrets.delete(kind); setConfigured(false); onNotice(`${label} 已从系统凭据管理器删除。`); } catch (error) { onNotice(describeError(error)); } finally { setBusy(false); } }
-  return <form className="secret-editor" onSubmit={save}><header><div><strong>{label}</strong><small>{hint}</small></div><span className={configured ? "configured" : ""}>{configured ? "已配置" : "未配置"}</span></header><div><input type={inputType} autoComplete="off" value={value} onChange={(event) => setValue(event.target.value)} placeholder={configured ? "输入新值以替换" : placeholder} /><button disabled={busy || !value.trim()}>{busy ? "保存中…" : "保存"}</button>{configured && <button type="button" className="danger" onClick={() => void remove()} disabled={busy}>删除</button>}</div></form>;
+  return <form className="secret-editor" onSubmit={save}><header><div><div className="secret-editor-title"><strong>{label}</strong>{help && <ConfigurationHelp title={`${label} 怎么配置？`}>{help}</ConfigurationHelp>}</div><small>{hint}</small></div><span className={configured ? "configured" : ""}>{configured ? "已配置" : "未配置"}</span></header><div><input type={inputType} autoComplete="off" value={value} onChange={(event) => setValue(event.target.value)} placeholder={configured ? "输入新值以替换" : placeholder} /><button disabled={busy || !value.trim()}>{busy ? "保存中…" : "保存"}</button>{configured && <button type="button" className="danger" onClick={() => void remove()} disabled={busy}>删除</button>}</div></form>;
 }
 
 function LinkLibrary({ area, links, onSave, onNotice }: { area: "entertainment" | "web"; links: QuickLink[]; onSave: (links: QuickLink[]) => Promise<void>; onNotice: (message: string) => void }) {
@@ -304,7 +328,7 @@ function LinkLibrary({ area, links, onSave, onNotice }: { area: "entertainment" 
   async function add(event: FormEvent) { event.preventDefault(); if (!title.trim() || !url.trim()) return; const normalized = /^https?:\/\//i.test(url) ? url.trim() : `https://${url.trim()}`; const next: QuickLink = { id: `link-${Date.now()}`, title: title.trim(), url: normalized, category: area === "entertainment" ? "content" : "general", area, openMode: area === "entertainment" ? "internal" : "external", allowInsecureHttp: false, pinned: false, order: links.length }; await onSave([...links, next]); setTitle(""); setUrl(""); setAdding(false); }
   async function update(link: QuickLink, patch: Partial<QuickLink>) { await onSave(links.map((item) => item.id === link.id ? { ...item, ...patch } : item)); }
   async function open(link: QuickLink) { try { await openQuickLink(link); } catch (error) { onNotice(describeError(error)); } }
-  return <section className="tool-section link-library"><header><div><span>{area === "entertainment" ? "娱乐窗口" : "常用网站"}</span><h2>{area === "entertainment" ? "用完即关闭" : "你的网页工具箱"}</h2><p>{area === "entertainment" ? "只保留一个娱乐 WebView，关闭窗口后立即释放。" : "每个入口可以独立选择内置或系统浏览器。"}</p></div><button onClick={() => setAdding((value) => !value)}>{adding ? "取消" : "＋ 添加入口"}</button></header>{adding && <form className="link-add-form" onSubmit={add}><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="名称" /><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://..." /><button>保存</button></form>}<div className="link-library-list">{visible.map((link) => <article key={link.id}><button className="link-main" onClick={() => void open(link)}><BrandMark link={link} /><span><strong>{link.title}</strong><small>{link.url}</small></span><em>打开 ↗</em></button><div><select value={link.openMode} onChange={(event) => void update(link, { openMode: event.target.value as LinkOpenMode })}><option value="internal">项目内打开</option><option value="external">系统浏览器</option></select>{link.url.startsWith("http://") && link.openMode === "internal" && <label><input type="checkbox" checked={link.allowInsecureHttp} onChange={(event) => void update(link, { allowInsecureHttp: event.target.checked })} />允许局域网 HTTP</label>}<button className="danger" onClick={() => void onSave(links.filter((item) => item.id !== link.id))}>删除</button></div></article>)}</div>{!visible.length && <p className="tool-placeholder">这个分类还没有入口。</p>}</section>;
+  return <section className="tool-section link-library"><header><div><span>{area === "entertainment" ? "娱乐" : "常用网站"}</span><h2>{area === "entertainment" ? "娱乐平台" : "你的网页工具箱"}</h2><p>{area === "entertainment" ? "所有入口统一放在这里；内置打开时复用同一个娱乐窗口，关闭即释放。" : "每个入口可以独立选择内置或系统浏览器。"}</p></div><button onClick={() => setAdding((value) => !value)}>{adding ? "取消" : "＋ 添加入口"}</button></header>{adding && <form className="link-add-form" onSubmit={add}><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="名称" /><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://..." /><button>保存</button></form>}<div className="link-library-list">{visible.map((link) => <article key={link.id}><button className="link-main" onClick={() => void open(link)}><BrandMark link={link} /><span><strong>{link.title}</strong><small>{link.url}</small></span><em>打开 ↗</em></button><div><select value={link.openMode} onChange={(event) => void update(link, { openMode: event.target.value as LinkOpenMode })}><option value="internal">项目内打开</option><option value="external">系统浏览器</option></select>{link.url.startsWith("http://") && link.openMode === "internal" && <label><input type="checkbox" checked={link.allowInsecureHttp} onChange={(event) => void update(link, { allowInsecureHttp: event.target.checked })} />允许局域网 HTTP</label>}<button className="danger" onClick={() => void onSave(links.filter((item) => item.id !== link.id))}>删除</button></div></article>)}</div>{!visible.length && <p className="tool-placeholder">这个分类还没有入口。</p>}</section>;
 }
 
 export function HomeIntegrationCards({ repository, onOpenTools }: { repository: IntegrationRepository; onOpenTools: () => void }) {

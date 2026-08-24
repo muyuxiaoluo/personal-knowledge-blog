@@ -1,9 +1,11 @@
 import type { QuickLink, WorkspacePreferences } from "../workspace-preferences";
-import { normalizeDisplayName, normalizeQuickLinks } from "../workspace-preferences";
+import { addDefaultEntertainmentLinks, normalizeDisplayName, normalizeQuickLinks } from "../workspace-preferences";
 import type { SqliteDatabase } from "./sqlite-article-repository";
 
 const displayNameKey = "workspace_display_name";
-const quickLinksKey = "workspace_quick_links_v1";
+const legacyQuickLinksKeyV1 = "workspace_quick_links_v1";
+const legacyQuickLinksKeyV2 = "workspace_quick_links_v2";
+const quickLinksKey = "workspace_quick_links_v3";
 
 export class WorkspacePreferencesRepository {
   private initialization: Promise<void> | null = null;
@@ -24,13 +26,21 @@ export class WorkspacePreferencesRepository {
   async getPreferences(): Promise<WorkspacePreferences> {
     await this.initialize();
     const rows = await this.database.select<{ key: string; value: string }>(
-      "SELECT key, value FROM app_meta WHERE key IN (?, ?)",
-      [displayNameKey, quickLinksKey],
+      "SELECT key, value FROM app_meta WHERE key IN (?, ?, ?, ?)",
+      [displayNameKey, quickLinksKey, legacyQuickLinksKeyV2, legacyQuickLinksKeyV1],
     );
     const values = new Map(rows.map((row) => [row.key, row.value]));
+    let quickLinks = parseQuickLinks(values.get(quickLinksKey));
+    if (!quickLinks) {
+      const legacyQuickLinks = parseQuickLinks(values.get(legacyQuickLinksKeyV2)) ?? parseQuickLinks(values.get(legacyQuickLinksKeyV1));
+      if (legacyQuickLinks) {
+        quickLinks = addDefaultEntertainmentLinks(legacyQuickLinks);
+        await this.write(quickLinksKey, JSON.stringify(quickLinks));
+      }
+    }
     return {
       displayName: normalizeDisplayName(values.get(displayNameKey) ?? ""),
-      quickLinks: parseQuickLinks(values.get(quickLinksKey)),
+      quickLinks,
     };
   }
 

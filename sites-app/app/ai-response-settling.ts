@@ -1,5 +1,5 @@
-export const OBSERVED_GENERATION_STABILITY_MS = 2_000;
-export const FALLBACK_GENERATION_STABILITY_MS = 8_000;
+export const OBSERVED_GENERATION_STABILITY_MS = 600;
+export const FALLBACK_GENERATION_STABILITY_MS = 6_000;
 
 export function isAiResponseSettled(input: {
   generating: boolean;

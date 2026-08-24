@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 use url::Url;
 
 const WINDOW_LABEL: &str = "deepseek-bridge";
-const ADAPTER_VERSION: u8 = 2;
+const ADAPTER_VERSION: u8 = 9;
 const IDLE_SECONDS: u64 = 15 * 60;
 
 pub struct DeepSeekBridgeState {
@@ -35,9 +35,27 @@ pub struct DeepSeekSnapshot {
     #[serde(default)]
     text: String,
     #[serde(default)]
+    reasoning_text: String,
+    #[serde(default)]
     conversation_ref: String,
     #[serde(default)]
     error: String,
+    #[serde(default)]
+    deep_thinking_available: bool,
+    #[serde(default)]
+    deep_thinking_enabled: bool,
+    #[serde(default)]
+    expert_mode_available: bool,
+    #[serde(default)]
+    expert_mode_enabled: bool,
+    #[serde(default)]
+    smart_search_available: bool,
+    #[serde(default)]
+    smart_search_enabled: bool,
+    #[serde(default)]
+    vision_available: bool,
+    #[serde(default)]
+    attachment_name: String,
     adapter_version: u8,
 }
 
@@ -48,8 +66,17 @@ impl DeepSeekSnapshot {
             ready: false,
             generating: false,
             text: String::new(),
+            reasoning_text: String::new(),
             conversation_ref: String::new(),
             error: String::new(),
+            deep_thinking_available: false,
+            deep_thinking_enabled: false,
+            expert_mode_available: false,
+            expert_mode_enabled: false,
+            smart_search_available: false,
+            smart_search_enabled: false,
+            vision_available: false,
+            attachment_name: String::new(),
             adapter_version: ADAPTER_VERSION,
         }
     }
@@ -58,7 +85,7 @@ impl DeepSeekSnapshot {
 const ADAPTER_SCRIPT: &str = r#"
 (() => {
   if (!/(^|\.)deepseek\.com$/i.test(location.hostname)) return;
-  const VERSION = 2;
+  const VERSION = 9;
   const text = (node) => (node?.innerText || node?.textContent || '').trim();
   const markdownText = (node) => {
     const renderChildren = (parent, context = {}) => Array.from(parent?.childNodes || []).map((child) => render(child, context)).join('');
@@ -140,18 +167,120 @@ const ADAPTER_SCRIPT: &str = r#"
     const label = `${text(button)} ${button.getAttribute('aria-label') || ''} ${button.getAttribute('title') || ''}`;
     return patterns.some((pattern) => pattern.test(label));
   });
+  const labeledElement = (patterns) => {
+    const candidates = Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], [role="option"], [tabindex], span, p, div'))
+      .filter(visible)
+      .map((node) => ({ node, label: `${text(node)} ${node.getAttribute?.('aria-label') || ''} ${node.getAttribute?.('title') || ''}`.trim() }))
+      .filter(({ label }) => label && label.length < 80 && patterns.some((pattern) => pattern.test(label)))
+      .sort((left, right) => left.label.length - right.label.length);
+    return candidates[0]?.node || null;
+  };
+  const controlForLabel = (patterns) => {
+    const label = labeledElement(patterns);
+    if (!label) return null;
+    let node = label;
+    for (let depth = 0; depth < 6 && node; depth += 1, node = node.parentElement) {
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      if (node.matches?.('button, [role="button"], [role="menuitem"], [role="option"], [tabindex]')) return node;
+      if (style.cursor === 'pointer' && rect.width < 300 && rect.height < 80) return node;
+    }
+    return label;
+  };
+  const controlState = (control) => {
+    if (!control) return false;
+    let node = control;
+    for (let depth = 0; depth < 5 && node; depth += 1, node = node.parentElement) {
+      const pressed = node.getAttribute?.('aria-pressed');
+      const checked = node.getAttribute?.('aria-checked');
+      const selected = node.getAttribute?.('aria-selected');
+      const state = node.getAttribute?.('data-state') || '';
+      const classes = typeof node.className === 'string' ? node.className : '';
+      if (pressed === 'true' || checked === 'true' || selected === 'true' || /^(checked|on|active|selected)$/i.test(state) || /(^|[-_ ])(active|selected|checked)([-_ ]|$)/i.test(classes)) return true;
+      const rect = node.getBoundingClientRect?.();
+      if (rect && rect.width < 260 && rect.height < 70) {
+        const style = getComputedStyle(node);
+        const tintedBlue = [style.backgroundColor, style.borderColor, style.color].some((value) => {
+          const channels = value.match(/\d+(?:\.\d+)?/g)?.map(Number) || [];
+          const [red = 0, green = 0, blue = 0, alpha = 1] = channels;
+          return alpha > 0.1 && (blue - red > 8 || blue - green > 6);
+        });
+        if (tintedBlue) return true;
+      }
+    }
+    return false;
+  };
   const editor = () => Array.from(document.querySelectorAll('textarea, [contenteditable="true"][role="textbox"], [contenteditable="true"]')).find(visible) || null;
+  const deepThinkingControl = () => controlForLabel([/^(深度思考|DeepThink|Deep Think)$/i]);
+  const smartSearchControl = () => controlForLabel([/^(智能搜索|联网搜索|Web Search|Search)$/i]);
+  const quickModePatterns = [
+    /^(?:快速模式|快速|Quick\s*Mode|Quick)$/i,
+    /(?:^|[\s·|])(?:快速模式|Quick\s*Mode)(?:$|[\s（(·|])/i
+  ];
+  const expertModePatterns = [
+    /^(?:专家模式|专家|Expert\s*Mode|Expert)$/i,
+    /(?:^|[\s·|])(?:专家模式|Expert\s*Mode)(?:$|[\s（(·|])/i
+  ];
+  const quickModeControl = () => controlForLabel(quickModePatterns);
+  const expertModeControl = () => controlForLabel(expertModePatterns);
+  const modeControl = () => {
+    const quick = quickModeControl();
+    const expert = expertModeControl();
+    return [quick, expert].find(controlState) || (quick && !expert ? quick : null) || (expert && !quick ? expert : null) || expert || quick;
+  };
+  const modeState = () => {
+    const quick = quickModeControl();
+    const expert = expertModeControl();
+    return {
+      available: !!quick || !!expert,
+      expertEnabled: !!expert && (controlState(expert) || !quick)
+    };
+  };
+  const fileInput = () => Array.from(document.querySelectorAll('input[type="file"]')).find((input) => /image|\*/i.test(input.accept || '')) || document.querySelector('input[type="file"]');
+  const attachmentControl = () => controlForLabel([/^(附件|上传文件|上传图片|Attach|Upload)$/i]) || findButton([/附件|上传|attach|upload/i]);
   const stopButton = () => findButton([/停止|终止|stop generating|stop response|stop$/i]);
   const sendButton = () => findButton([/发送|send|提交/i]);
-  const newButton = () => findButton([/新建对话|新对话|开启新对话|new chat|new conversation/i]);
-  const assistantText = () => {
-    const selectors = [
-      '.ds-assistant-message-main-content',
-      '[class*="assistant"] [class*="markdown"]',
-      '.ds-markdown',
-      '.markdown-body'
+  const newButton = () => controlForLabel([/^(开启新对话|新建对话|新对话|New Chat|New Conversation)(?:\s|$)/i]) || findButton([/新建对话|新对话|开启新对话|new chat|new conversation/i]);
+  const markdownCandidates = () => {
+    const selectors = ['.ds-assistant-message-main-content', '[class*="assistant"] [class*="markdown"]', '.ds-markdown', '.markdown-body'];
+    return [...new Set(selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector))).filter(visible))];
+  };
+  const reasoningNode = () => {
+    const directSelectors = [
+      '[class*="think"] .ds-markdown', '[class*="reason"] .ds-markdown',
+      '[class*="think-content"]', '[class*="reasoning-content"]',
+      '[data-testid*="think"] .ds-markdown', '[data-testid*="reason"] .ds-markdown',
+      '[data-testid*="think"] [class*="markdown"]', '[data-testid*="reason"] [class*="markdown"]'
     ];
-    const candidates = [...new Set(selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector))).filter(visible))];
+    const direct = [...new Set(directSelectors.flatMap((selector) => Array.from(document.querySelectorAll(selector))).filter(visible))]
+      .filter((node) => text(node) && text(node).length > 1);
+    if (direct.length) return direct.at(-1);
+    const labels = Array.from(document.querySelectorAll('span, div, button'))
+      .filter(visible)
+      .filter((node) => {
+        const label = text(node).replace(/\s+/g, ' ');
+        return label.length > 0 && label.length < 60 && /^(?:已)?深度思考(?:完成)?(?:\s*[（(].*?[）)])?|^(?:thought process|reasoning|thinking)(?:\s|$)/i.test(label);
+      });
+    for (const label of labels.reverse()) {
+      let container = label.parentElement;
+      for (let depth = 0; depth < 5 && container; depth += 1, container = container.parentElement) {
+        const contents = Array.from(container.querySelectorAll('.ds-markdown, .markdown-body, [class*="markdown"]')).filter(visible);
+        if (contents.length >= 2) return contents[0];
+        if (contents.length === 1 && !contents[0].contains(label)) return contents[0];
+      }
+    }
+    return null;
+  };
+  const reasoningText = () => {
+    const node = reasoningNode();
+    if (!node) return '';
+    return markdownText(node)
+      .replace(/^(?:已)?深度思考(?:完成)?(?:\s*[（(].*?[）)])?\s*/i, '')
+      .trim();
+  };
+  const assistantText = () => {
+    const reasoning = reasoningNode();
+    const candidates = markdownCandidates().filter((candidate) => !reasoning || (candidate !== reasoning && !reasoning.contains(candidate) && !candidate.contains(reasoning)));
     const outermost = candidates.filter((candidate) => !candidates.some((other) => other !== candidate && other.contains(candidate)));
     const values = (outermost.length ? outermost : candidates).map((node) => ({ node, value: markdownText(node) })).filter((item) => item.value);
     if (values.length) {
@@ -163,46 +292,152 @@ const ADAPTER_SCRIPT: &str = r#"
       });
       return values.at(-1)?.value || '';
     }
-    const messageContainers = Array.from(document.querySelectorAll('[data-message-role="assistant"], [data-role="assistant"]')).filter(visible);
+    const messageContainers = Array.from(document.querySelectorAll('[data-message-role="assistant"], [data-role="assistant"]')).filter(visible)
+      .filter((candidate) => !reasoning || (candidate !== reasoning && !candidate.contains(reasoning)));
     return messageContainers.length ? markdownText(messageContainers.at(-1)) : '';
   };
-  const currentConversationRow = () => {
-    const currentPath = location.pathname.replace(/\/$/, '');
-    const anchors = Array.from(document.querySelectorAll('a[href]')).filter(visible);
-    const activeLink = anchors.find((anchor) => {
-      try { return new URL(anchor.href, location.href).pathname.replace(/\/$/, '') === currentPath; }
-      catch { return false; }
-    });
-    if (activeLink) {
-      let node = activeLink;
-      for (let depth = 0; depth < 7 && node; depth += 1, node = node.parentElement) {
-        if (node.querySelectorAll?.('button').length) return node;
-      }
+  const normalizePath = (value) => {
+    try { return new URL(value, location.href).pathname.replace(/\/$/, ''); }
+    catch { return String(value || '').split(/[?#]/, 1)[0].replace(/\/$/, ''); }
+  };
+  const conversationRowFrom = (origin) => {
+    const sidebarRight = Math.min(430, window.innerWidth * 0.42);
+    let node = origin;
+    let fallback = null;
+    for (let depth = 0; depth < 9 && node && node !== document.body; depth += 1, node = node.parentElement) {
+      const rect = node.getBoundingClientRect?.();
+      if (!rect || rect.left >= sidebarRight || rect.width < 120 || rect.width > 420 || rect.height < 26 || rect.height > 96) continue;
+      fallback = node;
+      const interactive = node.querySelector?.('button, [role="button"], [role="menuitem"], [tabindex]');
+      const menuLabel = Array.from(node.querySelectorAll?.('span, div') || []).find((child) => {
+        const label = `${text(child)} ${child.getAttribute?.('aria-label') || ''} ${child.getAttribute?.('title') || ''}`.trim();
+        return /^(?:\.\.\.|…|⋯)$|更多|more|操作/i.test(label) && visible(child);
+      });
+      if (interactive || menuLabel) return node;
     }
-    return document.querySelector('[aria-current="page"], [data-state="active"], [class*="active"][class*="chat"], [class*="selected"][class*="chat"]');
+    return fallback;
   };
-  const exactAction = (patterns) => {
-    const candidates = Array.from(document.querySelectorAll('button, [role="menuitem"], [role="option"]')).filter(visible);
-    return candidates.find((node) => patterns.some((pattern) => pattern.test(text(node))));
+  const rowSelectionScore = (row) => {
+    if (!row) return -1;
+    let score = 0;
+    const state = `${row.getAttribute?.('aria-current') || ''} ${row.getAttribute?.('aria-selected') || ''} ${row.getAttribute?.('data-state') || ''} ${row.getAttribute?.('data-active') || ''}`;
+    const classes = typeof row.className === 'string' ? row.className : '';
+    if (/page|true|active|selected/i.test(state)) score += 8;
+    if (/(^|[-_ ])(active|selected)([-_ ]|$)/i.test(classes)) score += 5;
+    const background = getComputedStyle(row).backgroundColor.match(/\d+(?:\.\d+)?/g)?.map(Number) || [];
+    if (background.length >= 3) {
+      const [red, green, blue, alpha = 1] = background;
+      if (alpha > 0.08 && blue > red + 5 && blue >= green) score += 3;
+    }
+    const rect = row.getBoundingClientRect();
+    if (rect.top < window.innerHeight - 110) score += 1;
+    return score;
   };
+  const currentConversationRow = () => {
+    const currentPath = normalizePath(location.href);
+    const conversationId = currentPath.split('/').filter(Boolean).at(-1) || '';
+    const referenceNodes = Array.from(document.querySelectorAll('a[href], [data-href], [data-url], [data-path], [data-id]')).filter(visible);
+    const referenced = referenceNodes.find((node) => {
+      const values = ['href', 'data-href', 'data-url', 'data-path'].map((name) => node.getAttribute(name)).filter(Boolean);
+      if (values.some((value) => normalizePath(value) === currentPath)) return true;
+      const dataId = node.getAttribute('data-id') || '';
+      return conversationId.length >= 8 && dataId === conversationId;
+    });
+    const referencedRow = conversationRowFrom(referenced);
+    if (referencedRow) return referencedRow;
+
+    const activeSelectors = [
+      '[aria-current="page"]', '[aria-selected="true"]', '[data-state="active"]',
+      '[data-state="selected"]', '[data-active="true"]',
+      '[class*="active"][class*="chat"]', '[class*="selected"][class*="chat"]',
+      '[class*="active"][class*="conversation"]', '[class*="selected"][class*="conversation"]'
+    ];
+    const activeRows = [...new Set(activeSelectors.flatMap((selector) => Array.from(document.querySelectorAll(selector))).filter(visible).map(conversationRowFrom).filter(Boolean))];
+    if (activeRows.length) return activeRows.sort((left, right) => rowSelectionScore(right) - rowSelectionScore(left))[0];
+
+    const sidebarRight = Math.min(430, window.innerWidth * 0.42);
+    const menuLabels = Array.from(document.querySelectorAll('button, [role="button"], [tabindex], span, div'))
+      .filter(visible)
+      .filter((node) => node.getBoundingClientRect().left < sidebarRight)
+      .filter((node) => {
+        const label = `${text(node)} ${node.getAttribute?.('aria-label') || ''} ${node.getAttribute?.('title') || ''}`.trim();
+        return label.length < 40 && (/^(?:\.\.\.|…|⋯)$/.test(label) || /更多|more|操作/i.test(label));
+      });
+    const menuRows = [...new Set(menuLabels.map(conversationRowFrom).filter(Boolean))];
+    return menuRows.sort((left, right) => rowSelectionScore(right) - rowSelectionScore(left))[0] || null;
+  };
+  const actionForLabel = (patterns, stage) => {
+    const dialog = stage === 'confirm'
+      ? Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="dialog"], [class*="modal"]')).filter(visible).at(-1)
+      : null;
+    const root = dialog || document;
+    const candidates = Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"], [role="option"], [tabindex], li, span, p, div'))
+      .filter(visible)
+      .map((node) => ({
+        node,
+        label: `${text(node)} ${node.getAttribute?.('aria-label') || ''} ${node.getAttribute?.('title') || ''}`.replace(/\s+/g, ' ').trim()
+      }))
+      .filter(({ label }) => label && label.length < 80 && patterns.some((pattern) => pattern.test(label)))
+      .sort((left, right) => {
+        const leftExact = /^(?:删除|确认删除|删除(?:此|该)?(?:对话|会话)|Delete|Delete (?:chat|conversation)|Confirm delete)$/i.test(left.label) ? 1 : 0;
+        const rightExact = /^(?:删除|确认删除|删除(?:此|该)?(?:对话|会话)|Delete|Delete (?:chat|conversation)|Confirm delete)$/i.test(right.label) ? 1 : 0;
+        if (leftExact !== rightExact) return rightExact - leftExact;
+        const leftSemantic = left.node.matches?.('button, [role="button"], [role="menuitem"], [role="option"]') ? 1 : 0;
+        const rightSemantic = right.node.matches?.('button, [role="button"], [role="menuitem"], [role="option"]') ? 1 : 0;
+        if (leftSemantic !== rightSemantic) return rightSemantic - leftSemantic;
+        return left.label.length - right.label.length;
+      });
+    for (const candidate of candidates) {
+      let control = candidate.node;
+      for (let depth = 0; depth < 6 && control && control !== root; depth += 1, control = control.parentElement) {
+        const rect = control.getBoundingClientRect?.();
+        const style = getComputedStyle(control);
+        if (control.matches?.('button, [role="button"], [role="menuitem"], [role="option"], [tabindex]')) return control;
+        if (style.cursor === 'pointer' && rect && rect.width < 420 && rect.height < 120) return control;
+      }
+      return candidate.node;
+    }
+    return null;
+  };
+  const visibleActionLabels = () => [...new Set(Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], [role="option"], [tabindex], li'))
+    .filter(visible)
+    .map((node) => `${text(node)} ${node.getAttribute?.('aria-label') || ''} ${node.getAttribute?.('title') || ''}`.replace(/\s+/g, ' ').trim())
+    .filter((label) => label && label.length < 40))].slice(-12);
   const loginRequired = () => {
     const body = text(document.body).slice(0, 4000);
     const hasLoginCopy = /扫码登录|密码登录|手机号登录|登录 DeepSeek|sign in|log in/i.test(body);
     return !editor() && hasLoginCopy;
   };
+  const withFeatures = (value) => {
+    const deepThinking = deepThinkingControl();
+    const smartSearch = smartSearchControl();
+    const mode = modeState();
+    return {
+      ...value,
+      reasoningText: reasoningText(),
+      deepThinkingAvailable: !!deepThinking,
+      deepThinkingEnabled: controlState(deepThinking),
+      expertModeAvailable: mode.available,
+      expertModeEnabled: mode.expertEnabled,
+      smartSearchAvailable: !!smartSearch,
+      smartSearchEnabled: controlState(smartSearch),
+      visionAvailable: !!fileInput() || !!attachmentControl(),
+      attachmentName: window.__personalDeepSeekAttachmentName || ''
+    };
+  };
   const snapshot = () => {
     if (document.readyState !== 'complete' && document.readyState !== 'interactive') {
-      return { status: 'preparing', ready: false, generating: false, text: '', conversationRef: '', error: '', adapterVersion: VERSION };
+      return withFeatures({ status: 'preparing', ready: false, generating: false, text: '', conversationRef: '', error: '', adapterVersion: VERSION });
     }
     if (loginRequired()) {
-      return { status: 'login_required', ready: false, generating: false, text: assistantText(), conversationRef: location.href, error: '', adapterVersion: VERSION };
+      return withFeatures({ status: 'login_required', ready: false, generating: false, text: assistantText(), conversationRef: location.href, error: '', adapterVersion: VERSION });
     }
     const input = editor();
     if (!input) {
-      return { status: 'adapter_error', ready: false, generating: false, text: assistantText(), conversationRef: location.href, error: '没有识别到 DeepSeek 输入框，网页结构可能已经变化。', adapterVersion: VERSION };
+      return withFeatures({ status: 'adapter_error', ready: false, generating: false, text: assistantText(), conversationRef: location.href, error: '没有识别到 DeepSeek 输入框，网页结构可能已经变化。', adapterVersion: VERSION });
     }
     const generating = !!stopButton();
-    return { status: generating ? 'generating' : 'ready', ready: true, generating, text: assistantText(), conversationRef: location.href, error: '', adapterVersion: VERSION };
+    return withFeatures({ status: generating ? 'generating' : 'ready', ready: true, generating, text: assistantText(), conversationRef: location.href, error: '', adapterVersion: VERSION });
   };
   const setInput = (input, prompt) => {
     input.focus();
@@ -228,31 +463,104 @@ const ADAPTER_SCRIPT: &str = r#"
         const button = sendButton();
         if (button && !button.disabled) button.click();
         else input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+        window.__personalDeepSeekAttachmentName = '';
         return snapshot();
       } catch (error) {
         return { ...snapshot(), status: 'adapter_error', error: String(error?.message || error) };
       }
+    },
+    setToggle(kind, enabled) {
+      const control = kind === 'deepThinking' ? deepThinkingControl() : kind === 'smartSearch' ? smartSearchControl() : null;
+      if (!control) return { ...snapshot(), status: 'adapter_error', error: kind === 'deepThinking' ? '官网当前没有可用的“深度思考”开关。' : '官网当前没有可用的“智能搜索”开关。' };
+      if (controlState(control) !== !!enabled) control.click();
+      return snapshot();
+    },
+    openModeMenu() {
+      const control = modeControl();
+      if (!control) return { ok: false, error: '官网当前没有识别到快速/专家模式选择器。' };
+      control.click();
+      return { ok: true, error: '' };
+    },
+    selectMode(mode) {
+      const patterns = mode === 'expert' ? expertModePatterns : quickModePatterns;
+      const option = controlForLabel(patterns);
+      if (!option) return { ok: false, error: mode === 'expert' ? '官网模式菜单中没有识别到“专家模式”。' : '官网模式菜单中没有识别到“快速模式”。' };
+      option.scrollIntoView?.({ block: 'nearest' });
+      if (typeof PointerEvent === 'function') option.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
+      option.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      option.click();
+      return { ok: true, error: '' };
+    },
+    attachImage(name, mime, dataUrl) {
+      try {
+        const input = fileInput();
+        if (!input) return { ...snapshot(), status: 'adapter_error', error: '官网当前没有识别到图片附件输入。' };
+        const parts = String(dataUrl || '').split(',', 2);
+        if (parts.length !== 2 || !/^data:image\//i.test(parts[0])) return { ...snapshot(), status: 'adapter_error', error: '图片数据格式无法识别。' };
+        const binary = atob(parts[1]);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+        const file = new File([bytes], String(name || 'image'), { type: String(mime || 'image/png') });
+        const transfer = new DataTransfer();
+        transfer.items.add(file);
+        input.files = transfer.files;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        window.__personalDeepSeekAttachmentName = file.name;
+        return snapshot();
+      } catch (error) {
+        return { ...snapshot(), status: 'adapter_error', error: String(error?.message || error) };
+      }
+    },
+    removeAttachment() {
+      const remove = findButton([/移除附件|删除附件|remove attachment|remove file/i]);
+      if (!remove) return { ...snapshot(), status: 'adapter_error', error: '没有识别到官网的“移除附件”按钮，可以在官网窗口中检查附件状态。' };
+      remove.click();
+      window.__personalDeepSeekAttachmentName = '';
+      return snapshot();
     },
     stop() { stopButton()?.click(); return snapshot(); },
     newConversation() {
       const button = newButton();
       if (!button) return { ...snapshot(), status: 'adapter_error', error: '没有识别到“新对话”按钮。' };
       button.click();
+      window.__personalDeepSeekAttachmentName = '';
       return snapshot();
     },
     openDeleteMenu() {
       const row = currentConversationRow();
       if (!row) return { ok: false, error: '没有在官网侧栏中识别到当前会话。' };
+      row.scrollIntoView?.({ block: 'nearest' });
+      if (typeof PointerEvent === 'function') row.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
+      row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
       row.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-      const rowButtons = Array.from(row.querySelectorAll('button')).filter(visible);
-      const more = rowButtons.find((button) => /更多|more|操作|\.\.\./i.test(`${text(button)} ${button.getAttribute('aria-label') || ''} ${button.getAttribute('title') || ''}`)) || rowButtons.at(-1);
-      if (!more) return { ok: false, error: '没有识别到官网会话菜单。' };
+      row.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+      const rowControls = Array.from(row.querySelectorAll('button, [role="button"], [tabindex], span, div')).filter(visible);
+      const more = rowControls.find((control) => {
+        const label = `${text(control)} ${control.getAttribute?.('aria-label') || ''} ${control.getAttribute?.('title') || ''}`.trim();
+        return label.length < 40 && (/^(?:\.\.\.|…|⋯)$/.test(label) || /更多|more|操作/i.test(label));
+      }) || rowControls.filter((control) => {
+        const rect = control.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
+        return rect.width <= 56 && rect.height <= 56 && rect.right > rowRect.right - 72;
+      }).at(-1);
+      if (!more) return { ok: false, error: '已定位官网当前会话，但会话菜单尚未显示。' };
       more.click();
       return { ok: true, error: '' };
     },
-    clickDeleteAction() {
-      const action = exactAction([/^删除$/i, /^delete$/i, /删除对话/i, /delete chat/i]);
-      if (!action) return { ok: false, error: '没有识别到官网的删除操作。' };
+    clickDeleteAction(stage = 'menu') {
+      const patterns = [
+        /^(?:删除|确认删除|删除(?:此|该)?(?:对话|会话)|Delete|Delete (?:chat|conversation)|Confirm delete)$/i,
+        /(?:^|\s)(?:删除|确认删除|删除(?:此|该)?(?:对话|会话)|Delete|Delete (?:chat|conversation)|Confirm delete)(?:\s|$)/i
+      ];
+      const action = actionForLabel(patterns, stage);
+      if (!action) {
+        const labels = visibleActionLabels();
+        return { ok: false, error: `没有识别到官网的${stage === 'confirm' ? '确认删除按钮' : '删除操作'}。${labels.length ? `当前可见操作：${labels.join('、')}` : ''}` };
+      }
+      action.scrollIntoView?.({ block: 'nearest' });
+      if (typeof PointerEvent === 'function') action.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
+      action.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
       action.click();
       return { ok: true, error: '' };
     }
@@ -271,6 +579,11 @@ fn allowed_deepseek_url(url: &Url) -> bool {
         && url
             .host_str()
             .is_some_and(|host| host == "deepseek.com" || host.ends_with(".deepseek.com"))
+}
+
+fn same_deepseek_conversation(left: &Url, right: &Url) -> bool {
+    left.host_str() == right.host_str()
+        && left.path().trim_end_matches('/') == right.path().trim_end_matches('/')
 }
 
 fn ensure_window(app: &tauri::AppHandle) -> Result<WebviewWindow, String> {
@@ -358,6 +671,122 @@ pub async fn deepseek_get_status(app: tauri::AppHandle) -> Result<DeepSeekSnapsh
 }
 
 #[tauri::command]
+pub async fn deepseek_configure_modes(
+    app: tauri::AppHandle,
+    deep_thinking: bool,
+    expert_mode: bool,
+    smart_search: bool,
+) -> Result<DeepSeekSnapshot, String> {
+    let window = ensure_window(&app)?;
+    let mut current = snapshot(&window).await?;
+    if current.expert_mode_available && current.expert_mode_enabled != expert_mode {
+        let mode = if expert_mode { "expert" } else { "quick" };
+        let select_script = format!(
+            "window.__personalDeepSeekBridge?.selectMode?.('{mode}') ?? {{ok:false,error:'DeepSeek 页面尚未准备完成'}}"
+        );
+        let mut selected: DeepSeekActionResult = eval_json(&window, select_script.clone()).await?;
+        if !selected.ok {
+            let menu = bridge_action(&window, "openModeMenu").await?;
+            if !menu.ok {
+                return Err(menu.error);
+            }
+            for _ in 0..6 {
+                tokio::time::sleep(Duration::from_millis(180)).await;
+                selected = eval_json(&window, select_script.clone()).await?;
+                if selected.ok {
+                    break;
+                }
+            }
+        }
+        if !selected.ok {
+            return Err(selected.error);
+        }
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_millis(160)).await;
+            current = snapshot(&window).await?;
+            if current.expert_mode_available && current.expert_mode_enabled == expert_mode {
+                break;
+            }
+        }
+        if !current.expert_mode_available || current.expert_mode_enabled != expert_mode {
+            return Err(format!(
+                "官网点击了{}，但页面状态没有完成切换。",
+                if expert_mode {
+                    "专家模式"
+                } else {
+                    "快速模式"
+                }
+            ));
+        }
+    }
+    if current.deep_thinking_available && current.deep_thinking_enabled != deep_thinking {
+        let _: DeepSeekSnapshot = eval_json(
+            &window,
+            format!(
+                "window.__personalDeepSeekBridge?.setToggle?.('deepThinking', {deep_thinking}) ?? {{status:'adapter_error',ready:false,generating:false,text:'',conversationRef:location.href,error:'页面尚未准备完成',adapterVersion:{ADAPTER_VERSION}}}"
+            ),
+        )
+        .await?;
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        current = snapshot(&window).await?;
+    }
+    if current.smart_search_available && current.smart_search_enabled != smart_search {
+        let _: DeepSeekSnapshot = eval_json(
+            &window,
+            format!(
+                "window.__personalDeepSeekBridge?.setToggle?.('smartSearch', {smart_search}) ?? {{status:'adapter_error',ready:false,generating:false,text:'',conversationRef:location.href,error:'页面尚未准备完成',adapterVersion:{ADAPTER_VERSION}}}"
+            ),
+        )
+        .await?;
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+    snapshot(&window).await
+}
+
+#[tauri::command]
+pub async fn deepseek_attach_image(
+    app: tauri::AppHandle,
+    name: String,
+    mime: String,
+    data_url: String,
+) -> Result<DeepSeekSnapshot, String> {
+    if !mime.starts_with("image/") || !data_url.starts_with("data:image/") {
+        return Err("只能添加图片文件".into());
+    }
+    if data_url.len() > 14_000_000 {
+        return Err("图片过大，请选择 10 MB 以内的图片".into());
+    }
+    let window = ensure_window(&app)?;
+    let name =
+        serde_json::to_string(name.trim()).map_err(|error| format!("无法准备图片名称：{error}"))?;
+    let mime =
+        serde_json::to_string(&mime).map_err(|error| format!("无法准备图片类型：{error}"))?;
+    let data_url =
+        serde_json::to_string(&data_url).map_err(|error| format!("无法准备图片：{error}"))?;
+    eval_json(
+        &window,
+        format!(
+            "window.__personalDeepSeekBridge?.attachImage?.({name}, {mime}, {data_url}) ?? {{status:'adapter_error',ready:false,generating:false,text:'',conversationRef:location.href,error:'页面尚未准备完成',adapterVersion:{ADAPTER_VERSION}}}"
+        ),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn deepseek_remove_attachment(app: tauri::AppHandle) -> Result<DeepSeekSnapshot, String> {
+    let window = app
+        .get_webview_window(WINDOW_LABEL)
+        .ok_or_else(|| "DeepSeek 页面尚未打开".to_string())?;
+    eval_json(
+        &window,
+        format!(
+            "window.__personalDeepSeekBridge?.removeAttachment?.() ?? {{status:'adapter_error',ready:false,generating:false,text:'',conversationRef:location.href,error:'页面尚未准备完成',adapterVersion:{ADAPTER_VERSION}}}"
+        ),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn deepseek_send_message(
     app: tauri::AppHandle,
     prompt: String,
@@ -437,6 +866,19 @@ async fn bridge_action(
     .await
 }
 
+async fn bridge_delete_action(
+    window: &WebviewWindow,
+    stage: &str,
+) -> Result<DeepSeekActionResult, String> {
+    eval_json(
+        window,
+        format!(
+            "window.__personalDeepSeekBridge?.clickDeleteAction?.('{stage}') ?? {{ok:false,error:'DeepSeek 页面尚未准备完成'}}"
+        ),
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn deepseek_delete_conversation(
     app: tauri::AppHandle,
@@ -449,11 +891,10 @@ pub async fn deepseek_delete_conversation(
         return Err("这个本地记录还没有可同步删除的官网会话".into());
     }
     let window = ensure_window(&app)?;
-    if window
+    let current_url = window
         .url()
-        .map_err(|error| format!("无法读取 DeepSeek 当前地址：{error}"))?
-        != url
-    {
+        .map_err(|error| format!("无法读取 DeepSeek 当前地址：{error}"))?;
+    if !same_deepseek_conversation(&current_url, &url) {
         window
             .navigate(url.clone())
             .map_err(|error| format!("无法打开要删除的 DeepSeek 会话：{error}"))?;
@@ -472,14 +913,29 @@ pub async fn deepseek_delete_conversation(
     }
     let menu = menu_result.ok_or_else(|| "官网会话尚未加载完成".to_string())?;
     if !menu.ok {
+        let current = window
+            .url()
+            .map_err(|error| format!("无法确认官网会话状态：{error}"))?;
+        if !same_deepseek_conversation(&current, &url) {
+            return Ok(());
+        }
         return Err(if menu.error.is_empty() {
             "没有识别到官网会话菜单".into()
         } else {
             menu.error
         });
     }
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    let delete = bridge_action(&window, "clickDeleteAction").await?;
+    let mut delete = DeepSeekActionResult {
+        ok: false,
+        error: "官网删除菜单尚未出现".into(),
+    };
+    for _ in 0..8 {
+        tokio::time::sleep(Duration::from_millis(160)).await;
+        delete = bridge_delete_action(&window, "menu").await?;
+        if delete.ok {
+            break;
+        }
+    }
     if !delete.ok {
         return Err(if delete.error.is_empty() {
             "没有识别到官网删除操作".into()
@@ -487,17 +943,36 @@ pub async fn deepseek_delete_conversation(
             delete.error
         });
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    if let Ok(confirm) = bridge_action(&window, "clickDeleteAction").await {
-        if confirm.ok {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-    for _ in 0..10 {
+    let mut confirm_result = DeepSeekActionResult {
+        ok: false,
+        error: "官网确认删除弹窗尚未出现".into(),
+    };
+    for _ in 0..8 {
+        tokio::time::sleep(Duration::from_millis(160)).await;
         let current = window
             .url()
             .map_err(|error| format!("无法确认官网删除结果：{error}"))?;
-        if current.path().trim_end_matches('/') != url.path().trim_end_matches('/') {
+        if !same_deepseek_conversation(&current, &url) {
+            return Ok(());
+        }
+        confirm_result = bridge_delete_action(&window, "confirm").await?;
+        if confirm_result.ok {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            break;
+        }
+    }
+    if !confirm_result.ok {
+        return Err(if confirm_result.error.is_empty() {
+            "没有识别到官网确认删除按钮".into()
+        } else {
+            confirm_result.error
+        });
+    }
+    for _ in 0..20 {
+        let current = window
+            .url()
+            .map_err(|error| format!("无法确认官网删除结果：{error}"))?;
+        if !same_deepseek_conversation(&current, &url) {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -552,7 +1027,8 @@ pub async fn deepseek_release(
 
 #[cfg(test)]
 mod tests {
-    use super::allowed_deepseek_url;
+    use super::{allowed_deepseek_url, same_deepseek_conversation, ADAPTER_SCRIPT};
+    use url::Url;
 
     #[test]
     fn limits_bridge_navigation_to_deepseek_https() {
@@ -568,5 +1044,29 @@ mod tests {
         assert!(!allowed_deepseek_url(
             &"https://deepseek.com.example.org".parse().unwrap()
         ));
+    }
+
+    #[test]
+    fn compares_conversations_by_host_and_normalized_path() {
+        let saved: Url = "https://chat.deepseek.com/a/chat/s/conversation-1"
+            .parse()
+            .unwrap();
+        let current: Url = "https://chat.deepseek.com/a/chat/s/conversation-1/?from=sidebar"
+            .parse()
+            .unwrap();
+        let other: Url = "https://chat.deepseek.com/a/chat/s/conversation-2"
+            .parse()
+            .unwrap();
+
+        assert!(same_deepseek_conversation(&saved, &current));
+        assert!(!same_deepseek_conversation(&saved, &other));
+    }
+
+    #[test]
+    fn delete_adapter_supports_non_semantic_menu_items_and_confirmation_stage() {
+        assert!(ADAPTER_SCRIPT.contains("[tabindex], li, span, p, div"));
+        assert!(ADAPTER_SCRIPT.contains("clickDeleteAction(stage = 'menu')"));
+        assert!(ADAPTER_SCRIPT.contains("stage === 'confirm'"));
+        assert!(ADAPTER_SCRIPT.contains("删除(?:此|该)?(?:对话|会话)"));
     }
 }

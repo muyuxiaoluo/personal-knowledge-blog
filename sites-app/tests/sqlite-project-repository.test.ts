@@ -121,6 +121,13 @@ test("seeds staged projects and persists project progress", async () => {
   assert.equal(afterProposalRemoval?.proposals.some((item) => item.id === removableProposal.id), false);
   assert.equal(afterProposalRemoval?.proposals.some((item) => item.id === proposal.id), true);
 
+  await repository.updateProjectStatus(savedProject.id, "completed", `完结项目：${savedProject.title}`);
+  const completedProject = await repository.get(savedProject.id);
+  assert.equal(completedProject?.project.status, "completed");
+  assert.equal(completedProject?.logs.some((log) => log.body === `完结项目：${savedProject.title}`), true);
+  await repository.updateProjectStatus(savedProject.id, "active", `重新开启项目：${savedProject.title}`);
+  assert.equal((await repository.get(savedProject.id))?.project.status, "active");
+
   const reopened = new SqliteProjectRepository(adapter, {
     seedProjects: initialProjectSeeds,
   });

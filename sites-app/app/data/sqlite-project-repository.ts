@@ -345,6 +345,33 @@ export class SqliteProjectRepository implements ProjectRepository {
     }
   }
 
+  async updateProjectStatus(id: string, status: ProjectStatus, logBody: string): Promise<void> {
+    const text = logBody.trim();
+    if (!text) throw new ProjectRepositoryError("项目状态记录不能为空", "invalid_data");
+    try {
+      await this.initialize();
+      const rows = await this.database.select<ProjectRow>(
+        "SELECT * FROM projects WHERE id = ? LIMIT 1",
+        [id],
+      );
+      if (!rows[0]) throw new ProjectRepositoryError("没有找到这个项目", "invalid_data");
+      const now = this.now();
+      await executeSqliteTransaction(this.database, [
+        {
+          sql: "UPDATE projects SET status = ?, updated_at = ? WHERE id = ?",
+          bindValues: [status, now, id],
+        },
+        {
+          sql: "INSERT INTO project_logs(id, project_id, body, created_at) VALUES (?, ?, ?, ?)",
+          bindValues: [`${id}-log-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, id, text, now],
+        },
+      ]);
+    } catch (error) {
+      if (error instanceof ProjectRepositoryError) throw error;
+      throw new ProjectRepositoryError("更新项目状态失败，原状态已保留", "save_failed", error);
+    }
+  }
+
   async saveWorkspace(project: Project, milestones: Milestone[], task: ProjectTask | null, branches: Project[] = []): Promise<Project> {
     try {
       await this.initialize();

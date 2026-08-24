@@ -18,6 +18,7 @@ type MessageRow = {
   conversation_id: string;
   role: AiRole;
   content: string;
+  reasoning: string;
   sequence_index: number;
   created_at: string;
 };
@@ -50,10 +51,15 @@ export class SqliteAiRepository {
         conversation_id TEXT NOT NULL,
         role TEXT NOT NULL,
         content TEXT NOT NULL,
+        reasoning TEXT NOT NULL DEFAULT '',
         sequence_index INTEGER NOT NULL,
         created_at TEXT NOT NULL,
         FOREIGN KEY(conversation_id) REFERENCES ai_conversations(id) ON DELETE CASCADE
       )`);
+      const messageColumns = await this.database.select<{ name: string }>("PRAGMA table_info(ai_messages)");
+      if (!messageColumns.some((column) => column.name === "reasoning")) {
+        await this.database.execute("ALTER TABLE ai_messages ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''");
+      }
       await this.database.execute("CREATE INDEX IF NOT EXISTS idx_ai_conversations_updated ON ai_conversations(pinned DESC, updated_at DESC)");
       await this.database.execute("CREATE INDEX IF NOT EXISTS idx_ai_messages_conversation ON ai_messages(conversation_id, sequence_index)");
     })().catch((error) => {
@@ -116,7 +122,7 @@ export class SqliteAiRepository {
     return conversation;
   }
 
-  async addMessage(conversationId: string, role: AiRole, content: string): Promise<AiMessage> {
+  async addMessage(conversationId: string, role: AiRole, content: string, reasoning = ""): Promise<AiMessage> {
     await this.initialize();
     const body = content.trim();
     if (!body) throw new Error("消息内容不能为空");
@@ -130,12 +136,13 @@ export class SqliteAiRepository {
       conversationId,
       role,
       content: body,
+      reasoning: role === "assistant" ? reasoning.trim() : "",
       sequence: Number(sequenceRows[0]?.next_sequence ?? 0),
       createdAt: now.toISOString(),
     };
     await this.database.execute(
-      "INSERT INTO ai_messages(id, conversation_id, role, content, sequence_index, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-      [message.id, message.conversationId, message.role, message.content, message.sequence, message.createdAt],
+      "INSERT INTO ai_messages(id, conversation_id, role, content, reasoning, sequence_index, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [message.id, message.conversationId, message.role, message.content, message.reasoning, message.sequence, message.createdAt],
     );
     const titleSql = role === "user" && message.sequence === 0 ? ", title = ?" : "";
     const titleValues = role === "user" && message.sequence === 0 ? [normalizeTitle(body)] : [];
@@ -154,12 +161,16 @@ export class SqliteAiRepository {
     );
   }
 
-  async updateMessageContent(messageId: string, content: string): Promise<void> {
+  async updateMessageContent(messageId: string, content: string, reasoning?: string): Promise<void> {
     await this.initialize();
     const body = content.trim();
     if (!body) throw new Error("消息内容不能为空");
     const now = this.clock();
-    await this.database.execute("UPDATE ai_messages SET content = ? WHERE id = ?", [body, messageId]);
+    if (reasoning === undefined) {
+      await this.database.execute("UPDATE ai_messages SET content = ? WHERE id = ?", [body, messageId]);
+    } else {
+      await this.database.execute("UPDATE ai_messages SET content = ?, reasoning = ? WHERE id = ?", [body, reasoning.trim(), messageId]);
+    }
     await this.database.execute(
       `UPDATE ai_conversations
        SET updated_at = ?, expires_at = CASE WHEN pinned = 1 THEN NULL ELSE ? END
@@ -209,6 +220,7 @@ function rowToMessage(row: MessageRow): AiMessage {
     conversationId: row.conversation_id,
     role: row.role,
     content: row.content,
+    reasoning: row.reasoning || "",
     sequence: Number(row.sequence_index),
     createdAt: row.created_at,
   };

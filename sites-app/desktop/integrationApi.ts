@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { DeepSeekSnapshot } from "../app/ai-types";
+import type { DeepSeekModeOptions, DeepSeekSnapshot } from "../app/ai-types";
 import type {
   GitHubRepositorySnapshot,
   ModelBalance,
@@ -17,6 +17,9 @@ export const desktopApi = {
   deepseek: {
     prepare: () => { requireTauri(); return invoke<DeepSeekSnapshot>("deepseek_prepare"); },
     status: () => { requireTauri(); return invoke<DeepSeekSnapshot>("deepseek_get_status"); },
+    configureModes: (options: DeepSeekModeOptions) => { requireTauri(); return invoke<DeepSeekSnapshot>("deepseek_configure_modes", options); },
+    attachImage: (name: string, mime: string, dataUrl: string) => { requireTauri(); return invoke<DeepSeekSnapshot>("deepseek_attach_image", { name, mime, dataUrl }); },
+    removeAttachment: () => { requireTauri(); return invoke<DeepSeekSnapshot>("deepseek_remove_attachment"); },
     send: (prompt: string) => { requireTauri(); return invoke<DeepSeekSnapshot>("deepseek_send_message", { prompt }); },
     stop: () => { requireTauri(); return invoke<DeepSeekSnapshot>("deepseek_stop_generation"); },
     newConversation: () => { requireTauri(); return invoke<DeepSeekSnapshot>("deepseek_new_conversation"); },

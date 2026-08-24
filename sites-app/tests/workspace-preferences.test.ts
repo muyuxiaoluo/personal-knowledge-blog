@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { WorkspacePreferencesRepository } from "../app/data/workspace-preferences-repository";
 import type { SqliteDatabase, SqliteExecuteResult, SqliteValue } from "../app/data/sqlite-article-repository";
-import { normalizeDisplayName, normalizeQuickLinks, readLegacyQuickLinks, workspaceTitle } from "../app/workspace-preferences";
+import { addDefaultEntertainmentLinks, normalizeDisplayName, normalizeQuickLinks, readLegacyQuickLinks, workspaceTitle } from "../app/workspace-preferences";
 
 class NodeSqliteAdapter implements SqliteDatabase {
   constructor(private readonly database: DatabaseSync) {}
@@ -42,4 +42,23 @@ test("migrates quick links without silently opting old entries into embedded bro
   assert.equal(link.area, "web");
   assert.equal(link.openMode, "external");
   assert.equal(link.allowInsecureHttp, false);
+});
+
+test("moves the built-in entertainment platforms into the editable link library once", async () => {
+  const legacyLinks = [
+    { id: "docs", title: "文档", url: "https://example.com", category: "general", area: "web", openMode: "external", allowInsecureHttp: false, pinned: true, order: 0 },
+    { id: "bilibili-old", title: "哔哩哔哩", url: "https://www.bilibili.com", category: "content", area: "web", openMode: "external", allowInsecureHttp: false, pinned: false, order: 1 },
+  ] as const;
+  const links = addDefaultEntertainmentLinks([...legacyLinks]);
+  assert.deepEqual(links.filter((link) => link.area === "entertainment").map((link) => link.title), ["哔哩哔哩", "抖音"]);
+  assert.equal(addDefaultEntertainmentLinks(links).length, links.length);
+
+  const database = new DatabaseSync(":memory:");
+  const adapter = new NodeSqliteAdapter(database);
+  const repository = new WorkspacePreferencesRepository(adapter);
+  await repository.getPreferences();
+  database.prepare("INSERT INTO app_meta(key, value) VALUES(?, ?)").run("workspace_quick_links_v1", JSON.stringify(legacyLinks));
+  const migrated = await repository.getPreferences();
+  assert.deepEqual(migrated.quickLinks?.filter((link) => link.area === "entertainment").map((link) => link.title), ["哔哩哔哩", "抖音"]);
+  database.close();
 });

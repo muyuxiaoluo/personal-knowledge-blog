@@ -4,6 +4,7 @@ import type {
   ProjectDetail,
   ProjectLog,
   ProjectProposal,
+  ProjectStatus,
   ProjectSummary,
   ProjectTask,
   ProjectTaskStatus,
@@ -15,6 +16,7 @@ export interface ProjectRepository {
   get(id: string): Promise<ProjectDetail | null>;
   saveProject(project: Project): Promise<Project>;
   saveWorkspace(project: Project, milestones: Milestone[], task: ProjectTask | null, branches?: Project[]): Promise<Project>;
+  updateProjectStatus(id: string, status: ProjectStatus, logBody: string): Promise<void>;
   removeProject(id: string): Promise<void>;
   saveMilestone(milestone: Milestone): Promise<Milestone>;
   removeMilestone(id: string): Promise<void>;

@@ -88,10 +88,32 @@ export function normalizeQuickLinks(value: unknown): QuickLink[] {
   });
 }
 
+export function addDefaultEntertainmentLinks(links: QuickLink[]) {
+  const entertainmentDefaults = defaultQuickLinks.filter((link) => link.area === "entertainment");
+  const defaultByHost = new Map(entertainmentDefaults.map((link) => [hostOf(link.url), link]));
+  const migrated = links.map((link) => defaultByHost.has(hostOf(link.url)) ? {
+    ...link,
+    area: "entertainment" as const,
+    category: "content" as const,
+    openMode: "internal" as const,
+    allowInsecureHttp: false,
+  } : link);
+  const existingHosts = new Set(migrated.filter((link) => link.area === "entertainment").map((link) => hostOf(link.url)).filter(Boolean));
+  const additions = entertainmentDefaults
+    .filter((link) => !existingHosts.has(hostOf(link.url)))
+    .map((link, index) => ({ ...link, order: migrated.length + index }));
+  return [...migrated, ...additions];
+}
+
 function isQuickLinkCategory(value: unknown): value is QuickLinkCategory {
   return value === "research" || value === "creative" || value === "content" || value === "general";
 }
 
 function isToolArea(value: unknown): value is ToolArea {
   return value === "ai" || value === "development" || value === "accounts" || value === "entertainment" || value === "web";
+}
+
+function hostOf(value: string) {
+  try { return new URL(value).hostname.replace(/^www\./, "").toLocaleLowerCase(); }
+  catch { return ""; }
 }

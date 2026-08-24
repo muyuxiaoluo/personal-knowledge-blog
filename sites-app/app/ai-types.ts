@@ -19,6 +19,7 @@ export type AiMessage = {
   conversationId: string;
   role: AiRole;
   content: string;
+  reasoning: string;
   sequence: number;
   createdAt: string;
 };
@@ -35,7 +36,24 @@ export type DeepSeekSnapshot = {
   ready: boolean;
   generating: boolean;
   text: string;
+  reasoningText: string;
   conversationRef: string;
   error: string;
+  deepThinkingAvailable: boolean;
+  deepThinkingEnabled: boolean;
+  expertModeAvailable: boolean;
+  expertModeEnabled: boolean;
+  smartSearchAvailable: boolean;
+  smartSearchEnabled: boolean;
+  visionAvailable: boolean;
+  attachmentName: string;
   adapterVersion: number;
 };
+
+export type DeepSeekModeOptions = {
+  deepThinking: boolean;
+  expertMode: boolean;
+  smartSearch: boolean;
+};
+
+export type DeepSeekPrimaryMode = "quick" | "expert" | "vision";
