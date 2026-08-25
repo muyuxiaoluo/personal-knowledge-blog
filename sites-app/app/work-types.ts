@@ -19,6 +19,11 @@ export type FocusSession = {
   durationSeconds: number;
 };
 
+export type FocusSessionStopInput = {
+  id: string;
+  endedAt?: string;
+};
+
 export type FocusSessionInput = {
   taskId?: string | null;
   projectId?: string | null;

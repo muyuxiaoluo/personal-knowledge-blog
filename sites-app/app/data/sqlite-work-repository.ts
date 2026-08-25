@@ -2,6 +2,7 @@ import type {
   DailyCloseout,
   FocusSession,
   FocusSessionInput,
+  FocusSessionStopInput,
   TaskPlan,
   TaskPriority,
   WeeklyFocus,
@@ -158,7 +159,7 @@ export class SqliteWorkRepository implements WorkRepository {
             [from],
           )
         : await this.database.select<FocusSessionRow>(
-            "SELECT * FROM focus_sessions ORDER BY started_at DESC LIMIT 400",
+            "SELECT * FROM focus_sessions ORDER BY started_at DESC",
           );
       return rows.map(rowToSession);
     } catch (error) {
@@ -209,7 +210,8 @@ export class SqliteWorkRepository implements WorkRepository {
     }
   }
 
-  async stopSession(id: string): Promise<FocusSession> {
+  async stopSession(input: string | FocusSessionStopInput): Promise<FocusSession> {
+    const id = typeof input === "string" ? input : input.id;
     try {
       await this.initialize();
       const rows = await this.database.select<FocusSessionRow>(
@@ -219,10 +221,17 @@ export class SqliteWorkRepository implements WorkRepository {
       if (!rows[0]) throw new WorkRepositoryError("没有找到这次专注", "invalid_data");
       const current = rowToSession(rows[0]);
       if (current.endedAt) return current;
-      const endedAt = this.clock().toISOString();
+      const requestedEnd = typeof input === "string" ? "" : input.endedAt?.trim() || "";
+      const endedAt = requestedEnd || this.clock().toISOString();
+      const endTime = new Date(endedAt).getTime();
+      const startTime = new Date(current.startedAt).getTime();
+      const nowTime = this.clock().getTime();
+      if (!Number.isFinite(endTime) || endTime < startTime || endTime > nowTime + 60_000) {
+        throw new WorkRepositoryError("结束时间不能早于开始时间或晚于当前时间", "invalid_data");
+      }
       const durationSeconds = Math.max(
         1,
-        Math.round((new Date(endedAt).getTime() - new Date(current.startedAt).getTime()) / 1000),
+        Math.round((endTime - startTime) / 1000),
       );
       await this.database.execute(
         "UPDATE focus_sessions SET ended_at = ?, duration_seconds = ? WHERE id = ?",

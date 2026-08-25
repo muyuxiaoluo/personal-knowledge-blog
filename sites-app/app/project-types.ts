@@ -40,6 +40,7 @@ export type Project = {
   isDraft: boolean;
   sourceNote: string;
   reviewDate: string;
+  completedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };

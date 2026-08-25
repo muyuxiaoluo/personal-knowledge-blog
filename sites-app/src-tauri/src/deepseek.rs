@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 use url::Url;
 
 const WINDOW_LABEL: &str = "deepseek-bridge";
-const ADAPTER_VERSION: u8 = 9;
+const ADAPTER_VERSION: u8 = 10;
 const IDLE_SECONDS: u64 = 15 * 60;
 
 pub struct DeepSeekBridgeState {
@@ -85,7 +85,7 @@ impl DeepSeekSnapshot {
 const ADAPTER_SCRIPT: &str = r#"
 (() => {
   if (!/(^|\.)deepseek\.com$/i.test(location.hostname)) return;
-  const VERSION = 9;
+  const VERSION = 10;
   const text = (node) => (node?.innerText || node?.textContent || '').trim();
   const markdownText = (node) => {
     const renderChildren = (parent, context = {}) => Array.from(parent?.childNodes || []).map((child) => render(child, context)).join('');
@@ -215,11 +215,13 @@ const ADAPTER_SCRIPT: &str = r#"
   const smartSearchControl = () => controlForLabel([/^(智能搜索|联网搜索|Web Search|Search)$/i]);
   const quickModePatterns = [
     /^(?:快速模式|快速|Quick\s*Mode|Quick)$/i,
-    /(?:^|[\s·|])(?:快速模式|Quick\s*Mode)(?:$|[\s（(·|])/i
+    /(?:^|[\s·|⚡💎\ufe0f])(?:快速模式|Quick\s*Mode)(?:$|[\s（(·|])/iu,
+    /⚡\ufe0f?\s*(?:快速|Quick|Instant|Flash)/i
   ];
   const expertModePatterns = [
     /^(?:专家模式|专家|Expert\s*Mode|Expert)$/i,
-    /(?:^|[\s·|])(?:专家模式|Expert\s*Mode)(?:$|[\s（(·|])/i
+    /(?:^|[\s·|⚡💎\ufe0f])(?:专家模式|Expert\s*Mode)(?:$|[\s（(·|])/iu,
+    /💎\s*(?:专家|Expert|Pro)/i
   ];
   const quickModeControl = () => controlForLabel(quickModePatterns);
   const expertModeControl = () => controlForLabel(expertModePatterns);
@@ -484,7 +486,10 @@ const ADAPTER_SCRIPT: &str = r#"
     selectMode(mode) {
       const patterns = mode === 'expert' ? expertModePatterns : quickModePatterns;
       const option = controlForLabel(patterns);
-      if (!option) return { ok: false, error: mode === 'expert' ? '官网模式菜单中没有识别到“专家模式”。' : '官网模式菜单中没有识别到“快速模式”。' };
+      if (!option) {
+        const labels = visibleActionLabels();
+        return { ok: false, error: `官网模式菜单中没有识别到“${mode === 'expert' ? '专家模式' : '快速模式'}”。${labels.length ? `当前可见选项：${labels.join('、')}` : '官网模式菜单可能没有展开。'}` };
+      }
       option.scrollIntoView?.({ block: 'nearest' });
       if (typeof PointerEvent === 'function') option.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
       option.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));

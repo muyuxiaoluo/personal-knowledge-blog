@@ -8,6 +8,7 @@
   "include": [
     "./**/*.ts",
     "./**/*.tsx",
+    "../app/**/*.d.ts",
     "../app/types.ts",
     "../app/data/**/*.ts",
     "../app/generated/articles.json"

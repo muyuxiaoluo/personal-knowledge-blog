@@ -1,6 +1,6 @@
 {
   "name": "life-strategy-library-desktop",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -14,7 +14,7 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "test": "npm run desktop:build && node --require ./scripts/node-user-info-shim.cjs ./node_modules/tsx/dist/cli.mjs --test tests/ai-response-settling.test.ts tests/article-helpers.test.ts tests/cloud-sync-client.test.ts tests/date-helpers.test.ts tests/sqlite-ai-repository.test.ts tests/integration-repository.test.ts tests/sqlite-article-repository.test.ts tests/sqlite-project-repository.test.ts tests/sqlite-work-repository.test.ts tests/update-proxy.test.ts tests/workspace-preferences.test.ts",
+    "test": "npm run desktop:build && node --require ./scripts/node-user-info-shim.cjs ./node_modules/tsx/dist/cli.mjs --test tests/ai-response-settling.test.ts tests/article-helpers.test.ts tests/cloud-sync-client.test.ts tests/dashboard-helpers.test.ts tests/dashboard-repository.test.ts tests/date-helpers.test.ts tests/entertainment-capture.test.ts tests/sqlite-ai-repository.test.ts tests/integration-repository.test.ts tests/sqlite-article-repository.test.ts tests/sqlite-project-repository.test.ts tests/sqlite-work-repository.test.ts tests/update-proxy.test.ts tests/workspace-preferences.test.ts",
     "lint": "tsc -p desktop/tsconfig.json",
     "check": "npm run lint && npm test"
   },
@@ -26,6 +26,7 @@
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-sql": "2.4.0",
     "@tauri-apps/plugin-updater": "^2.10.1",
+    "lunar-javascript": "1.7.7",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "react-markdown": "^10.1.0",

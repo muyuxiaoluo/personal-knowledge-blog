@@ -187,6 +187,7 @@ export function ProjectWorkspace({
         isDraft: false,
         sourceNote: "本人创建",
         reviewDate: "",
+        completedAt: null,
         createdAt: now,
         updatedAt: now,
       },
@@ -536,7 +537,7 @@ export function ProjectWorkspace({
             </header>
             <div className="project-gallery-controls">
               <nav aria-label="项目状态">
-                {([ ["active", "进行中"], ["waiting", "等待"], ["paused", "暂停"], ["completed", "已完成"] ] as const).map(([value, label]) => <button className={statusFilter === value ? "active" : ""} key={value} onClick={() => setStatusFilter(value)}>{label} <span>{projectCounts[value]}</span></button>)}
+                {([ ["active", "进行中"], ["waiting", "等待"], ["paused", "暂停"] ] as const).map(([value, label]) => <button className={statusFilter === value ? "active" : ""} key={value} onClick={() => setStatusFilter(value)}>{label} <span>{projectCounts[value]}</span></button>)}
               </nav>
               <div className="project-gallery-filters">
                 <div className="project-domain-filter"><span className="project-filter-prefix">领域</span><SelectMenu label="按领域筛选项目" value={domainFilter} options={projectDomainFilterOptions} onChange={(value) => setDomainFilter(value as ProjectDomainFilter)} /></div>
@@ -1126,6 +1127,7 @@ function emptyBranch(parent: Project, index: number): Project {
     isDraft: false,
     sourceNote: "从主项目编辑器创建",
     reviewDate: "",
+    completedAt: null,
     createdAt: now,
     updatedAt: now,
   };

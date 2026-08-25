@@ -7,6 +7,14 @@ import type {
   SecretKind,
   UsageConsoleSnapshot,
 } from "../app/integration-types";
+import type {
+  AiBriefSnapshot,
+  CitySuggestion,
+  DashboardFetchResult,
+  DashboardLocation,
+  MorningBriefSnapshot,
+  WeatherSnapshot,
+} from "../app/dashboard-types";
 import type { QuickLink } from "../app/workspace-preferences";
 
 function requireTauri() {
@@ -44,6 +52,12 @@ export const desktopApi = {
     open: (provider: "deepseek" | "qwen") => { requireTauri(); return invoke<void>("usage_console_open", { provider }); },
     read: (provider: "deepseek" | "qwen") => { requireTauri(); return invoke<UsageConsoleSnapshot>("usage_console_snapshot", { provider }); },
     qwenMonitor: (start: string, end: string) => { requireTauri(); return invoke<UsageConsoleSnapshot>("qwen_fetch_monitor_usage", { start, end }); },
+  },
+  dashboard: {
+    searchCities: (query: string) => { requireTauri(); return invoke<CitySuggestion[]>("dashboard_search_cities", { query }); },
+    weather: (location: DashboardLocation, etag = "") => { requireTauri(); return invoke<DashboardFetchResult<WeatherSnapshot>>("dashboard_fetch_weather", { location, etag }); },
+    aiBrief: (etag = "") => { requireTauri(); return invoke<DashboardFetchResult<AiBriefSnapshot>>("dashboard_fetch_ai_brief", { etag }); },
+    morningBrief: (date: string, etag = "") => { requireTauri(); return invoke<DashboardFetchResult<MorningBriefSnapshot>>("dashboard_fetch_morning_brief", { date, etag }); },
   },
 };
 

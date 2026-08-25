@@ -16,6 +16,7 @@ export type QuickLink = {
 
 export type WorkspacePreferences = {
   displayName: string;
+  avatarDataUrl: string;
   quickLinks: QuickLink[] | null;
 };
 
@@ -33,12 +34,17 @@ export const defaultQuickLinks: QuickLink[] = [
 ];
 
 export function normalizeDisplayName(value: string) {
-  return value.trim().slice(0, 24);
+  return [...value.trim()].slice(0, 24).join("");
 }
 
 export function workspaceTitle(displayName: string) {
   const normalized = normalizeDisplayName(displayName);
-  return normalized ? `${normalized}的个人工作台` : "个人工作台";
+  return normalized || "个人工作台";
+}
+
+export function normalizeAvatarDataUrl(value: string) {
+  if (value.length > 2_000_000) return "";
+  return /^data:image\/(?:jpeg|png|webp);base64,[a-z\d+/=]+$/i.test(value) ? value : "";
 }
 
 export function readLegacyQuickLinks(storage: Pick<Storage, "getItem">): QuickLink[] {

@@ -58,6 +58,29 @@ test("plans tasks and records a completed focus session", async () => {
   assert.equal((await repository.listSessions())[0]?.label, "验证首页任务");
 });
 
+test("can repair an unfinished focus session with an explicit end time", async () => {
+  let now = new Date("2026-08-11T02:00:00.000Z");
+  const repository = new SqliteWorkRepository(
+    new NodeSqliteAdapter(),
+    () => now,
+  );
+  const started = await repository.startSession({ label: "上次未结束的投入" });
+  now = new Date("2026-08-11T03:00:00.000Z");
+  const stopped = await repository.stopSession({
+    id: started.id,
+    endedAt: "2026-08-11T02:25:00.000Z",
+  });
+  assert.equal(stopped.durationSeconds, 1500);
+  assert.equal(stopped.endedAt, "2026-08-11T02:25:00.000Z");
+  await assert.rejects(
+    async () => {
+      const next = await repository.startSession({ label: "无效结束时间" });
+      await repository.stopSession({ id: next.id, endedAt: "2026-08-11T01:59:00.000Z" });
+    },
+    /结束时间不能早于开始时间/,
+  );
+});
+
 test("persists weekly focus and daily closeout", async () => {
   const repository = new SqliteWorkRepository(
     new NodeSqliteAdapter(),

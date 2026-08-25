@@ -147,6 +147,20 @@ test("seeds staged projects and persists project progress", async () => {
   database.close();
 });
 
+test("records a project completion time and clears it when reopened", async () => {
+  let now = new Date("2026-08-20T10:00:00.000Z");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(new DatabaseSync(":memory:")), {
+    seedProjects: initialProjectSeeds,
+    clock: () => now,
+  });
+  await repository.list();
+  await repository.updateProjectStatus("project-life-workbench-v01", "completed", "项目完结");
+  assert.equal((await repository.get("project-life-workbench-v01"))?.project.completedAt, now.toISOString());
+  now = new Date("2026-08-21T10:00:00.000Z");
+  await repository.updateProjectStatus("project-life-workbench-v01", "active", "重新开启项目");
+  assert.equal((await repository.get("project-life-workbench-v01"))?.project.completedAt, null);
+});
+
 test("rolls back task completion when the progress log cannot be written", async () => {
   const database = new DatabaseSync(":memory:");
   const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), {

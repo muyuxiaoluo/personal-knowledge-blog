@@ -9,6 +9,7 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 
+mod dashboard;
 mod deepseek;
 mod integrations;
 mod webviews;
@@ -243,6 +244,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(deepseek::DeepSeekBridgeState::default())
         .manage(webviews::ToolWindowState::default())
+        .manage(webviews::EntertainmentCaptureState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_sql::Builder::default().build())
@@ -330,6 +332,10 @@ pub fn run() {
             deepseek::deepseek_delete_conversation,
             deepseek::deepseek_show_official,
             deepseek::deepseek_release,
+            dashboard::dashboard_search_cities,
+            dashboard::dashboard_fetch_weather,
+            dashboard::dashboard_fetch_ai_brief,
+            dashboard::dashboard_fetch_morning_brief,
             integrations::secret_status,
             integrations::secret_set,
             integrations::secret_delete,
@@ -339,6 +345,10 @@ pub fn run() {
             integrations::qwen_fetch_monitor_usage,
             webviews::tool_browser_open,
             webviews::entertainment_open,
+            webviews::entertainment_capture_get_pending,
+            webviews::entertainment_capture_submit,
+            webviews::entertainment_capture_cancel,
+            webviews::entertainment_capture_complete,
             webviews::usage_console_open,
             webviews::usage_console_snapshot
         ])

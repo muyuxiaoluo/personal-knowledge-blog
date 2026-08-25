@@ -35,6 +35,7 @@ type ProjectRow = {
   is_draft: number;
   source_note: string;
   review_date: string;
+  completed_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -120,6 +121,7 @@ const migrations = [
     is_draft INTEGER NOT NULL DEFAULT 1,
     source_note TEXT NOT NULL DEFAULT '',
     review_date TEXT NOT NULL DEFAULT '',
+    completed_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
@@ -206,6 +208,7 @@ export class SqliteProjectRepository implements ProjectRepository {
     await this.database.execute("PRAGMA foreign_keys = ON");
     for (const statement of migrations) await this.database.execute(statement);
     await this.ensureColumn("projects", "review_date", "TEXT NOT NULL DEFAULT ''");
+    await this.ensureColumn("projects", "completed_at", "TEXT");
     await this.ensureColumn("projects", "project_type", "TEXT NOT NULL DEFAULT 'main'");
     await this.ensureColumn("projects", "parent_project_id", "TEXT");
     await this.ensureColumn("projects", "supports_milestone_id", "TEXT");
@@ -334,6 +337,7 @@ export class SqliteProjectRepository implements ProjectRepository {
         title: project.title.trim(),
         outcome: project.outcome.trim(),
         motivation: project.motivation.trim(),
+        completedAt: relationship.status === "completed" ? relationship.completedAt || now : null,
         createdAt: project.createdAt || now,
         updatedAt: now,
       };
@@ -358,8 +362,8 @@ export class SqliteProjectRepository implements ProjectRepository {
       const now = this.now();
       await executeSqliteTransaction(this.database, [
         {
-          sql: "UPDATE projects SET status = ?, updated_at = ? WHERE id = ?",
-          bindValues: [status, now, id],
+          sql: "UPDATE projects SET status = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+          bindValues: [status, status === "completed" ? now : null, now, id],
         },
         {
           sql: "INSERT INTO project_logs(id, project_id, body, created_at) VALUES (?, ?, ?, ?)",
@@ -386,6 +390,7 @@ export class SqliteProjectRepository implements ProjectRepository {
         title: project.title.trim(),
         outcome: project.outcome.trim(),
         motivation: project.motivation.trim(),
+        completedAt: relationship.status === "completed" ? relationship.completedAt || now : null,
         createdAt: project.createdAt || now,
         updatedAt: now,
       };
@@ -1076,6 +1081,7 @@ function rowToProject(row: ProjectRow): Project {
     isDraft: Boolean(row.is_draft),
     sourceNote: row.source_note,
     reviewDate: row.review_date,
+    completedAt: row.completed_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1144,18 +1150,19 @@ function projectWriteStatement(project: Project): SqliteStatement {
   return {
     sql: `INSERT INTO projects(
       id, title, outcome, motivation, project_type, parent_project_id, supports_milestone_id,
-      status, category, sort_order, is_draft, source_note, review_date, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      status, category, sort_order, is_draft, source_note, review_date, completed_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title, outcome = excluded.outcome, motivation = excluded.motivation,
       project_type = excluded.project_type, parent_project_id = excluded.parent_project_id,
       supports_milestone_id = excluded.supports_milestone_id,
       status = excluded.status, category = excluded.category, sort_order = excluded.sort_order,
       is_draft = excluded.is_draft, source_note = excluded.source_note,
-      review_date = excluded.review_date, updated_at = excluded.updated_at`,
+      review_date = excluded.review_date, completed_at = excluded.completed_at,
+      updated_at = excluded.updated_at`,
     bindValues: [project.id, project.title, project.outcome, project.motivation, project.projectType,
       project.parentProjectId, project.supportsMilestoneId, project.status, project.category,
-      project.sortOrder, project.isDraft ? 1 : 0, project.sourceNote, project.reviewDate,
+      project.sortOrder, project.isDraft ? 1 : 0, project.sourceNote, project.reviewDate, project.completedAt,
       project.createdAt, project.updatedAt],
   };
 }

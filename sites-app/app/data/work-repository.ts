@@ -1,6 +1,7 @@
 import type {
   FocusSession,
   FocusSessionInput,
+  FocusSessionStopInput,
   DailyCloseout,
   TaskPlan,
   WeeklyFocus,
@@ -13,7 +14,7 @@ export interface WorkRepository {
   listSessions(from?: string): Promise<FocusSession[]>;
   getActiveSession(): Promise<FocusSession | null>;
   startSession(input: FocusSessionInput): Promise<FocusSession>;
-  stopSession(id: string): Promise<FocusSession>;
+  stopSession(input: string | FocusSessionStopInput): Promise<FocusSession>;
   getWeeklyFocus(weekStart: string): Promise<WeeklyFocus | null>;
   saveWeeklyFocus(focus: WeeklyFocus): Promise<WeeklyFocus>;
   listDailyCloseouts(from?: string): Promise<DailyCloseout[]>;

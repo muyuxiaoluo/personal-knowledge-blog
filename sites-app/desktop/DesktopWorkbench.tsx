@@ -12,8 +12,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
   type ClipboardEvent as ReactClipboardEvent,
-  type CSSProperties,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
@@ -26,11 +26,21 @@ import type { ProjectRepository } from "../app/data/project-repository";
 import type { WorkRepository } from "../app/data/work-repository";
 import type { SqliteAiRepository } from "../app/data/sqlite-ai-repository";
 import type { IntegrationRepository } from "../app/data/integration-repository";
+import type { DashboardRepository } from "../app/data/dashboard-repository";
 import { rootProjectStatusCounts } from "../app/project-selectors";
 import type { ProjectDetail, ProjectProposal, ProjectSummary, ProjectTask } from "../app/project-types";
 import type { Article, StoredArticle } from "../app/types";
+import {
+  appendCaptureRelation,
+  captureMetadata,
+  formatPlaybackTime,
+  preserveCaptureSourceMetadata,
+  sourceForCapturedResult,
+} from "../app/entertainment-capture";
 import { workspaceTitle, type QuickLink } from "../app/workspace-preferences";
 import type { DailyCloseout, FocusSession, TaskPlan, WeeklyFocus } from "../app/work-types";
+import { defaultDashboardPreferences, type CalendarEvent, type DashboardPreferences, type ExternalSourceInput } from "../app/dashboard-types";
+import { normalizeExternalSourceInput } from "../app/dashboard-helpers";
 import { MarkdownDocument } from "./MarkdownDocument";
 import { ProjectWorkspace } from "./ProjectWorkspace";
 import {
@@ -43,19 +53,22 @@ import { WorkbenchIcon, type WorkbenchIconName } from "./WorkbenchIcon";
 import { SearchField, SelectMenu, useConfirmDialog } from "./DesktopControls";
 import { AiAssistantDialog } from "./AiAssistantDialog";
 import { ToolCenterPage } from "./ToolCenter";
+import { DashboardSettingsSection } from "./MorningDashboard";
 import {
   ExplorePage,
+  ArchivePage,
+  formatFocusDuration,
   HomeDashboard,
   InboxPage,
   ReviewPage,
   TasksPage,
   type NewActionInput,
+  type SourceOrganizationInput,
   type WorkspaceTask,
 } from "./WorkPages";
+import { DESKTOP_THEMES, ThemeArtwork, type ThemeId } from "./DesktopThemes";
 
-export type ThemeMode = "minimal" | "magic" | "immersive";
-
-export type DeskSection = "home" | "tasks" | "projects" | "notes" | "explore" | "inbox" | "review" | "tools" | "settings";
+export type DeskSection = "home" | "tasks" | "projects" | "notes" | "explore" | "inbox" | "review" | "archive" | "tools" | "settings";
 type NoteView = "recent" | "knowledge" | "ideas" | "methods" | "experience" | "decisions" | "review";
 type UndoOffer = { message: string; run: () => Promise<void> };
 type ArticleEditorMode = "visual" | "markdown";
@@ -75,19 +88,23 @@ type DesktopWorkbenchProps = {
   workRepository: WorkRepository;
   aiRepository: SqliteAiRepository;
   integrationRepository: IntegrationRepository;
+  dashboardRepository: DashboardRepository;
   displayName: string;
+  avatarDataUrl: string;
   quickLinks: QuickLink[];
   dataRevision: number;
   onRepositoryChange?: () => void;
   onEditingStateChange?: (editing: boolean) => void;
   accountDock: ReactNode;
-  themeMode: ThemeMode;
+  themeId: ThemeId;
   backingUp: boolean;
-  onThemeChange: (mode: ThemeMode) => void;
+  onThemeChange: (themeId: ThemeId) => void;
   onCreateBackup: () => void;
   onRestoreBackup: () => void;
   onSaveDisplayName: (name: string) => Promise<void>;
+  onSaveAvatarDataUrl: (dataUrl: string) => Promise<void>;
   onSaveQuickLinks: (links: QuickLink[]) => Promise<void>;
+  startupActiveFocusId: string | null;
 };
 
 const sections: Array<{
@@ -103,6 +120,7 @@ const sections: Array<{
   { id: "explore", label: "探索库", icon: "explore", group: "knowledge" },
   { id: "inbox", label: "待整理", icon: "inbox", group: "knowledge" },
   { id: "review", label: "回顾", icon: "review", group: "knowledge" },
+  { id: "archive", label: "归档", icon: "archive", group: "knowledge" },
   { id: "tools", label: "工具中心", icon: "tools", group: "tools" },
 ];
 
@@ -150,19 +168,23 @@ export function DesktopWorkbench({
   workRepository,
   aiRepository,
   integrationRepository,
+  dashboardRepository,
   displayName,
+  avatarDataUrl,
   quickLinks,
   dataRevision,
   onRepositoryChange,
   onEditingStateChange,
   accountDock,
-  themeMode,
+  themeId,
   backingUp,
   onThemeChange,
   onCreateBackup,
   onRestoreBackup,
   onSaveDisplayName,
+  onSaveAvatarDataUrl,
   onSaveQuickLinks,
+  startupActiveFocusId,
 }: DesktopWorkbenchProps) {
   const confirm = useConfirmDialog();
   const [articles, setArticles] = useState<StoredArticle[]>([]);
@@ -170,8 +192,11 @@ export function DesktopWorkbench({
   const [projectDetails, setProjectDetails] = useState<ProjectDetail[]>([]);
   const [plans, setPlans] = useState<TaskPlan[]>([]);
   const [activeSession, setActiveSession] = useState<FocusSession | null>(null);
+  const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
   const [weeklyFocus, setWeeklyFocus] = useState<WeeklyFocus | null>(null);
   const [closeouts, setCloseouts] = useState<DailyCloseout[]>([]);
+  const [dashboardPreferences, setDashboardPreferences] = useState<DashboardPreferences>(() => structuredClone(defaultDashboardPreferences));
+  const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
   const [section, setSection] = useState<DeskSection>("home");
   const [noteView, setNoteView] = useState<NoteView>("recent");
   const [noteDomain, setNoteDomain] = useState<"all" | LifeDomain>("all");
@@ -195,6 +220,12 @@ export function DesktopWorkbench({
   const messageTimer = useRef<number | null>(null);
   const undoTimer = useRef<number | null>(null);
   const [today, setToday] = useState(() => localDate());
+  const [focusRecoveryId, setFocusRecoveryId] = useState(startupActiveFocusId);
+  const [focusRecoveryEnd, setFocusRecoveryEnd] = useState(() => toLocalDateTimeInput(new Date()));
+
+  useEffect(() => {
+    if (startupActiveFocusId) setFocusRecoveryId(startupActiveFocusId);
+  }, [startupActiveFocusId]);
 
   useEffect(() => {
     const refreshDate = () => setToday(localDate());
@@ -279,22 +310,33 @@ export function DesktopWorkbench({
 
   const refreshWork = useCallback(async () => {
     const weekStart = startOfLocalWeekDate();
-    const [nextPlans, nextActive, nextFocus, nextCloseouts] = await Promise.all([
+    const [nextPlans, nextActive, nextSessions, nextFocus, nextCloseouts] = await Promise.all([
       workRepository.listPlans(),
       workRepository.getActiveSession(),
+      workRepository.listSessions(),
       workRepository.getWeeklyFocus(weekStart),
       workRepository.listDailyCloseouts(weekStart),
     ]);
     setPlans(nextPlans);
     setActiveSession(nextActive);
+    setFocusSessions(nextSessions);
     setWeeklyFocus(nextFocus);
     setCloseouts(nextCloseouts);
   }, [workRepository]);
 
+  const refreshDashboardLocal = useCallback(async () => {
+    const [preferences, events] = await Promise.all([
+      dashboardRepository.getPreferences(),
+      dashboardRepository.listEvents(),
+    ]);
+    setDashboardPreferences(preferences);
+    setCalendarEvents(events);
+  }, [dashboardRepository]);
+
   useEffect(() => {
     let active = true;
     setLoading(true);
-    Promise.all([refreshArticles(), refreshProjects(), refreshWork()])
+    Promise.all([refreshArticles(), refreshProjects(), refreshWork(), refreshDashboardLocal()])
       .catch((error) => {
         if (active) showMessage(error instanceof Error ? error.message : "无法读取本地工作台");
       })
@@ -302,7 +344,7 @@ export function DesktopWorkbench({
         if (active) setLoading(false);
       });
     return () => { active = false; };
-  }, [refreshArticles, refreshProjects, refreshWork, showMessage]);
+  }, [refreshArticles, refreshDashboardLocal, refreshProjects, refreshWork, showMessage]);
 
   useEffect(() => {
     if (!dataRevision) return;
@@ -396,6 +438,7 @@ export function DesktopWorkbench({
     explore: articles.filter(isSourceArticle).filter((article) => article.branch !== "已归档").length,
     inbox: inboxCount,
     review: null,
+    archive: projects.filter((project) => project.status === "completed").length + workspaceTasks.filter((task) => task.status === "done").length,
     tools: null,
     settings: null,
   };
@@ -528,24 +571,46 @@ export function DesktopWorkbench({
     }
   }
 
-  async function saveExternalLink(url: string, note: string) {
-    const platform = linkPlatform(url);
-    const title = note ? captureTitle(note) : `${platform} · 待看内容`;
+  async function saveExternalSource(input: ExternalSourceInput) {
+    const normalized = normalizeExternalSourceInput(input, linkPlatform(input.url));
     const saved = await persist({
       ...emptyDraft,
       collection: "sources",
       collectionLabel: "探索资料",
       category: "探索资料",
       type: "外部资料",
-      title,
-      body: `${note ? `${note}\n\n` : ""}[打开原内容](${url})`,
-      source: [platform, url],
+      title: normalized.title,
+      body: `${normalized.summary ? `${normalized.summary}\n\n` : ""}[打开原内容](${normalized.url})`,
+      source: [normalized.sourceLabel, normalized.url],
       branch: "收藏中",
       stage: "已收藏",
-      summary: note || `来自 ${platform} 的收藏`,
+      summary: normalized.summary || `来自 ${normalized.sourceLabel} 的收藏`,
       created: today,
     }, "链接已经收进探索库。 ", false);
     return Boolean(saved);
+  }
+
+  async function saveExternalLink(url: string, note: string) {
+    return saveExternalSource({ url, title: note ? captureTitle(note) : undefined, summary: note });
+  }
+
+  async function saveDashboardPreferences(preferences: DashboardPreferences) {
+    await dashboardRepository.savePreferences(preferences);
+    setDashboardPreferences(preferences);
+    showMessage("晨间首页设置已经保存。 ");
+  }
+
+  async function saveCalendarEvent(event: CalendarEvent) {
+    const saved = await dashboardRepository.saveEvent(event);
+    await refreshDashboardLocal();
+    showMessage(event.id ? "重要日期已经更新。 " : "重要日期已经添加。 ");
+    return saved;
+  }
+
+  async function deleteCalendarEvent(id: string) {
+    await dashboardRepository.deleteEvent(id);
+    await refreshDashboardLocal();
+    showMessage("重要日期已经删除。 ");
   }
 
   async function removeArticle(article: StoredArticle) {
@@ -605,7 +670,8 @@ export function DesktopWorkbench({
     try {
       const session = await workRepository.startSession({ taskId: task.id, projectId: task.projectId, label: task.title });
       setActiveSession(session);
-      showMessage("专注计时已经开始。 ");
+      setFocusSessions((current) => [session, ...current.filter((item) => item.id !== session.id)]);
+      showMessage("已经开始记录这次投入。 ");
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "无法开始专注");
     }
@@ -614,20 +680,33 @@ export function DesktopWorkbench({
   async function stopFocus() {
     if (!activeSession) return;
     try {
-      await workRepository.stopSession(activeSession.id);
+      const stopped = await workRepository.stopSession(activeSession.id);
       await refreshWork();
-      showMessage("本次投入已经记录。 ");
+      showMessage(`本次投入 ${formatFocusDuration(stopped.durationSeconds)}，已经记录。`);
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "无法结束专注");
     }
   }
 
+  async function finishRecoveredFocus() {
+    if (!activeSession || activeSession.id !== focusRecoveryId) return;
+    try {
+      const endedAt = new Date(focusRecoveryEnd).toISOString();
+      const stopped = await workRepository.stopSession({ id: activeSession.id, endedAt });
+      setFocusRecoveryId(null);
+      await refreshWork();
+      showMessage(`上次投入已按 ${formatFocusDuration(stopped.durationSeconds)} 记录。`);
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "无法修正上次投入");
+    }
+  }
+
   async function completeTask(task: WorkspaceTask) {
     try {
-      if (activeSession?.taskId === task.id) await workRepository.stopSession(activeSession.id);
+      const stopped = activeSession?.taskId === task.id ? await workRepository.stopSession(activeSession.id) : null;
       await projectRepository.completeTask(task.id, `完成行动：${task.title}`);
       await Promise.all([refreshProjects(), refreshWork()]);
-      offerUndo("任务已完成", async () => {
+      offerUndo(stopped ? `任务已完成 · 本次投入 ${formatFocusDuration(stopped.durationSeconds)}` : "任务已完成", async () => {
         await projectRepository.updateTaskStatus(task.id, task.status);
         await refreshProjects();
       });
@@ -696,10 +775,10 @@ export function DesktopWorkbench({
       }
       await Promise.all([refreshProjects(), refreshWork()]);
       showMessage("任务已经添加。 ");
-      return true;
+      return saved;
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "无法添加任务");
-      return false;
+      return null;
     }
   }
 
@@ -755,7 +834,7 @@ export function DesktopWorkbench({
       dueDate: "",
       plannedToday: false,
     });
-    if (created) await finishConvertedCapture(article, "已转为项目行动，原收藏已归档。");
+    if (created) await finishConvertedCapture(article, { kind: "task", id: created.id }, "已转为项目行动，原记录已整理为笔记。");
   }
 
   async function convertInboxToProposal(article: StoredArticle, projectId: string) {
@@ -773,20 +852,101 @@ export function DesktopWorkbench({
       updatedAt: now,
     };
     try {
-      await projectRepository.saveProposal(proposal);
+      const saved = await projectRepository.saveProposal(proposal);
       await refreshProjects();
-      await finishConvertedCapture(article, "已转为项目提案，原收藏已归档。");
+      await finishConvertedCapture(article, { kind: "proposal", id: saved.id }, "已转为项目提案，原记录已整理为笔记。");
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "转为提案失败");
     }
   }
 
-  async function finishConvertedCapture(article: StoredArticle, sourceMessage: string) {
+  async function finishConvertedCapture(article: StoredArticle, relation: { kind: "task" | "proposal"; id: string }, sourceMessage: string) {
     if (isSourceArticle(article)) {
-      await persist({ ...article, branch: "已归档" }, sourceMessage, false);
+      await persist(appendCaptureRelation(article, relation), sourceMessage, false);
       return;
     }
-    await moveInboxArticle(article, "note");
+    await persist(appendCaptureRelation({
+      ...article,
+      collection: "notes",
+      collectionLabel: "笔记",
+      category: articleLifeDomain(article),
+      branch: "已整理",
+    }, relation), sourceMessage, false);
+  }
+
+  async function organizeSource(article: StoredArticle, input: SourceOrganizationInput) {
+    const sourceAppendix = captureSourceAppendix(article);
+    try {
+      if (input.kind === "note") {
+        const saved = await repository.save({
+          ...emptyDraft,
+          title: input.title,
+          body: `${input.body}${sourceAppendix}`,
+          tags: input.tags,
+          source: sourceForCapturedResult(article.source, article.id),
+          branch: "已整理",
+          stage: "常青",
+          type: "想法",
+          category: articleLifeDomain({ category: "uncategorized", title: input.title, summary: plainExcerpt(input.body), tags: input.tags }),
+          summary: plainExcerpt(input.body),
+          created: today,
+        });
+        await repository.save(appendCaptureRelation(article, { kind: "note", id: saved.id }));
+        await refreshArticles();
+        onRepositoryChange?.();
+        showMessage("已经生成笔记，原资料仍保留在探索库。");
+        return true;
+      }
+
+      if (input.kind === "action") {
+        const now = new Date().toISOString();
+        const saved = await projectRepository.saveTask({
+          id: "",
+          projectId: input.projectId,
+          milestoneId: input.milestoneId,
+          title: input.title,
+          actionType: "organize",
+          details: `${input.details}${sourceAppendix}`,
+          benefit: "",
+          dueDate: input.dueDate,
+          status: "later",
+          waitingFor: "",
+          resumeAction: "",
+          context: "anywhere",
+          sortOrder: workspaceTasks.filter((item) => item.projectId === input.projectId).length,
+          createdAt: now,
+          updatedAt: now,
+          completedAt: null,
+        });
+        await repository.save(appendCaptureRelation(article, { kind: "task", id: saved.id }));
+        await Promise.all([refreshArticles(), refreshProjects()]);
+        onRepositoryChange?.();
+        showMessage("已经创建项目行动，原资料仍保留在探索库。");
+        return true;
+      }
+
+      const now = new Date().toISOString();
+      const saved = await projectRepository.saveProposal({
+        id: "",
+        projectId: input.projectId,
+        title: input.title,
+        problem: `${input.problem}${sourceAppendix}`,
+        expectedValue: input.expectedValue,
+        cost: input.cost,
+        status: "pending",
+        reviewNote: "由探索资料整理",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await repository.save(appendCaptureRelation(article, { kind: "proposal", id: saved.id }));
+      await Promise.all([refreshArticles(), refreshProjects()]);
+      onRepositoryChange?.();
+      showMessage("已经创建项目提案，原资料仍保留在探索库。");
+      return true;
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "整理资料失败");
+      return false;
+    }
   }
 
   async function archiveSource(article: StoredArticle, archived: boolean) {
@@ -801,7 +961,7 @@ export function DesktopWorkbench({
     section === "projects" && !documentMode ? "projects-mode" : "",
     section === "notes" && !documentMode ? "notes-mode" : "",
     sidebarCollapsed && !documentMode ? "sidebar-collapsed" : "",
-    `theme-${themeMode}`,
+    `theme-${themeId}`,
   ].filter(Boolean).join(" ");
   const taskActions = {
     onCompleteTask: completeTask,
@@ -810,6 +970,7 @@ export function DesktopWorkbench({
     onStartFocus: startFocus,
     onStopFocus: stopFocus,
     activeSession,
+    focusSessions,
   };
 
   return (
@@ -820,17 +981,18 @@ export function DesktopWorkbench({
         counts={counts}
         inboxCount={inboxCount}
         title={workspaceTitle(displayName)}
-          collapsed={sidebarCollapsed}
-          onSwitch={switchSection}
-          onToggle={toggleSidebar}
-          onOpenAi={() => setAiAssistantOpen(true)}
-          accountDock={accountDock}
-        />
+        avatarDataUrl={avatarDataUrl}
+        collapsed={sidebarCollapsed}
+        onSwitch={switchSection}
+        onToggle={toggleSidebar}
+        onOpenAi={() => setAiAssistantOpen(true)}
+        accountDock={accountDock}
+      />
       )}
 
-      {!documentMode && themeMode !== "minimal" && (
-        <MagicParticles intensity={themeMode === "immersive" ? 12 : 8} />
-      )}
+      <ThemeArtwork themeId={themeId} section={section} documentMode={documentMode} />
+
+      {activeSession && <GlobalFocusBar session={activeSession} task={workspaceTasks.find((task) => task.id === activeSession.taskId) ?? null} onShow={() => switchSection("tasks")} onPause={() => void stopFocus()} />}
 
       {documentMode ? (
         <section className="document-stage">
@@ -883,13 +1045,14 @@ export function DesktopWorkbench({
         />
       ) : (
         <section className="workspace-main-stage">
-          {section === "home" && <HomeDashboard today={today} tasks={workspaceTasks} articles={articles} weeklyFocus={weeklyFocus} integrationRepository={integrationRepository} onOpenTools={() => switchSection("tools")} onSaveWeeklyFocus={saveWeeklyFocus} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
-          {section === "tasks" && <TasksPage today={today} tasks={workspaceTasks} projects={projects} projectDetails={projectDetails} onAddTask={addTask} onRestoreTask={restoreTask} onRemoveTask={removeTask} onOpenProject={openProject} {...taskActions} />}
-          {section === "explore" && <ExplorePage articles={articles} onSaveLink={saveExternalLink} onArchive={archiveSource} onDelete={removeArticle} />}
+          {section === "home" && <HomeDashboard today={today} tasks={workspaceTasks} articles={articles} weeklyFocus={weeklyFocus} integrationRepository={integrationRepository} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} calendarEvents={calendarEvents} onOpenTools={() => switchSection("tools")} onSaveWeeklyFocus={saveWeeklyFocus} onSaveDashboardPreferences={saveDashboardPreferences} onSaveCalendarEvent={saveCalendarEvent} onDeleteCalendarEvent={deleteCalendarEvent} onSaveSource={saveExternalSource} onNotice={showMessage} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
+          {section === "tasks" && <TasksPage today={today} tasks={workspaceTasks} projects={projects} projectDetails={projectDetails} onAddTask={addTask} onRemoveTask={removeTask} onOpenProject={openProject} {...taskActions} />}
+          {section === "explore" && <ExplorePage articles={articles} projects={projects} projectDetails={projectDetails} onSaveLink={saveExternalLink} onArchive={archiveSource} onDelete={removeArticle} onOpenArticle={openArticle} onOpenProject={openProject} onOrganize={organizeSource} />}
           {section === "inbox" && <InboxPage articles={articles} projects={projects} onOpenArticle={openArticle} onNewCapture={() => setQuickCaptureOpen(true)} onMoveArticle={moveInboxArticle} onConvertToAction={convertInboxToAction} onConvertToProposal={convertInboxToProposal} onDelete={removeArticle} />}
           {section === "review" && <ReviewPage projects={projects} projectDetails={projectDetails} articles={articles} tasks={workspaceTasks} weeklyFocus={weeklyFocus} closeouts={closeouts} today={today} onSaveCloseout={saveCloseout} />}
+          {section === "archive" && <ArchivePage projects={projects} tasks={workspaceTasks} focusSessions={focusSessions} onOpenProject={openProject} onRestoreTask={restoreTask} />}
           {section === "tools" && <ToolCenterPage repository={integrationRepository} quickLinks={quickLinks} onSaveQuickLinks={onSaveQuickLinks} onOpenAi={() => setAiAssistantOpen(true)} />}
-          {section === "settings" && <SettingsPage displayName={displayName} themeMode={themeMode} backingUp={backingUp} onSaveDisplayName={onSaveDisplayName} onThemeChange={onThemeChange} onCreateBackup={onCreateBackup} onRestoreBackup={onRestoreBackup} />}
+          {section === "settings" && <SettingsPage displayName={displayName} avatarDataUrl={avatarDataUrl} themeId={themeId} backingUp={backingUp} dashboardPreferences={dashboardPreferences} onSaveDashboardPreferences={saveDashboardPreferences} onSaveDisplayName={onSaveDisplayName} onSaveAvatarDataUrl={onSaveAvatarDataUrl} onThemeChange={onThemeChange} onCreateBackup={onCreateBackup} onRestoreBackup={onRestoreBackup} />}
         </section>
       )}
 
@@ -911,6 +1074,8 @@ export function DesktopWorkbench({
 
       <AiAssistantDialog open={aiAssistantOpen} repository={aiRepository} onClose={() => setAiAssistantOpen(false)} />
 
+      {activeSession?.id === focusRecoveryId && <div className="focus-recovery-backdrop"><section className="focus-recovery-dialog" role="dialog" aria-modal="true" aria-label="处理上次未结束的投入"><span>投入记录恢复</span><h2>上次投入没有正常结束</h2><p>“{activeSession.label}”开始于 {new Date(activeSession.startedAt).toLocaleString("zh-CN")}。请选择实际结束时间，或者继续本次投入。</p><label><span>实际结束时间</span><input type="datetime-local" min={toLocalDateTimeInput(new Date(activeSession.startedAt))} max={toLocalDateTimeInput(new Date())} value={focusRecoveryEnd} onChange={(event) => setFocusRecoveryEnd(event.target.value)} /></label><footer><button onClick={() => setFocusRecoveryId(null)}>继续投入</button><button className="primary" onClick={() => void finishRecoveredFocus()}>按此时间暂停并记录</button></footer></section></div>}
+
       {message && <div className="desktop-toast" role="status">{message}</div>}
       {undoOffer && <div className="desktop-toast undo-toast" role="status"><span>{undoOffer.message}</span><button onClick={() => void runUndo()}>撤销</button></div>}
     </main>
@@ -927,6 +1092,7 @@ function WorkbenchSidebar({
   onOpenAi,
   accountDock,
   title,
+  avatarDataUrl,
 }: {
   section: DeskSection;
   counts: Record<DeskSection, number | null>;
@@ -937,11 +1103,12 @@ function WorkbenchSidebar({
   onOpenAi: () => void;
   accountDock: ReactNode;
   title: string;
+  avatarDataUrl: string;
 }) {
   return (
     <aside className="workbench-sidebar">
       <button className="sidebar-collapse-toggle" onClick={onToggle} aria-label={collapsed ? "展开侧栏" : "收起侧栏"} title={collapsed ? "展开侧栏" : "收起侧栏"}>{collapsed ? "›" : "‹"}</button>
-      <div className="sidebar-brand"><span className="sidebar-brand-mark"><WorkbenchIcon name="brand" /></span><span><strong title={title}>{title}</strong><small>理清方向，留下成长</small></span></div>
+      <div className="sidebar-brand"><span className={`sidebar-brand-mark${avatarDataUrl ? " has-image" : ""}`}>{avatarDataUrl ? <img src={avatarDataUrl} alt="" /> : <WorkbenchIcon name="brand" />}</span><span><strong title={title}>{title}</strong></span></div>
       <nav className="sidebar-navigation" aria-label="工作台导航">
         {(["action", "knowledge", "tools"] as const).map((group) => (
           <div className="sidebar-group" key={group}>
@@ -963,28 +1130,75 @@ function WorkbenchSidebar({
   );
 }
 
-function MagicParticles({ intensity }: { intensity: number }) {
-  return <div className="magic-particles" aria-hidden="true">{Array.from({ length: intensity }, (_, index) => {
-    const style = {
-      "--particle-x": `${(index * 37 + 11) % 96}%`,
-      "--particle-y": `${(index * 53 + 7) % 92}%`,
-      "--particle-size": `${2 + index % 4}px`,
-    } as CSSProperties;
-    return <i key={index} style={style} />;
-  })}</div>;
+function GlobalFocusBar({ session, task, onShow, onPause }: {
+  session: FocusSession;
+  task: WorkspaceTask | null;
+  onShow: () => void;
+  onPause: () => void;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [session.id]);
+  const elapsed = Math.max(0, Math.floor((now - new Date(session.startedAt).getTime()) / 1_000));
+  return <aside className="global-focus-bar" aria-live="polite"><button className="global-focus-main" onClick={onShow}><i /><span><small>正在投入{task?.projectTitle ? ` · ${task.projectTitle}` : ""}</small><strong>{task ? task.title : session.label}</strong></span><time>{formatFocusDuration(elapsed, true)}</time></button><button className="global-focus-pause" onClick={onPause}>Ⅱ 暂停</button></aside>;
 }
 
-function SettingsPage({ displayName, themeMode, backingUp, onSaveDisplayName, onThemeChange, onCreateBackup, onRestoreBackup }: {
+const avatarImageTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+async function createAvatarDataUrl(file: File) {
+  if (!avatarImageTypes.has(file.type)) throw new Error("请选择 JPG、PNG 或 WebP 图片。");
+  if (file.size > 8 * 1024 * 1024) throw new Error("图片不能超过 8 MB。");
+
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const candidate = new Image();
+      candidate.onload = () => resolve(candidate);
+      candidate.onerror = () => reject(new Error("无法读取这张图片，请换一张重试。"));
+      candidate.src = objectUrl;
+    });
+    if (!image.naturalWidth || !image.naturalHeight) throw new Error("这张图片没有可用的尺寸信息。");
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 512;
+    canvas.height = 512;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("当前设备暂时无法处理头像图片。");
+    const sourceSize = Math.min(image.naturalWidth, image.naturalHeight);
+    const sourceX = (image.naturalWidth - sourceSize) / 2;
+    const sourceY = (image.naturalHeight - sourceSize) / 2;
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+    context.drawImage(image, sourceX, sourceY, sourceSize, sourceSize, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL("image/webp", 0.86);
+    if (!dataUrl.startsWith("data:image/webp;base64,")) throw new Error("头像图片转换失败，请换一张重试。");
+    return dataUrl;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+function SettingsPage({ displayName, avatarDataUrl, themeId, backingUp, dashboardPreferences, onSaveDashboardPreferences, onSaveDisplayName, onSaveAvatarDataUrl, onThemeChange, onCreateBackup, onRestoreBackup }: {
   displayName: string;
-  themeMode: ThemeMode;
+  avatarDataUrl: string;
+  themeId: ThemeId;
   backingUp: boolean;
-  onThemeChange: (mode: ThemeMode) => void;
+  dashboardPreferences: DashboardPreferences;
+  onSaveDashboardPreferences: (preferences: DashboardPreferences) => Promise<void>;
+  onThemeChange: (themeId: ThemeId) => void;
   onCreateBackup: () => void;
   onRestoreBackup: () => void;
   onSaveDisplayName: (name: string) => Promise<void>;
+  onSaveAvatarDataUrl: (dataUrl: string) => Promise<void>;
 }) {
   const [nameDraft, setNameDraft] = useState(displayName);
   const [nameMessage, setNameMessage] = useState("");
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [avatarMessage, setAvatarMessage] = useState("");
+  const avatarInputRef = useRef<HTMLInputElement>(null);
   const [updateProxyPort, setUpdateProxyPort] = useState(loadUpdateProxyPort);
   const [proxyMessage, setProxyMessage] = useState("");
   const [autostartOn, setAutostartOn] = useState(false);
@@ -995,8 +1209,42 @@ function SettingsPage({ displayName, themeMode, backingUp, onSaveDisplayName, on
 
   async function saveName(event: FormEvent) {
     event.preventDefault();
-    await onSaveDisplayName(nameDraft);
-    setNameMessage(nameDraft.trim() ? `工作台将显示为“${workspaceTitle(nameDraft)}”。` : "已恢复为“个人工作台”。");
+    try {
+      await onSaveDisplayName(nameDraft);
+      setNameMessage("名称已保存。");
+    } catch (error) {
+      setNameMessage(error instanceof Error ? `名称保存失败：${error.message}` : "名称保存失败，请稍后重试。");
+    }
+  }
+
+  async function chooseAvatar(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setAvatarBusy(true);
+    setAvatarMessage("");
+    try {
+      const dataUrl = await createAvatarDataUrl(file);
+      await onSaveAvatarDataUrl(dataUrl);
+      setAvatarMessage("头像已更新。");
+    } catch (error) {
+      setAvatarMessage(error instanceof Error ? error.message : "头像更新失败，请换一张图片重试。");
+    } finally {
+      setAvatarBusy(false);
+    }
+  }
+
+  async function removeAvatar() {
+    setAvatarBusy(true);
+    setAvatarMessage("");
+    try {
+      await onSaveAvatarDataUrl("");
+      setAvatarMessage("已恢复默认头像。");
+    } catch (error) {
+      setAvatarMessage(error instanceof Error ? `头像移除失败：${error.message}` : "头像移除失败，请稍后重试。");
+    } finally {
+      setAvatarBusy(false);
+    }
   }
 
   useEffect(() => {
@@ -1059,17 +1307,47 @@ function SettingsPage({ displayName, themeMode, backingUp, onSaveDisplayName, on
       <header className="workspace-page-heading"><div><h1>设置</h1><p>统一管理外观、数据与以后新增的工作台偏好。</p></div></header>
       <div className="settings-grid">
         <section className="workspace-card settings-section settings-identity-section">
-          <header><span>身份</span><h2>工作台称呼</h2><p>只用于这台设备上的标题展示，不会修改同步账户。</p></header>
-          <form className="settings-name-form" onSubmit={saveName}>
-            <label htmlFor="workspace-display-name">你的名称</label>
-            <div><input id="workspace-display-name" maxLength={24} value={nameDraft} onChange={(event) => { setNameDraft(event.target.value); setNameMessage(""); }} placeholder="例如：小洛" /><button type="submit">保存称呼</button></div>
-            <small>预览：{workspaceTitle(nameDraft)} · 最多 24 个字符</small>
-            <p role="status">{nameMessage}</p>
-          </form>
+          <header><span>身份</span><h2>名称与头像</h2></header>
+          <div className="settings-identity-content">
+            <div className="settings-avatar-row">
+              <span className={`settings-avatar-preview${avatarDataUrl ? " has-image" : ""}`}>{avatarDataUrl ? <img src={avatarDataUrl} alt="当前头像" /> : <WorkbenchIcon name="brand" />}</span>
+              <div className="settings-avatar-details">
+                <strong>个人头像</strong>
+                <small>支持 JPG、PNG、WebP，图片会自动居中裁成方形。</small>
+                <div className="settings-avatar-actions">
+                  <button type="button" disabled={avatarBusy} onClick={() => avatarInputRef.current?.click()}>{avatarBusy ? "处理中…" : avatarDataUrl ? "更换图片" : "上传图片"}</button>
+                  {avatarDataUrl && <button type="button" className="quiet" disabled={avatarBusy} onClick={() => void removeAvatar()}>移除</button>}
+                </div>
+                <input ref={avatarInputRef} className="settings-avatar-input" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void chooseAvatar(event)} />
+                <p role="status">{avatarMessage}</p>
+              </div>
+            </div>
+            <form className="settings-name-form" onSubmit={saveName}>
+              <label htmlFor="workspace-display-name"><span>名称</span><small id="workspace-display-name-count">{[...nameDraft].length}/24</small></label>
+              <div><input id="workspace-display-name" value={nameDraft} onChange={(event) => { setNameDraft([...event.target.value].slice(0, 24).join("")); setNameMessage(""); }} placeholder="例如：小洛" aria-describedby="workspace-display-name-count workspace-display-name-message" /><button type="submit">保存名称</button></div>
+              <p id="workspace-display-name-message" role="status">{nameMessage}</p>
+            </form>
+          </div>
         </section>
         <section className="workspace-card settings-section">
-          <header><span>外观</span><h2>主题与阅读氛围</h2><p>只改变视觉强度，不影响资料内容。</p></header>
-          <div className="settings-theme-options">{([ ["minimal", "简洁", "更少装饰，优先清晰阅读"], ["magic", "魔法", "保留主题氛围与轻量粒子"], ["immersive", "沉浸", "完整背景与更强视觉层次"] ] as const).map(([value, label, description]) => <button className={themeMode === value ? "active" : ""} key={value} onClick={() => onThemeChange(value)}><i>{themeMode === value ? "✓" : ""}</i><span><strong>{label}</strong><small>{description}</small></span></button>)}</div>
+          <header><span>外观</span><h2>工作台主题</h2><p>默认主题专注阅读；角色主题只在有足够留白时显示立绘。</p></header>
+          <div className="settings-theme-options">
+            {DESKTOP_THEMES.map((theme) => (
+              <button
+                className={themeId === theme.id ? "active" : ""}
+                key={theme.id}
+                type="button"
+                aria-pressed={themeId === theme.id}
+                onClick={() => onThemeChange(theme.id)}
+              >
+                <span className={`settings-theme-preview preview-${theme.id}`}>
+                  {theme.characterImage && <img src={theme.characterImage} alt="" draggable={false} />}
+                  <i>{themeId === theme.id ? "✓" : ""}</i>
+                </span>
+                <span><strong>{theme.label}</strong><small>{theme.description}</small></span>
+              </button>
+            ))}
+          </div>
         </section>
         <section className="workspace-card settings-section settings-startup-section">
           <header><span>启动</span><h2>开机自启动</h2><p>登录系统后自动在后台启动应用，随时可以在这里关闭。</p></header>
@@ -1092,6 +1370,7 @@ function SettingsPage({ displayName, themeMode, backingUp, onSaveDisplayName, on
           </div>
           <p className="settings-toggle-message" id="settings-autostart-message" role="status">{autostartMessage}</p>
         </section>
+        <DashboardSettingsSection preferences={dashboardPreferences} onSave={onSaveDashboardPreferences} />
         <section className="workspace-card settings-section settings-data-section">
           <header><span>数据</span><h2>备份与恢复</h2><p>项目、行动、笔记和回顾会一起保存在完整本地备份中。</p></header>
           <div className="settings-data-actions">
@@ -1359,7 +1638,7 @@ function ArticleEditor({ draft, projects, saving, appendMode, onChange, onCancel
   }
 
   function updateSource(kind: string, url = sourceUrl) {
-    update("source", [kind, ...(url.trim() ? [url.trim()] : [])]);
+    update("source", preserveCaptureSourceMetadata(draft.source, kind, url));
   }
 
   function insertMarkdown(before: string, after = "") {
@@ -1769,11 +2048,24 @@ function linkPlatform(value: string) {
   }
 }
 
+function captureSourceAppendix(article: StoredArticle) {
+  const url = article.source.find((item) => /^https?:\/\//i.test(item));
+  if (!url) return "";
+  const metadata = captureMetadata(article);
+  const playback = formatPlaybackTime(metadata?.playbackSeconds);
+  return `\n\n---\n\n来源：[${article.title}](${url})${playback ? ` · 视频 ${playback}` : ""}`;
+}
+
 function startOfLocalWeekDate() {
   const date = new Date();
   const day = date.getDay() || 7;
   date.setDate(date.getDate() - day + 1);
   return localDate(date);
+}
+
+function toLocalDateTimeInput(date: Date) {
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 19);
 }
 
 function formatDate(value: string) {

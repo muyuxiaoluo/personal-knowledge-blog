@@ -6,7 +6,8 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppUpdater } from "./AppUpdater";
-import { DesktopWorkbench, type ThemeMode } from "./DesktopWorkbench";
+import { DesktopWorkbench } from "./DesktopWorkbench";
+import { loadDesktopTheme, saveDesktopTheme, type ThemeId } from "./DesktopThemes";
 import { WorkbenchIcon } from "./WorkbenchIcon";
 import {
   CloudSyncClient,
@@ -21,14 +22,21 @@ import { SqliteWorkRepository } from "../app/data/sqlite-work-repository";
 import { WorkspacePreferencesRepository } from "../app/data/workspace-preferences-repository";
 import { SqliteAiRepository } from "../app/data/sqlite-ai-repository";
 import { IntegrationRepository } from "../app/data/integration-repository";
+import { DashboardRepository } from "../app/data/dashboard-repository";
 import {
   addDefaultEntertainmentLinks,
+  normalizeDisplayName,
   readLegacyQuickLinks,
   workspaceTitle,
   type QuickLink,
 } from "../app/workspace-preferences";
 import seedArticles from "../app/generated/articles.json";
 import type { Article } from "../app/types";
+import {
+  buildCapturedArticle,
+  findExistingCapturedSource,
+  type EntertainmentCaptureRequest,
+} from "../app/entertainment-capture";
 import { useConfirmDialog } from "./DesktopControls";
 
 const defaultServerUrl = "https://mind.47-108-88-117.sslip.io";
@@ -46,6 +54,7 @@ type DesktopRuntime = {
   preferencesRepository: WorkspacePreferencesRepository;
   aiRepository: SqliteAiRepository;
   integrationRepository: IntegrationRepository;
+  dashboardRepository: DashboardRepository;
   database: Database;
 };
 
@@ -85,18 +94,18 @@ export function DesktopApp() {
   const [revision, setRevision] = useState(0);
   const [mutationRevision, setMutationRevision] = useState(0);
   const [workbenchEditing, setWorkbenchEditing] = useState(false);
+  const [startupActiveFocusId, setStartupActiveFocusId] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState("");
+  const [avatarDataUrl, setAvatarDataUrl] = useState("");
   const [quickLinks, setQuickLinks] = useState<QuickLink[]>([]);
   const [notice, setNotice] = useState<SyncNotice>({
     tone: "quiet",
     text: "本地资料库准备中…",
   });
-  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
-    const stored = localStorage.getItem("life-strategy.theme-mode");
-    return stored === "minimal" || stored === "immersive" ? stored : "magic";
-  });
+  const [themeId, setThemeId] = useState<ThemeId>(loadDesktopTheme);
   const autoSyncTimer = useRef<number | null>(null);
   const syncInFlight = useRef(false);
+  const activeCaptureRequests = useRef(new Set<string>());
 
   useEffect(() => {
     if (notice.tone !== "success" || !notice.text) return;
@@ -115,6 +124,8 @@ export function DesktopApp() {
         confirmLabel: "放弃并退出",
         tone: "warning",
       })) return;
+      const activeFocus = await runtime?.workRepository.getActiveSession().catch(() => null);
+      if (activeFocus) await runtime?.workRepository.stopSession(activeFocus.id).catch(() => undefined);
       void invoke("quit_app");
     })
       .then((dispose) => {
@@ -126,7 +137,36 @@ export function DesktopApp() {
       disposed = true;
       unlisten?.();
     };
-  }, [confirm, workbenchEditing]);
+  }, [confirm, runtime, workbenchEditing]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const appWindow = getCurrentWindow();
+    let unlisten: UnlistenFn | undefined;
+    let disposed = false;
+    let closing = false;
+    void appWindow.onCloseRequested(async (event) => {
+      if (closing) return;
+      event.preventDefault();
+      if (workbenchEditing && !await confirm({
+        title: "退出前放弃未保存内容？",
+        description: "当前编辑还没有结束。退出后，尚未保存的内容不会保留。",
+        confirmLabel: "放弃并退出",
+        tone: "warning",
+      })) return;
+      const activeFocus = await runtime?.workRepository.getActiveSession().catch(() => null);
+      if (activeFocus) await runtime?.workRepository.stopSession(activeFocus.id).catch(() => undefined);
+      closing = true;
+      await invoke("quit_app");
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [confirm, runtime, workbenchEditing]);
 
   useEffect(() => {
     if (!isTauri() || shortcutInitialization) return;
@@ -166,20 +206,26 @@ export function DesktopApp() {
         const preferencesRepository = new WorkspacePreferencesRepository(transactionalDatabase);
         const aiRepository = new SqliteAiRepository(transactionalDatabase);
         const integrationRepository = new IntegrationRepository(transactionalDatabase);
+        const dashboardRepository = new DashboardRepository(transactionalDatabase);
         await Promise.all([
           articleRepository.list(),
           projectRepository.list(),
           workRepository.listPlans(),
           aiRepository.cleanupExpired(),
           integrationRepository.listGitHubRepositories(),
+          dashboardRepository.getPreferences(),
+          dashboardRepository.listEvents(),
         ]);
+        const activeFocusAtStartup = await workRepository.getActiveSession();
         const preferences = await preferencesRepository.getPreferences();
         const resolvedQuickLinks = preferences.quickLinks ?? addDefaultEntertainmentLinks(readLegacyQuickLinks(localStorage));
         if (!preferences.quickLinks) await preferencesRepository.saveQuickLinks(resolvedQuickLinks);
         const pending = await articleRepository.listPendingChanges();
         if (!active) return;
-        setRuntime({ articleRepository, projectRepository, workRepository, preferencesRepository, aiRepository, integrationRepository, database });
+        setRuntime({ articleRepository, projectRepository, workRepository, preferencesRepository, aiRepository, integrationRepository, dashboardRepository, database });
+        setStartupActiveFocusId(activeFocusAtStartup?.id ?? null);
         setDisplayName(preferences.displayName);
+        setAvatarDataUrl(preferences.avatarDataUrl);
         setQuickLinks(resolvedQuickLinks);
         setPendingCount(pending.length);
         setNotice({ tone: "quiet", text: "" });
@@ -192,6 +238,61 @@ export function DesktopApp() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!isTauri() || !runtime) return;
+    let unlisten: UnlistenFn | undefined;
+    let disposed = false;
+    void listen<EntertainmentCaptureRequest>("entertainment-capture-request", async ({ payload }) => {
+      const requestId = payload.snapshot.requestId;
+      if (!requestId || activeCaptureRequests.current.has(requestId)) return;
+      activeCaptureRequests.current.add(requestId);
+      let success = false;
+      let message = "保存没有完成";
+      try {
+        if (payload.mode === "explore") {
+          const articles = await runtime.articleRepository.list();
+          const existing = findExistingCapturedSource(articles, payload.snapshot);
+          if (existing) {
+            success = true;
+            message = existing.branch === "已归档"
+              ? "这条内容已经在探索库的归档中"
+              : "已经收集过这条内容";
+          } else {
+            await runtime.articleRepository.save(buildCapturedArticle(payload));
+            success = true;
+            message = "已经收进探索库";
+          }
+        } else {
+          await runtime.articleRepository.save(buildCapturedArticle(payload));
+          success = true;
+          message = "这一刻已经放进待整理";
+        }
+        if (success) {
+          const pending = await runtime.articleRepository.listPendingChanges();
+          setPendingCount(pending.length);
+          setRevision((value) => value + 1);
+          setMutationRevision((value) => value + 1);
+        }
+      } catch (reason) {
+        message = reason instanceof Error ? reason.message : "保存当前内容失败";
+      } finally {
+        await invoke("entertainment_capture_complete", {
+          requestId,
+          success,
+          message,
+        }).catch(() => undefined);
+        activeCaptureRequests.current.delete(requestId);
+      }
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [runtime]);
 
   useEffect(() => {
     const title = workspaceTitle(displayName);
@@ -346,9 +447,9 @@ export function DesktopApp() {
     }
   }
 
-  function changeTheme(next: ThemeMode) {
-    setThemeMode(next);
-    localStorage.setItem("life-strategy.theme-mode", next);
+  function changeTheme(next: ThemeId) {
+    setThemeId(next);
+    saveDesktopTheme(next);
   }
 
   if (startupError) {
@@ -381,22 +482,29 @@ export function DesktopApp() {
         workRepository={runtime.workRepository}
         aiRepository={runtime.aiRepository}
         integrationRepository={runtime.integrationRepository}
+        dashboardRepository={runtime.dashboardRepository}
         displayName={displayName}
+        avatarDataUrl={avatarDataUrl}
         quickLinks={quickLinks}
         dataRevision={revision}
-        themeMode={themeMode}
+        themeId={themeId}
         backingUp={backingUp}
         onThemeChange={changeTheme}
         onCreateBackup={() => void createBackup()}
         onRestoreBackup={() => void restoreLatestBackup()}
         onSaveDisplayName={async (name) => {
           await runtime.preferencesRepository.saveDisplayName(name);
-          setDisplayName(name.trim().slice(0, 24));
+          setDisplayName(normalizeDisplayName(name));
+        }}
+        onSaveAvatarDataUrl={async (dataUrl) => {
+          await runtime.preferencesRepository.saveAvatarDataUrl(dataUrl);
+          setAvatarDataUrl(dataUrl);
         }}
         onSaveQuickLinks={async (links) => {
           setQuickLinks(links);
           await runtime.preferencesRepository.saveQuickLinks(links);
         }}
+        startupActiveFocusId={startupActiveFocusId}
         onEditingStateChange={setWorkbenchEditing}
         accountDock={
           <AccountDock
