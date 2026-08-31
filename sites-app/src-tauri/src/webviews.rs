@@ -969,12 +969,12 @@ pub async fn entertainment_open(app: tauri::AppHandle, url: String) -> Result<()
             .set_focus()
             .map_err(|error| format!("无法聚焦娱乐窗口：{error}"));
     }
-    let profile = app
+    // Reuse the main window's default WebView2 data directory so entertainment pages
+    // share its browser/GPU process group instead of starting a second environment.
+    let shared_data_directory = app
         .path()
-        .app_data_dir()
-        .map_err(|error| format!("无法准备娱乐窗口目录：{error}"))?
-        .join("webview-profiles")
-        .join("entertainment");
+        .app_local_data_dir()
+        .map_err(|error| format!("无法准备娱乐窗口目录：{error}"))?;
     let popup_app = app.clone();
     let menu_app = app.clone();
     let window =
@@ -984,7 +984,7 @@ pub async fn entertainment_open(app: tauri::AppHandle, url: String) -> Result<()
             .min_inner_size(760.0, 520.0)
             .center()
             .resizable(true)
-            .data_directory(profile)
+            .data_directory(shared_data_directory)
             .initialization_script(ENTERTAINMENT_INITIALIZATION_SCRIPT)
             .menu(build_entertainment_menu(&app)?)
             .on_navigation(allowed_entertainment_url)

@@ -37,6 +37,22 @@ export type WeeklyFocus = {
   updatedAt: string;
 };
 
+export type WeeklyReviewOutcomeStatus = "achieved" | "partial" | "missed" | "redirected";
+
+export type WeeklyReviewFactor = "" | "scope" | "external" | "priority" | "capacity" | "approach" | "other";
+
+export type WeeklyReviewStrategy = "continue" | "narrow" | "switch" | "pause";
+
+export type WeeklyReview = {
+  weekStart: string;
+  outcomeStatus: WeeklyReviewOutcomeStatus;
+  factor: WeeklyReviewFactor;
+  factorNote: string;
+  nextStrategy: WeeklyReviewStrategy;
+  adjustment: string;
+  updatedAt: string;
+};
+
 export type DailyCloseout = {
   date: string;
   result: string;

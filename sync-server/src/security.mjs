@@ -45,7 +45,7 @@ export async function verifyPasswordAsync(password, stored) {
   }
 }
 
-export function issueAccessToken(user, secret, ttlSeconds = 12 * 60 * 60) {
+export function issueAccessToken(user, secret, ttlSeconds = 15 * 60) {
   if (!secret || secret.length < 32) {
     throw new Error("AUTH_SECRET must contain at least 32 characters");
   }

@@ -12,7 +12,7 @@ use url::Url;
 
 const WINDOW_LABEL: &str = "deepseek-bridge";
 const ADAPTER_VERSION: u8 = 10;
-const IDLE_SECONDS: u64 = 15 * 60;
+const IDLE_SECONDS: u64 = 3 * 60;
 
 pub struct DeepSeekBridgeState {
     lifecycle_generation: AtomicU64,

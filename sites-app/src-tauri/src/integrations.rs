@@ -16,6 +16,7 @@ fn secret_account(kind: &str) -> Option<&'static str> {
         "aliyun_access_key_id" => Some("aliyun_access_key_id"),
         "aliyun_access_key_secret" => Some("aliyun_access_key_secret"),
         "qwen_monitor_credential" => Some("qwen_monitor_credential"),
+        "sync_refresh_session" => Some("sync_refresh_session"),
         _ => None,
     }
 }
@@ -75,6 +76,65 @@ pub async fn secret_delete(kind: String) -> Result<(), String> {
     })
     .await
     .map_err(|error| format!("删除凭据任务失败：{error}"))?
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncRefreshSession {
+    server_url: String,
+    username: String,
+    refresh_token: String,
+    expires_at: String,
+}
+
+fn validate_sync_refresh_session(session: &SyncRefreshSession) -> Result<(), String> {
+    let server = Url::parse(&session.server_url).map_err(|_| "同步服务器地址无效".to_string())?;
+    if !matches!(server.scheme(), "http" | "https")
+        || session.username.trim().is_empty()
+        || session.username.len() > 100
+        || session.refresh_token.len() < 32
+        || session.refresh_token.len() > 256
+        || chrono::DateTime::parse_from_rfc3339(&session.expires_at).is_err()
+    {
+        return Err("同步刷新凭据格式无效".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sync_refresh_session_store(session: SyncRefreshSession) -> Result<(), String> {
+    validate_sync_refresh_session(&session)?;
+    let encoded = serde_json::to_string(&session)
+        .map_err(|error| format!("无法编码同步刷新凭据：{error}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        credential("sync_refresh_session")?
+            .set_password(&encoded)
+            .map_err(|error| format!("无法保存同步刷新凭据：{error}"))
+    })
+    .await
+    .map_err(|error| format!("保存同步刷新凭据任务失败：{error}"))?
+}
+
+#[tauri::command]
+pub async fn sync_refresh_session_load() -> Result<Option<SyncRefreshSession>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let encoded = match credential("sync_refresh_session")?.get_password() {
+            Ok(value) => value,
+            Err(keyring::Error::NoEntry) => return Ok(None),
+            Err(error) => return Err(format!("无法读取同步刷新凭据：{error}")),
+        };
+        let session: SyncRefreshSession = serde_json::from_str(&encoded)
+            .map_err(|error| format!("同步刷新凭据已损坏：{error}"))?;
+        validate_sync_refresh_session(&session)?;
+        Ok(Some(session))
+    })
+    .await
+    .map_err(|error| format!("读取同步刷新凭据任务失败：{error}"))?
+}
+
+#[tauri::command]
+pub async fn sync_refresh_session_delete() -> Result<(), String> {
+    secret_delete("sync_refresh_session".into()).await
 }
 
 #[derive(Debug, Serialize)]

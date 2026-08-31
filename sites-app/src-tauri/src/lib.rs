@@ -2,13 +2,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{Connection, Executor, SqliteConnection};
 use std::{
-    fs::{self, File},
-    io::Read,
+    fs,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{Emitter, Manager};
 
+mod attachments;
+mod backup;
 mod dashboard;
 mod deepseek;
 mod integrations;
@@ -16,8 +17,8 @@ mod webviews;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BackupPath {
-    path: String,
+pub(crate) struct BackupPath {
+    pub(crate) path: String,
 }
 
 #[derive(Deserialize)]
@@ -80,7 +81,7 @@ async fn execute_sqlite_transaction(
     Ok(())
 }
 
-fn backup_dir(app: &tauri::AppHandle) -> PathBuf {
+pub(crate) fn backup_dir(app: &tauri::AppHandle) -> PathBuf {
     app.path()
         .document_dir()
         .map(|path| path.join("个人工作台备份"))
@@ -144,14 +145,18 @@ fn latest_backup_path(app: tauri::AppHandle) -> Result<Option<BackupPath>, Strin
 
 fn is_primary_backup_name(name: &str) -> bool {
     name.strip_prefix("mind-garden-")
-        .and_then(|value| value.strip_suffix(".sqlite3"))
+        .and_then(|value| {
+            value
+                .strip_suffix(".mgbak")
+                .or_else(|| value.strip_suffix(".sqlite3"))
+        })
         .is_some_and(|timestamp| {
             !timestamp.is_empty() && timestamp.chars().all(|value| value.is_ascii_digit())
         })
 }
 
 #[tauri::command]
-fn restore_backup(app: tauri::AppHandle, source_path: String) -> Result<(), String> {
+async fn restore_backup(app: tauri::AppHandle, source_path: String) -> Result<(), String> {
     let source = PathBuf::from(&source_path);
     let canonical_source = source
         .canonicalize()
@@ -168,42 +173,7 @@ fn restore_backup(app: tauri::AppHandle, source_path: String) -> Result<(), Stri
     if !allowed {
         return Err("只能恢复个人工作台备份目录中的文件。".into());
     }
-    let mut header = [0_u8; 16];
-    File::open(&canonical_source)
-        .and_then(|mut file| file.read_exact(&mut header))
-        .map_err(|error| format!("无法检查备份文件：{error}"))?;
-    if &header != b"SQLite format 3\0" {
-        return Err("所选文件不是有效的 SQLite 备份。".into());
-    }
-
-    let database = app
-        .path()
-        .app_config_dir()
-        .map_err(|error| format!("无法定位资料库：{error}"))?
-        .join("mind-garden.db");
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("无法生成安全备份时间：{error}"))?
-        .as_secs();
-    let current_backup_dir = backup_dir(&app);
-    fs::create_dir_all(&current_backup_dir)
-        .map_err(|error| format!("无法创建安全备份目录：{error}"))?;
-    let safety_copy =
-        current_backup_dir.join(format!("mind-garden-before-restore-{timestamp}.sqlite3"));
-    let temporary = database.with_extension("restore.tmp");
-    fs::copy(&canonical_source, &temporary)
-        .map_err(|error| format!("无法准备恢复文件：{error}"))?;
-    if database.exists() {
-        fs::rename(&database, &safety_copy)
-            .map_err(|error| format!("无法创建恢复前安全副本：{error}"))?;
-    }
-    if let Err(error) = fs::rename(&temporary, &database) {
-        if safety_copy.exists() {
-            let _ = fs::rename(&safety_copy, &database);
-        }
-        return Err(format!("无法启用恢复文件，当前资料库已保留：{error}"));
-    }
-    Ok(())
+    backup::restore_backup_file(&app, &canonical_source).await
 }
 
 fn fallback_backup_dir(app: &tauri::AppHandle) -> PathBuf {
@@ -314,6 +284,13 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            attachments::attachment_store_blob,
+            attachments::attachment_read_blob,
+            attachments::attachment_blob_exists,
+            attachments::attachment_delete_blob,
+            attachments::attachment_upload_blob,
+            attachments::attachment_download_blob,
+            backup::create_backup_bundle,
             reserve_backup_path,
             latest_backup_path,
             restore_backup,
@@ -339,6 +316,9 @@ pub fn run() {
             integrations::secret_status,
             integrations::secret_set,
             integrations::secret_delete,
+            integrations::sync_refresh_session_store,
+            integrations::sync_refresh_session_load,
+            integrations::sync_refresh_session_delete,
             integrations::github_fetch_repository,
             integrations::deepseek_fetch_balance,
             integrations::qwen_fetch_balance,
@@ -363,6 +343,7 @@ mod tests {
     #[test]
     fn selects_only_regular_timestamped_backups() {
         assert!(is_primary_backup_name("mind-garden-1786800000.sqlite3"));
+        assert!(is_primary_backup_name("mind-garden-1786800000123.mgbak"));
         assert!(!is_primary_backup_name(
             "mind-garden-before-restore-1786800000.sqlite3"
         ));

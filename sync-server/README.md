@@ -24,3 +24,13 @@ docker compose up -d --build
 数据保存在 Docker 命名卷 `mind-garden_mind_data` 中。Caddy 独占 80/443 并自动为 `DOMAIN` 申请 HTTPS 证书。
 
 `TRUST_PROXY=true` 仅适用于 API 端口没有直接暴露、所有公网请求都经过 Caddy 的部署方式。直接运行 Node 服务时应保持为 `false`，避免客户端伪造转发地址绕过登录限流。
+
+## CORS 来源白名单
+
+服务默认只对桌面端 Tauri webview 的来源（`http://tauri.localhost`、`tauri://localhost` 等）返回 CORS 头，其他网页无法直接调用登录与同步接口。如需放行额外来源，在 `.env` 中设置：
+
+```sh
+CORS_ALLOWED_ORIGINS=https://example.com,https://another.example
+```
+
+多个来源用英文逗号分隔；设为 `*` 可恢复全放开（不推荐）。非浏览器客户端（curl、桌面端 HTTP 库等）不受 CORS 限制，行为不变。

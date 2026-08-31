@@ -29,11 +29,12 @@ type ProjectRow = {
   project_type: ProjectType;
   parent_project_id: string | null;
   supports_milestone_id: string | null;
-  status: ProjectStatus;
+  status: ProjectStatus | "waiting";
   category: ProjectCategory;
   sort_order: number;
   is_draft: number;
   source_note: string;
+  target_date: string;
   review_date: string;
   completed_at: string | null;
   created_at: string;
@@ -58,6 +59,9 @@ type ProjectTaskRow = {
   milestone_id: string | null;
   title: string;
   action_type: ProjectTask["actionType"];
+  definition_of_done: string;
+  steps_json: string;
+  current_focus: string;
   details: string;
   benefit: string;
   due_date: string;
@@ -120,6 +124,7 @@ const migrations = [
     sort_order INTEGER NOT NULL DEFAULT 0,
     is_draft INTEGER NOT NULL DEFAULT 1,
     source_note TEXT NOT NULL DEFAULT '',
+    target_date TEXT NOT NULL DEFAULT '',
     review_date TEXT NOT NULL DEFAULT '',
     completed_at TEXT,
     created_at TEXT NOT NULL,
@@ -142,6 +147,9 @@ const migrations = [
     milestone_id TEXT REFERENCES project_milestones(id) ON DELETE SET NULL,
     title TEXT NOT NULL,
     action_type TEXT NOT NULL DEFAULT 'organize',
+    definition_of_done TEXT NOT NULL DEFAULT '',
+    steps_json TEXT NOT NULL DEFAULT '[]',
+    current_focus TEXT NOT NULL DEFAULT '',
     details TEXT NOT NULL DEFAULT '',
     benefit TEXT NOT NULL DEFAULT '',
     due_date TEXT NOT NULL DEFAULT '',
@@ -183,6 +191,7 @@ const migrations = [
 
 export class SqliteProjectRepository implements ProjectRepository {
   private initialization: Promise<void> | null = null;
+  private indexCache = new Map<string, Pick<ProjectDetail, "project" | "milestones" | "tasks">>();
 
   constructor(
     private readonly database: SqliteDatabase,
@@ -204,9 +213,14 @@ export class SqliteProjectRepository implements ProjectRepository {
     await this.initialization;
   }
 
+  async ready() {
+    await this.initialize();
+  }
+
   private async applyMigrationsAndSeed() {
     await this.database.execute("PRAGMA foreign_keys = ON");
     for (const statement of migrations) await this.database.execute(statement);
+    await this.ensureColumn("projects", "target_date", "TEXT NOT NULL DEFAULT ''");
     await this.ensureColumn("projects", "review_date", "TEXT NOT NULL DEFAULT ''");
     await this.ensureColumn("projects", "completed_at", "TEXT");
     await this.ensureColumn("projects", "project_type", "TEXT NOT NULL DEFAULT 'main'");
@@ -214,11 +228,15 @@ export class SqliteProjectRepository implements ProjectRepository {
     await this.ensureColumn("projects", "supports_milestone_id", "TEXT");
     await this.ensureColumn("project_milestones", "due_date", "TEXT NOT NULL DEFAULT ''");
     await this.ensureColumn("project_tasks", "action_type", "TEXT NOT NULL DEFAULT 'organize'");
+    await this.ensureColumn("project_tasks", "definition_of_done", "TEXT NOT NULL DEFAULT ''");
+    await this.ensureColumn("project_tasks", "steps_json", "TEXT NOT NULL DEFAULT '[]'");
+    await this.ensureColumn("project_tasks", "current_focus", "TEXT NOT NULL DEFAULT ''");
     await this.ensureColumn("project_tasks", "details", "TEXT NOT NULL DEFAULT ''");
     await this.ensureColumn("project_tasks", "benefit", "TEXT NOT NULL DEFAULT ''");
     await this.ensureColumn("project_tasks", "due_date", "TEXT NOT NULL DEFAULT ''");
     await this.ensureColumn("project_tasks", "deleted_at", "TEXT");
     await this.ensureColumn("project_tasks", "deleted_plan_json", "TEXT NOT NULL DEFAULT ''");
+    await this.database.execute("UPDATE projects SET status = 'paused' WHERE status = 'waiting'");
     await this.database.execute(
       `UPDATE projects
        SET category = CASE category
@@ -274,17 +292,40 @@ export class SqliteProjectRepository implements ProjectRepository {
   async list(): Promise<ProjectSummary[]> {
     try {
       await this.initialize();
-      const rows = await this.database.select<ProjectRow>(
-        `SELECT * FROM projects
-         ORDER BY
-           CASE status WHEN 'active' THEN 0 WHEN 'waiting' THEN 1 WHEN 'paused' THEN 2 ELSE 3 END,
-           sort_order ASC,
-           updated_at DESC`,
-      );
-      return Promise.all(rows.map(async (row) => {
+      const [rows, milestoneRows, taskRows] = await Promise.all([
+        this.database.select<ProjectRow>(
+          `SELECT * FROM projects
+           ORDER BY
+             CASE status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
+             sort_order ASC,
+             updated_at DESC`,
+        ),
+        this.database.select<MilestoneRow>(
+          "SELECT * FROM project_milestones ORDER BY project_id, sort_order ASC, created_at ASC",
+        ),
+        this.database.select<ProjectTaskRow>(
+          `SELECT * FROM project_tasks WHERE deleted_at IS NULL
+           ORDER BY project_id, sort_order ASC, created_at ASC`,
+        ),
+      ]);
+      const milestonesByProject = new Map<string, Milestone[]>();
+      for (const row of milestoneRows) {
+        const list = milestonesByProject.get(row.project_id) ?? [];
+        list.push(rowToMilestone(row));
+        milestonesByProject.set(row.project_id, list);
+      }
+      const tasksByProject = new Map<string, ProjectTask[]>();
+      for (const row of taskRows) {
+        const list = tasksByProject.get(row.project_id) ?? [];
+        list.push(rowToTask(row));
+        tasksByProject.set(row.project_id, list);
+      }
+      this.indexCache.clear();
+      return rows.map((row) => {
         const project = rowToProject(row);
-        const milestones = await this.listMilestones(project.id);
-        const tasks = await this.listTasks(project.id);
+        const milestones = milestonesByProject.get(project.id) ?? [];
+        const tasks = tasksByProject.get(project.id) ?? [];
+        this.indexCache.set(project.id, { project, milestones, tasks });
         return {
           ...project,
           currentMilestone: milestones.find((item) => item.status === "current") ?? null,
@@ -296,7 +337,7 @@ export class SqliteProjectRepository implements ProjectRepository {
           milestoneCount: milestones.length,
           completedMilestoneCount: milestones.filter((item) => item.status === "completed").length,
         };
-      }));
+      });
     } catch (error) {
       throw new ProjectRepositoryError("读取本地项目失败", "read_failed", error);
     }
@@ -305,25 +346,32 @@ export class SqliteProjectRepository implements ProjectRepository {
   async get(id: string): Promise<ProjectDetail | null> {
     try {
       await this.initialize();
-      const rows = await this.database.select<ProjectRow>(
-        "SELECT * FROM projects WHERE id = ? LIMIT 1",
-        [id],
-      );
-      if (!rows[0]) return null;
-      const [milestones, tasks, logs, proposals] = await Promise.all([
-        this.listMilestones(id),
-        this.listTasks(id),
+      if (!this.indexCache.has(id)) await this.list();
+      const cached = this.indexCache.get(id);
+      if (!cached) return null;
+      const [logs, proposals] = await Promise.all([
         this.listLogs(id),
         this.listProposals(id),
       ]);
-      return { project: rowToProject(rows[0]), milestones, tasks, logs, proposals };
+      return { ...cached, logs, proposals };
     } catch (error) {
       if (error instanceof ProjectRepositoryError) throw error;
       throw new ProjectRepositoryError("读取项目详情失败", "read_failed", error);
     }
   }
 
+  async listIndexDetails(): Promise<ProjectDetail[]> {
+    await this.initialize();
+    if (!this.indexCache.size) await this.list();
+    return Array.from(this.indexCache.values(), (detail) => ({
+      ...detail,
+      logs: [],
+      proposals: [],
+    }));
+  }
+
   async saveProject(project: Project): Promise<Project> {
+    this.indexCache.clear();
     if (!project.title.trim() || !project.outcome.trim()) {
       throw new ProjectRepositoryError("项目名称和期望结果不能为空", "invalid_data");
     }
@@ -350,6 +398,7 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async updateProjectStatus(id: string, status: ProjectStatus, logBody: string): Promise<void> {
+    this.indexCache.clear();
     const text = logBody.trim();
     if (!text) throw new ProjectRepositoryError("项目状态记录不能为空", "invalid_data");
     try {
@@ -377,6 +426,7 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async saveWorkspace(project: Project, milestones: Milestone[], task: ProjectTask | null, branches: Project[] = []): Promise<Project> {
+    this.indexCache.clear();
     try {
       await this.initialize();
       if (!project.title.trim() || !project.outcome.trim()) {
@@ -418,7 +468,10 @@ export class SqliteProjectRepository implements ProjectRepository {
         projectId: savedProject.id,
         milestoneId: taskMilestoneId,
         title: task.title.trim(),
-        status: savedProject.status === "waiting" ? "waiting" as const : task.status,
+        definitionOfDone: task.definitionOfDone.trim(),
+        steps: normalizeTaskSteps(task.steps),
+        currentFocus: task.currentFocus.trim(),
+        status: task.status,
         waitingFor: task.waitingFor.trim(),
         resumeAction: task.resumeAction.trim(),
         createdAt: task.createdAt || now,
@@ -488,6 +541,7 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async saveMilestone(milestone: Milestone): Promise<Milestone> {
+    this.indexCache.clear();
     if (!milestone.title.trim()) {
       throw new ProjectRepositoryError("里程碑名称不能为空", "invalid_data");
     }
@@ -522,7 +576,59 @@ export class SqliteProjectRepository implements ProjectRepository {
     }
   }
 
+  async completeMilestone(id: string, logBody: string): Promise<Milestone | null> {
+    this.indexCache.clear();
+    const text = logBody.trim();
+    if (!text) throw new ProjectRepositoryError("阶段完成记录不能为空", "invalid_data");
+    try {
+      await this.initialize();
+      const rows = await this.database.select<MilestoneRow>(
+        "SELECT * FROM project_milestones WHERE id = ? LIMIT 1",
+        [id],
+      );
+      const current = rows[0];
+      if (!current) throw new ProjectRepositoryError("没有找到这个阶段", "invalid_data");
+      if (current.status === "completed") return null;
+
+      const milestones = await this.database.select<MilestoneRow>(
+        "SELECT * FROM project_milestones WHERE project_id = ? ORDER BY sort_order ASC, created_at ASC",
+        [current.project_id],
+      );
+      const currentIndex = milestones.findIndex((milestone) => milestone.id === id);
+      const next = milestones.slice(currentIndex + 1).find((milestone) => milestone.status === "planned") ?? null;
+      const now = this.now();
+      const statements: SqliteStatement[] = [
+        {
+          sql: "UPDATE project_milestones SET status = 'completed', updated_at = ? WHERE id = ?",
+          bindValues: [now, id],
+        },
+      ];
+      if (next) {
+        statements.push({
+          sql: "UPDATE project_milestones SET status = 'current', updated_at = ? WHERE id = ?",
+          bindValues: [now, next.id],
+        });
+      }
+      statements.push(
+        {
+          sql: "INSERT INTO project_logs(id, project_id, body, created_at) VALUES (?, ?, ?, ?)",
+          bindValues: [`${current.project_id}-log-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, current.project_id, text, now],
+        },
+        {
+          sql: "UPDATE projects SET updated_at = ? WHERE id = ?",
+          bindValues: [now, current.project_id],
+        },
+      );
+      await executeSqliteTransaction(this.database, statements);
+      return next ? rowToMilestone({ ...next, status: "current", updated_at: now }) : null;
+    } catch (error) {
+      if (error instanceof ProjectRepositoryError) throw error;
+      throw new ProjectRepositoryError("完成阶段失败，原状态已保留", "save_failed", error);
+    }
+  }
+
   async removeProject(id: string): Promise<void> {
+    this.indexCache.clear();
     try {
       await this.initialize();
       const rows = await this.database.select<{ id: string }>(
@@ -572,6 +678,7 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async removeMilestone(id: string): Promise<void> {
+    this.indexCache.clear();
     try {
       await this.initialize();
       const rows = await this.database.select<MilestoneRow>(
@@ -588,6 +695,7 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async saveTask(task: ProjectTask): Promise<ProjectTask> {
+    this.indexCache.clear();
     if (!task.title.trim()) {
       throw new ProjectRepositoryError("行动名称不能为空", "invalid_data");
     }
@@ -598,6 +706,9 @@ export class SqliteProjectRepository implements ProjectRepository {
         ...task,
         id: task.id || `${task.projectId}-task-${Date.now()}`,
         title: task.title.trim(),
+        definitionOfDone: task.definitionOfDone.trim(),
+        steps: normalizeTaskSteps(task.steps),
+        currentFocus: task.currentFocus.trim(),
         waitingFor: task.waitingFor.trim(),
         resumeAction: task.resumeAction.trim(),
         createdAt: task.createdAt || now,
@@ -625,6 +736,7 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async removeTask(id: string): Promise<void> {
+    this.indexCache.clear();
     try {
       await this.initialize();
       const rows = await this.database.select<ProjectTaskRow>(
@@ -653,6 +765,7 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async restoreTask(id: string): Promise<void> {
+    this.indexCache.clear();
     try {
       await this.initialize();
       const rows = await this.database.select<ProjectTaskRow>(
@@ -682,6 +795,7 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async updateTaskStatus(id: string, status: ProjectTaskStatus): Promise<void> {
+    this.indexCache.clear();
     try {
       await this.initialize();
       const rows = await this.database.select<ProjectTaskRow>(
@@ -715,6 +829,7 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async completeTask(id: string, logBody: string): Promise<void> {
+    this.indexCache.clear();
     const text = logBody.trim();
     if (!text) throw new ProjectRepositoryError("完成记录不能为空", "invalid_data");
     try {
@@ -745,7 +860,50 @@ export class SqliteProjectRepository implements ProjectRepository {
     }
   }
 
+  async recordTaskProgress(id: string, result: string, nextFocus: string): Promise<void> {
+    this.indexCache.clear();
+    const progress = result.trim();
+    const focus = nextFocus.trim();
+    if (!progress || !focus) {
+      throw new ProjectRepositoryError("请填写今天完成的进展和下次继续的起点", "invalid_data");
+    }
+    try {
+      await this.initialize();
+      const rows = await this.database.select<ProjectTaskRow>(
+        "SELECT * FROM project_tasks WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+        [id],
+      );
+      if (!rows[0]) throw new ProjectRepositoryError("没有找到这条行动", "invalid_data");
+      if (rows[0].status === "done") throw new ProjectRepositoryError("已完成的行动无需记录今日续作", "invalid_data");
+      const now = this.now();
+      const body = `行动推进｜${JSON.stringify({
+        taskId: id,
+        title: rows[0].title,
+        result: progress,
+        nextFocus: focus,
+      })}`;
+      await executeSqliteTransaction(this.database, [
+        {
+          sql: "UPDATE project_tasks SET current_focus = ?, resume_action = ?, updated_at = ? WHERE id = ?",
+          bindValues: [focus, focus, now, id],
+        },
+        {
+          sql: "INSERT INTO project_logs(id, project_id, body, created_at) VALUES (?, ?, ?, ?)",
+          bindValues: [`${rows[0].project_id}-log-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, rows[0].project_id, body, now],
+        },
+        {
+          sql: "UPDATE projects SET updated_at = ? WHERE id = ?",
+          bindValues: [now, rows[0].project_id],
+        },
+      ]);
+    } catch (error) {
+      if (error instanceof ProjectRepositoryError) throw error;
+      throw new ProjectRepositoryError("保存今日进展失败，行动内容已保留", "save_failed", error);
+    }
+  }
+
   async saveProposal(proposal: ProjectProposal): Promise<ProjectProposal> {
+    this.indexCache.clear();
     if (!proposal.title.trim()) {
       throw new ProjectRepositoryError("想法名称不能为空", "invalid_data");
     }
@@ -773,6 +931,7 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async updateProposalStatus(id: string, status: ProposalStatus, reviewNote: string): Promise<void> {
+    this.indexCache.clear();
     try {
       await this.initialize();
       const rows = await this.database.select<ProjectProposalRow>(
@@ -793,6 +952,7 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async removeProposal(id: string): Promise<void> {
+    this.indexCache.clear();
     try {
       await this.initialize();
       const rows = await this.database.select<ProjectProposalRow>(
@@ -812,6 +972,7 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async addLog(projectId: string, body: string): Promise<ProjectLog> {
+    this.indexCache.clear();
     const text = body.trim();
     if (!text) throw new ProjectRepositoryError("推进记录不能为空", "invalid_data");
     try {
@@ -836,6 +997,7 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async confirmProject(id: string): Promise<void> {
+    this.indexCache.clear();
     try {
       await this.initialize();
       const now = this.now();
@@ -934,8 +1096,8 @@ export class SqliteProjectRepository implements ProjectRepository {
     await this.database.execute(
       `INSERT INTO projects(
         id, title, outcome, motivation, project_type, parent_project_id, supports_milestone_id,
-        status, category, sort_order, is_draft, source_note, review_date, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        status, category, sort_order, is_draft, source_note, target_date, review_date, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO ${seed ? "NOTHING" : `UPDATE SET
         title = excluded.title,
         outcome = excluded.outcome,
@@ -948,6 +1110,7 @@ export class SqliteProjectRepository implements ProjectRepository {
         sort_order = excluded.sort_order,
         is_draft = excluded.is_draft,
         source_note = excluded.source_note,
+        target_date = excluded.target_date,
         review_date = excluded.review_date,
         updated_at = excluded.updated_at`}`,
       [
@@ -963,6 +1126,7 @@ export class SqliteProjectRepository implements ProjectRepository {
         project.sortOrder,
         project.isDraft ? 1 : 0,
         project.sourceNote,
+        project.targetDate,
         project.reviewDate,
         project.createdAt,
         project.updatedAt,
@@ -999,13 +1163,16 @@ export class SqliteProjectRepository implements ProjectRepository {
   private async writeTask(task: ProjectTask, seed: boolean) {
     await this.database.execute(
       `INSERT INTO project_tasks(
-        id, project_id, milestone_id, title, action_type, details, benefit, due_date,
+        id, project_id, milestone_id, title, action_type, definition_of_done, steps_json, current_focus, details, benefit, due_date,
         status, waiting_for, resume_action, context, sort_order, created_at, updated_at, completed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO ${seed ? "NOTHING" : `UPDATE SET
         milestone_id = excluded.milestone_id,
         title = excluded.title,
         action_type = excluded.action_type,
+        definition_of_done = excluded.definition_of_done,
+        steps_json = excluded.steps_json,
+        current_focus = excluded.current_focus,
         details = excluded.details,
         benefit = excluded.benefit,
         due_date = excluded.due_date,
@@ -1022,6 +1189,9 @@ export class SqliteProjectRepository implements ProjectRepository {
         task.milestoneId,
         task.title,
         task.actionType,
+        task.definitionOfDone,
+        JSON.stringify(normalizeTaskSteps(task.steps)),
+        task.currentFocus,
         task.details,
         task.benefit,
         task.dueDate,
@@ -1075,11 +1245,12 @@ function rowToProject(row: ProjectRow): Project {
     projectType: row.project_type || "main",
     parentProjectId: row.parent_project_id || null,
     supportsMilestoneId: row.supports_milestone_id || null,
-    status: row.status,
+    status: row.status === "waiting" ? "paused" : row.status,
     category: normalizeLifeDomain(row.category),
     sortOrder: Number(row.sort_order),
     isDraft: Boolean(row.is_draft),
     sourceNote: row.source_note,
+    targetDate: row.target_date || "",
     reviewDate: row.review_date,
     completedAt: row.completed_at,
     createdAt: row.created_at,
@@ -1108,6 +1279,9 @@ function rowToTask(row: ProjectTaskRow): ProjectTask {
     milestoneId: row.milestone_id,
     title: row.title,
     actionType: row.action_type,
+    definitionOfDone: row.definition_of_done || "",
+    steps: parseTaskSteps(row.steps_json),
+    currentFocus: row.current_focus || "",
     details: row.details,
     benefit: row.benefit,
     dueDate: row.due_date,
@@ -1150,19 +1324,19 @@ function projectWriteStatement(project: Project): SqliteStatement {
   return {
     sql: `INSERT INTO projects(
       id, title, outcome, motivation, project_type, parent_project_id, supports_milestone_id,
-      status, category, sort_order, is_draft, source_note, review_date, completed_at, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      status, category, sort_order, is_draft, source_note, target_date, review_date, completed_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title, outcome = excluded.outcome, motivation = excluded.motivation,
       project_type = excluded.project_type, parent_project_id = excluded.parent_project_id,
       supports_milestone_id = excluded.supports_milestone_id,
       status = excluded.status, category = excluded.category, sort_order = excluded.sort_order,
       is_draft = excluded.is_draft, source_note = excluded.source_note,
-      review_date = excluded.review_date, completed_at = excluded.completed_at,
+      target_date = excluded.target_date, review_date = excluded.review_date, completed_at = excluded.completed_at,
       updated_at = excluded.updated_at`,
     bindValues: [project.id, project.title, project.outcome, project.motivation, project.projectType,
       project.parentProjectId, project.supportsMilestoneId, project.status, project.category,
-      project.sortOrder, project.isDraft ? 1 : 0, project.sourceNote, project.reviewDate, project.completedAt,
+      project.sortOrder, project.isDraft ? 1 : 0, project.sourceNote, project.targetDate, project.reviewDate, project.completedAt,
       project.createdAt, project.updatedAt],
   };
 }
@@ -1184,21 +1358,46 @@ function milestoneWriteStatement(milestone: Milestone): SqliteStatement {
 function taskWriteStatement(task: ProjectTask): SqliteStatement {
   return {
     sql: `INSERT INTO project_tasks(
-      id, project_id, milestone_id, title, action_type, details, benefit, due_date,
+      id, project_id, milestone_id, title, action_type, definition_of_done, steps_json, current_focus, details, benefit, due_date,
       status, waiting_for, resume_action, context, sort_order, created_at, updated_at, completed_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       milestone_id = excluded.milestone_id, title = excluded.title,
-      action_type = excluded.action_type, details = excluded.details,
+      action_type = excluded.action_type, definition_of_done = excluded.definition_of_done,
+      steps_json = excluded.steps_json, current_focus = excluded.current_focus, details = excluded.details,
       benefit = excluded.benefit, due_date = excluded.due_date, status = excluded.status,
       waiting_for = excluded.waiting_for, resume_action = excluded.resume_action,
       context = excluded.context, sort_order = excluded.sort_order,
       updated_at = excluded.updated_at, completed_at = excluded.completed_at,
       deleted_at = NULL, deleted_plan_json = ''`,
     bindValues: [task.id, task.projectId, task.milestoneId, task.title, task.actionType,
+      task.definitionOfDone, JSON.stringify(normalizeTaskSteps(task.steps)), task.currentFocus,
       task.details, task.benefit, task.dueDate, task.status, task.waitingFor,
       task.resumeAction, task.context, task.sortOrder, task.createdAt, task.updatedAt, task.completedAt],
   };
+}
+
+function normalizeTaskSteps(steps: ProjectTask["steps"] | undefined): ProjectTask["steps"] {
+  return (steps ?? [])
+    .map((step, index) => ({
+      id: step.id || `step-${Date.now()}-${index}`,
+      title: step.title.trim(),
+      completed: Boolean(step.completed),
+    }))
+    .filter((step) => step.title);
+}
+
+function parseTaskSteps(value: string | undefined): ProjectTask["steps"] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return normalizeTaskSteps(parsed.filter((step): step is ProjectTask["steps"][number] => (
+      Boolean(step) && typeof step.id === "string" && typeof step.title === "string"
+    )));
+  } catch {
+    return [];
+  }
 }
 
 function parseTaskPlanSnapshot(value: string): TaskPlanSnapshotRow | null {

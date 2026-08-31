@@ -1,12 +1,14 @@
 import type { QuickLink, WorkspacePreferences } from "../workspace-preferences";
-import { addDefaultEntertainmentLinks, normalizeAvatarDataUrl, normalizeDisplayName, normalizeQuickLinks } from "../workspace-preferences";
+import { addDefaultAiLinks, addDefaultEntertainmentLinks, normalizeAvatarDataUrl, normalizeDisplayName, normalizeQuickLinks } from "../workspace-preferences";
 import type { SqliteDatabase } from "./sqlite-article-repository";
 
 const displayNameKey = "workspace_display_name";
 const avatarDataUrlKey = "workspace_avatar_data_url";
 const legacyQuickLinksKeyV1 = "workspace_quick_links_v1";
 const legacyQuickLinksKeyV2 = "workspace_quick_links_v2";
-const quickLinksKey = "workspace_quick_links_v3";
+const legacyQuickLinksKeyV3 = "workspace_quick_links_v3";
+const legacyQuickLinksKeyV4 = "workspace_quick_links_v4";
+const quickLinksKey = "workspace_quick_links_v5";
 
 export class WorkspacePreferencesRepository {
   private initialization: Promise<void> | null = null;
@@ -24,18 +26,22 @@ export class WorkspacePreferencesRepository {
     await this.initialization;
   }
 
+  async ready() {
+    await this.initialize();
+  }
+
   async getPreferences(): Promise<WorkspacePreferences> {
     await this.initialize();
     const rows = await this.database.select<{ key: string; value: string }>(
-      "SELECT key, value FROM app_meta WHERE key IN (?, ?, ?, ?, ?)",
-      [displayNameKey, avatarDataUrlKey, quickLinksKey, legacyQuickLinksKeyV2, legacyQuickLinksKeyV1],
+      "SELECT key, value FROM app_meta WHERE key IN (?, ?, ?, ?, ?, ?, ?)",
+      [displayNameKey, avatarDataUrlKey, quickLinksKey, legacyQuickLinksKeyV4, legacyQuickLinksKeyV3, legacyQuickLinksKeyV2, legacyQuickLinksKeyV1],
     );
     const values = new Map(rows.map((row) => [row.key, row.value]));
     let quickLinks = parseQuickLinks(values.get(quickLinksKey));
     if (!quickLinks) {
-      const legacyQuickLinks = parseQuickLinks(values.get(legacyQuickLinksKeyV2)) ?? parseQuickLinks(values.get(legacyQuickLinksKeyV1));
+      const legacyQuickLinks = parseQuickLinks(values.get(legacyQuickLinksKeyV4)) ?? parseQuickLinks(values.get(legacyQuickLinksKeyV3)) ?? parseQuickLinks(values.get(legacyQuickLinksKeyV2)) ?? parseQuickLinks(values.get(legacyQuickLinksKeyV1));
       if (legacyQuickLinks) {
-        quickLinks = addDefaultEntertainmentLinks(legacyQuickLinks);
+        quickLinks = addDefaultAiLinks(addDefaultEntertainmentLinks(legacyQuickLinks));
         await this.write(quickLinksKey, JSON.stringify(quickLinks));
       }
     }

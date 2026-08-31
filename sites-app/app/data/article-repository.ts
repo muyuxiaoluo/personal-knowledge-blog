@@ -18,6 +18,8 @@ export type RemoteApplyResult = {
 
 export interface ArticleRepository {
   list(): Promise<StoredArticle[]>;
+  listSummaries(limit?: number, offset?: number, query?: string): Promise<StoredArticle[]>;
+  get(id: string): Promise<StoredArticle | null>;
   save(article: Article): Promise<StoredArticle>;
   remove(id: string): Promise<void>;
   restore(id: string): Promise<StoredArticle>;

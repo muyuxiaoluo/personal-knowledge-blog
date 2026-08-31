@@ -1,21 +1,38 @@
 import http from "node:http";
+import { createHash, randomUUID } from "node:crypto";
+import { once } from "node:events";
+import fs from "node:fs";
+import path from "node:path";
 import { ClientInputError } from "./database.mjs";
 import { issueAccessToken, verifyAccessToken } from "./security.mjs";
 
 const maxBodyBytes = 5 * 1024 * 1024;
+const maxBlobBytes = 25 * 1024 * 1024;
 const maxRateLimitEntries = 10_000;
 const rateLimitWindowMs = 15 * 60 * 1000;
+
+// 默认放行桌面端 Tauri webview 的来源（Windows/macOS/Linux 及开发模式），
+// 避免开放 `*` 后任意网页都能直接调用登录等接口。
+const defaultAllowedOrigins = [
+  "http://tauri.localhost",
+  "https://tauri.localhost",
+  "tauri://localhost",
+  "http://localhost",
+  "http://localhost:1420",
+];
 
 export function createSyncServer({
   database,
   authSecret,
   logger = console,
   trustProxy = false,
+  allowedOrigins = defaultAllowedOrigins,
 }) {
   const attempts = new Map();
+  const cors = createCorsPolicy(allowedOrigins);
 
   const server = http.createServer(async (request, response) => {
-    setCommonHeaders(response);
+    applyCorsHeaders(request, response, cors);
     if (request.method === "OPTIONS") {
       response.writeHead(204);
       response.end();
@@ -24,10 +41,11 @@ export function createSyncServer({
 
     const url = new URL(request.url || "/", "http://localhost");
     try {
-      if (request.method === "GET" && url.pathname === "/v1/health") {
+      if (request.method === "GET" && ["/v1/health", "/v3/health"].includes(url.pathname)) {
         sendJson(response, 200, {
           status: "ok",
           service: "mind-garden-sync",
+          protocolVersions: [2, 3],
         });
         return;
       }
@@ -50,11 +68,38 @@ export function createSyncServer({
         }
         attempts.delete(client);
         const access = issueAccessToken(user, authSecret);
+        const refresh = database.createRefreshSession(user, body.deviceId);
         sendJson(response, 200, {
           accessToken: access.token,
           expiresAt: access.expiresAt,
           username: user.username,
+          ...refresh,
         });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/v3/auth/refresh") {
+        const body = await readJson(request);
+        const rotated = database.rotateRefreshSession(body.refreshToken);
+        if (!rotated) {
+          sendJson(response, 401, { error: "登录已过期，请重新登录。" });
+          return;
+        }
+        const access = issueAccessToken(rotated.user, authSecret);
+        sendJson(response, 200, {
+          accessToken: access.token,
+          expiresAt: access.expiresAt,
+          username: rotated.user.username,
+          refreshToken: rotated.refreshToken,
+          refreshExpiresAt: rotated.refreshExpiresAt,
+        });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/v3/auth/logout") {
+        const body = await readJson(request);
+        database.revokeRefreshSession(body.refreshToken);
+        sendJson(response, 200, { loggedOut: true });
         return;
       }
 
@@ -68,6 +113,59 @@ export function createSyncServer({
         const body = await readJson(request);
         const result = database.sync(Number(user.sub), body);
         sendJson(response, 200, result);
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/v3/sync") {
+        const body = await readJson(request);
+        const result = database.syncV3(Number(user.sub), body);
+        sendJson(response, 200, result);
+        return;
+      }
+
+      const blobMatch = /^\/v3\/blobs\/([a-f\d]{64})$/i.exec(url.pathname);
+      if (blobMatch && request.method === "HEAD") {
+        const blob = database.getBlob(Number(user.sub), blobMatch[1]);
+        if (!blob) {
+          response.writeHead(404);
+          response.end();
+          return;
+        }
+        response.writeHead(200, {
+          "Content-Type": blob.mimeType,
+          "Content-Length": String(blob.bytes),
+          ETag: `"sha256-${blobMatch[1].toLowerCase()}"`,
+        });
+        response.end();
+        return;
+      }
+
+      if (blobMatch && request.method === "GET") {
+        const blob = database.getBlob(Number(user.sub), blobMatch[1]);
+        if (!blob) {
+          sendJson(response, 404, { error: "附件不存在。" });
+          return;
+        }
+        response.writeHead(200, {
+          "Content-Type": blob.mimeType,
+          "Content-Length": String(blob.bytes),
+          ETag: `"sha256-${blobMatch[1].toLowerCase()}"`,
+        });
+        fs.createReadStream(blob.path).on("error", (error) => response.destroy(error)).pipe(response);
+        return;
+      }
+
+      if (blobMatch && request.method === "PUT") {
+        const stored = await receiveBlob(
+          request,
+          database,
+          Number(user.sub),
+          blobMatch[1],
+        );
+        sendJson(response, stored.created ? 201 : 200, {
+          sha256: blobMatch[1].toLowerCase(),
+          bytes: stored.bytes,
+        });
         return;
       }
 
@@ -141,16 +239,36 @@ function sendJson(response, status, value) {
   response.end(body);
 }
 
-function setCommonHeaders(response) {
-  response.setHeader("Access-Control-Allow-Origin", "*");
+// 构造 CORS 策略：支持 `*` 显式恢复全放开，其余值按精确来源匹配。
+function createCorsPolicy(allowedOrigins) {
+  const origins = new Set(
+    allowedOrigins
+      .map((value) => String(value).trim())
+      .filter(Boolean),
+  );
+  if (!origins.size) {
+    throw new Error("allowedOrigins 至少需要包含一个来源。");
+  }
+  return { origins, allowAll: origins.has("*") };
+}
+
+// 按请求的 Origin 头应用 CORS 与通用安全响应头：
+// 无 Origin（非浏览器客户端）或来源不在白名单时，不输出 CORS 头，
+// 由浏览器端拦截；安全头始终输出。
+function applyCorsHeaders(request, response, cors) {
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  const origin = request.headers.origin;
+  if (typeof origin !== "string" || !origin) return;
+  if (!cors.allowAll && !cors.origins.has(origin)) return;
+  response.setHeader("Access-Control-Allow-Origin", cors.allowAll ? "*" : origin);
   response.setHeader(
     "Access-Control-Allow-Headers",
     "Authorization, Content-Type",
   );
-  response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  response.setHeader("Cache-Control", "no-store");
-  response.setHeader("X-Content-Type-Options", "nosniff");
-  response.setHeader("Referrer-Policy", "no-referrer");
+  response.setHeader("Access-Control-Allow-Methods", "GET, HEAD, PUT, POST, OPTIONS");
+  if (!cors.allowAll) response.setHeader("Vary", "Origin");
 }
 
 function clientAddress(request, trustProxy) {
@@ -200,7 +318,10 @@ function validateLoginBody(body) {
   const username = validateText(body.username, "账户", 1, 100).trim();
   const password = validateText(body.password, "密码", 1, 512, true);
   if (!username) throw new ClientInputError("账户不能为空。");
-  return { username, password };
+  const deviceId = body.deviceId === undefined
+    ? ""
+    : validateText(body.deviceId, "设备 ID", 0, 200).trim();
+  return { username, password, deviceId };
 }
 
 function validatePasswordChange(body) {
@@ -232,6 +353,52 @@ function validateText(value, label, minimum, maximumBytes, preserveWhitespace) {
 
 function isRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+async function receiveBlob(request, database, userId, requestedHash) {
+  const hash = requestedHash.toLowerCase();
+  const mimeType = String(request.headers["content-type"] || "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  if (!/^image\/(?:png|jpeg|gif|webp|bmp)$/.test(mimeType)) {
+    throw new ClientInputError("Blob Content-Type 不受支持");
+  }
+  const declaredLength = Number(request.headers["content-length"] || 0);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBlobBytes) {
+    throw new RequestTooLargeError();
+  }
+  const target = database.blobPath(hash);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const temporary = path.join(path.dirname(target), `.${hash}.${randomUUID()}.tmp`);
+  const output = fs.createWriteStream(temporary, { flags: "wx" });
+  const hasher = createHash("sha256");
+  let bytes = 0;
+  try {
+    for await (const chunk of request) {
+      bytes += chunk.length;
+      if (bytes > maxBlobBytes) throw new RequestTooLargeError();
+      hasher.update(chunk);
+      if (!output.write(chunk)) await once(output, "drain");
+    }
+    if (!bytes) throw new ClientInputError("Blob 内容为空");
+    output.end();
+    await once(output, "finish");
+  } catch (error) {
+    output.destroy();
+    await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
+  const actualHash = hasher.digest("hex");
+  if (actualHash !== hash) {
+    await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
+    throw new ClientInputError("Blob 内容与 URL 哈希不一致");
+  }
+  const created = !fs.existsSync(target);
+  if (created) await fs.promises.rename(temporary, target);
+  else await fs.promises.rm(temporary, { force: true });
+  database.registerBlob(userId, hash, bytes, mimeType);
+  return { created, bytes };
 }
 
 class RequestTooLargeError extends Error {}

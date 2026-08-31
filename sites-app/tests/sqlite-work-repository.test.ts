@@ -81,7 +81,7 @@ test("can repair an unfinished focus session with an explicit end time", async (
   );
 });
 
-test("persists weekly focus and daily closeout", async () => {
+test("persists weekly focus, weekly calibration, and legacy daily closeout", async () => {
   const repository = new SqliteWorkRepository(
     new NodeSqliteAdapter(),
     () => new Date("2026-08-13T13:00:00.000Z"),
@@ -94,6 +94,21 @@ test("persists weekly focus and daily closeout", async () => {
     updatedAt: "",
   });
   assert.equal((await repository.getWeeklyFocus("2026-08-10"))?.primaryOutcome, "完成 v0.4 正式版");
+
+  await repository.saveWeeklyReview({
+    weekStart: "2026-08-10",
+    outcomeStatus: "partial",
+    factor: "scope",
+    factorNote: " 低估了收尾范围 ",
+    nextStrategy: "narrow",
+    adjustment: " 下周只保留发布主线 ",
+    updatedAt: "",
+  });
+  const review = await repository.getWeeklyReview("2026-08-10");
+  assert.equal(review?.outcomeStatus, "partial");
+  assert.equal(review?.factorNote, "低估了收尾范围");
+  assert.equal(review?.nextStrategy, "narrow");
+  assert.equal(review?.adjustment, "下周只保留发布主线");
 
   await repository.saveDailyCloseout({
     date: "2026-08-13",

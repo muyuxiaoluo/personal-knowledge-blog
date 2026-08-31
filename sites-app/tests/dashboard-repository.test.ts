@@ -99,6 +99,27 @@ test("creates, updates and deletes local calendar events", async () => {
   database.close();
 });
 
+test("creates and removes explicit rest-day records", async () => {
+  const database = new DatabaseSync(":memory:");
+  let now = new Date("2026-08-24T01:00:00Z");
+  const repository = new DashboardRepository(new NodeSqliteAdapter(database), () => now);
+  const saved = await repository.saveRestDay("2026-08-24", "  放空一天  ");
+  assert.equal(saved.date, "2026-08-24");
+  assert.equal(saved.note, "放空一天");
+  assert.equal(saved.createdAt, "2026-08-24T01:00:00.000Z");
+
+  now = new Date("2026-08-25T01:00:00Z");
+  const updated = await repository.saveRestDay("2026-08-24", "恢复精力");
+  assert.equal(updated.createdAt, saved.createdAt);
+  assert.equal(updated.updatedAt, "2026-08-25T01:00:00.000Z");
+  assert.equal((await repository.listRestDays())[0]?.note, "恢复精力");
+
+  await repository.deleteRestDay("2026-08-24");
+  assert.equal((await repository.listRestDays()).length, 0);
+  await assert.rejects(() => repository.saveRestDay("2026-02-30"), /日期/);
+  database.close();
+});
+
 test("rejects invalid calendar dates instead of rolling them into another month", async () => {
   const database = new DatabaseSync(":memory:");
   const repository = new DashboardRepository(new NodeSqliteAdapter(database), () => new Date("2026-08-24T01:00:00Z"));
@@ -150,6 +171,7 @@ test("includes dashboard preferences and calendar events in a full database back
       createdAt: "",
       updatedAt: "",
     });
+    await dashboard.saveRestDay("2026-08-24");
     await articles.createBackup(backupPath);
     database.close();
 
@@ -157,6 +179,7 @@ test("includes dashboard preferences and calendar events in a full database back
     const restored = new DatabaseSync(restoredPath, { readOnly: true });
     assert.equal(restored.prepare("SELECT city_name FROM dashboard_preferences WHERE id = 1").get().city_name, "成都");
     assert.equal(restored.prepare("SELECT title FROM calendar_events WHERE id = 'event-backup'").get().title, "备份里的重要日期");
+    assert.equal(restored.prepare("SELECT rest_date FROM rest_days WHERE rest_date = '2026-08-24'").get().rest_date, "2026-08-24");
     restored.close();
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

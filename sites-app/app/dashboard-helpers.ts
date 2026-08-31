@@ -1,13 +1,15 @@
 import { Lunar } from "lunar-javascript";
 import { calendarDayDifference } from "./date-helpers";
+import { normalizeAiHighlightKeywords } from "./dashboard-normalization";
 import type {
   AiBriefItem,
   CalendarEvent,
   CalendarOccurrence,
-  ExternalSourceInput,
   WeatherHour,
   WeatherSnapshot,
 } from "./dashboard-types";
+
+export { normalizeAiHighlightKeywords, normalizeExternalSourceInput } from "./dashboard-normalization";
 
 export type RainVerdict = {
   tone: "expected" | "possible" | "unlikely";
@@ -24,40 +26,9 @@ export function morningBriefRefreshSlot(valueDate: string | null, nowDate: strin
   return `${nowDate}:after-11`;
 }
 
-export function normalizeAiHighlightKeywords(input: string | string[]) {
-  const values = Array.isArray(input) ? input : input.split(/[\n,，;；]+/);
-  const seen = new Set<string>();
-  return values.flatMap((value) => {
-    const keyword = value.trim().slice(0, 20);
-    const key = keyword.toLocaleLowerCase("zh-CN");
-    if (!keyword || seen.has(key) || seen.size >= 12) return [];
-    seen.add(key);
-    return [keyword];
-  });
-}
-
 export function matchingAiKeywords(item: Pick<AiBriefItem, "title" | "summary" | "reason" | "category">, keywords: string[]) {
   const content = `${item.title}\n${item.summary}\n${item.reason}\n${item.category}`.toLocaleLowerCase("zh-CN");
   return normalizeAiHighlightKeywords(keywords).filter((keyword) => content.includes(keyword.toLocaleLowerCase("zh-CN")));
-}
-
-export function normalizeExternalSourceInput(input: ExternalSourceInput, fallbackSourceLabel: string) {
-  const url = input.url.trim();
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new Error("收藏链接格式不正确");
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("收藏链接必须使用 HTTP 或 HTTPS");
-  const summary = input.summary?.trim().slice(0, 4_000) || "";
-  const fallbackTitle = summary.split("\n").find((line) => line.trim())?.trim() || `${fallbackSourceLabel} · 待看内容`;
-  return {
-    url: parsed.toString(),
-    title: input.title?.trim().slice(0, 120) || (fallbackTitle.length > 34 ? `${fallbackTitle.slice(0, 34)}…` : fallbackTitle),
-    summary,
-    sourceLabel: input.sourceLabel?.trim().slice(0, 60) || fallbackSourceLabel,
-  };
 }
 
 export function rainVerdict(snapshot: WeatherSnapshot, nowLocal = snapshot.current.time): RainVerdict {

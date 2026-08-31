@@ -189,6 +189,7 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
   private initialization: Promise<void> | null = null;
   private resolvedDeviceId = "";
   private mutationQueue: Promise<void> = Promise.resolve();
+  private ftsAvailable = false;
 
   constructor(
     private readonly database: SqliteDatabase,
@@ -253,6 +254,45 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
     for (const article of this.options.seedArticles ?? []) {
       await this.insertSeed(article);
     }
+    await this.initializeSearchIndex();
+  }
+
+  private async initializeSearchIndex() {
+    try {
+      await this.database.execute(
+        `CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5(
+          id UNINDEXED, title, summary, tags, project, category, body,
+          tokenize='trigram'
+        )`,
+      );
+      await this.database.execute(`CREATE TRIGGER IF NOT EXISTS articles_fts_insert AFTER INSERT ON articles BEGIN
+        INSERT INTO articles_fts(id, title, summary, tags, project, category, body)
+        SELECT NEW.id, NEW.title, NEW.summary, NEW.tags_json, NEW.project, NEW.category, NEW.body
+        WHERE NEW.deleted_at IS NULL;
+      END`);
+      await this.database.execute(`CREATE TRIGGER IF NOT EXISTS articles_fts_update AFTER UPDATE ON articles BEGIN
+        DELETE FROM articles_fts WHERE id = OLD.id;
+        INSERT INTO articles_fts(id, title, summary, tags, project, category, body)
+        SELECT NEW.id, NEW.title, NEW.summary, NEW.tags_json, NEW.project, NEW.category, NEW.body
+        WHERE NEW.deleted_at IS NULL;
+      END`);
+      await this.database.execute(`CREATE TRIGGER IF NOT EXISTS articles_fts_delete AFTER DELETE ON articles BEGIN
+        DELETE FROM articles_fts WHERE id = OLD.id;
+      END`);
+      await this.database.execute(
+        "DELETE FROM articles_fts WHERE id NOT IN (SELECT id FROM articles WHERE deleted_at IS NULL)",
+      );
+      await this.database.execute(
+        `INSERT INTO articles_fts(id, title, summary, tags, project, category, body)
+         SELECT article.id, article.title, article.summary, article.tags_json, article.project, article.category, article.body
+         FROM articles article
+         WHERE article.deleted_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM articles_fts indexed WHERE indexed.id = article.id)`,
+      );
+      this.ftsAvailable = true;
+    } catch {
+      this.ftsAvailable = false;
+    }
   }
 
   private async insertSeed(article: Article) {
@@ -309,6 +349,64 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
       return sortArticles(rows.map(rowToArticle));
     } catch (error) {
       throw new ArticleRepositoryError("读取本地 SQLite 失败", "read_failed", error);
+    }
+  }
+
+  async listSummaries(limit = 50, offset = 0, query = ""): Promise<StoredArticle[]> {
+    try {
+      await this.initialize();
+      await this.mutationQueue;
+      const safeLimit = Number.isSafeInteger(limit) ? Math.min(200, Math.max(1, limit)) : 50;
+      const safeOffset = Number.isSafeInteger(offset) ? Math.max(0, offset) : 0;
+      const search = query.trim();
+      const summaryColumns = articleColumns.replace("body,", "'' AS body,");
+      let rows: ArticleRow[];
+      if (search && this.ftsAvailable && Array.from(search).length >= 3) {
+        const expression = `"${search.replaceAll('"', '""')}"`;
+        rows = await this.database.select<ArticleRow>(
+          `SELECT ${summaryColumns}
+           FROM articles
+           WHERE deleted_at IS NULL
+             AND id IN (SELECT id FROM articles_fts WHERE articles_fts MATCH ?)
+           ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+          [expression, safeLimit, safeOffset],
+        );
+      } else if (search) {
+        const like = `%${search.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`;
+        rows = await this.database.select<ArticleRow>(
+          `SELECT ${summaryColumns}
+           FROM articles
+           WHERE deleted_at IS NULL AND (
+             title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR tags_json LIKE ? ESCAPE '\\'
+             OR project LIKE ? ESCAPE '\\' OR category LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\'
+           ) ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+          [like, like, like, like, like, like, safeLimit, safeOffset],
+        );
+      } else {
+        rows = await this.database.select<ArticleRow>(
+          `SELECT ${summaryColumns}
+           FROM articles WHERE deleted_at IS NULL
+           ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+          [safeLimit, safeOffset],
+        );
+      }
+      return rows.map(rowToArticle);
+    } catch (error) {
+      throw new ArticleRepositoryError("读取笔记摘要失败", "read_failed", error);
+    }
+  }
+
+  async get(id: string): Promise<StoredArticle | null> {
+    try {
+      await this.initialize();
+      await this.mutationQueue;
+      const rows = await this.database.select<ArticleRow>(
+        `SELECT ${articleColumns} FROM articles WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+        [id],
+      );
+      return rows[0] ? rowToArticle(rows[0]) : null;
+    } catch (error) {
+      throw new ArticleRepositoryError("读取笔记正文失败", "read_failed", error);
     }
   }
 
@@ -465,6 +563,10 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
         versions.map(markSyncedStatement),
       ),
     );
+  }
+
+  async ready() {
+    await this.initialize();
   }
 
   async restore(id: string): Promise<StoredArticle> {

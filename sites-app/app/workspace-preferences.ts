@@ -22,15 +22,20 @@ export type WorkspacePreferences = {
 
 export const defaultQuickLinks: QuickLink[] = [
   { id: "deepseek", title: "DeepSeek", url: "https://chat.deepseek.com", category: "general", area: "ai", openMode: "external", allowInsecureHttp: false, pinned: true, order: 0 },
-  { id: "qwen", title: "Qwen", url: "https://chat.qwen.ai", category: "general", area: "ai", openMode: "external", allowInsecureHttp: false, pinned: false, order: 1 },
+  { id: "qwen", title: "千问", url: "https://www.qianwen.com/", category: "general", area: "ai", openMode: "external", allowInsecureHttp: false, pinned: false, order: 1 },
   { id: "gemini", title: "Gemini", url: "https://gemini.google.com", category: "general", area: "ai", openMode: "external", allowInsecureHttp: false, pinned: false, order: 2 },
   { id: "grok", title: "Grok", url: "https://grok.com", category: "general", area: "ai", openMode: "external", allowInsecureHttp: false, pinned: false, order: 3 },
-  { id: "bilibili", title: "哔哩哔哩", url: "https://www.bilibili.com", category: "content", area: "entertainment", openMode: "internal", allowInsecureHttp: false, pinned: true, order: 4 },
-  { id: "douyin", title: "抖音", url: "https://www.douyin.com", category: "content", area: "entertainment", openMode: "internal", allowInsecureHttp: false, pinned: false, order: 5 },
-  { id: "zotero", title: "Zotero", url: "https://www.zotero.org", category: "research", area: "web", openMode: "external", allowInsecureHttp: false, pinned: true, order: 6 },
-  { id: "github", title: "GitHub", url: "https://github.com", category: "creative", area: "development", openMode: "internal", allowInsecureHttp: false, pinned: true, order: 7 },
-  { id: "arxiv", title: "arXiv", url: "https://arxiv.org", category: "research", area: "web", openMode: "external", allowInsecureHttp: false, pinned: false, order: 8 },
-  { id: "scholar", title: "Google 学术", url: "https://scholar.google.com", category: "research", area: "web", openMode: "external", allowInsecureHttp: false, pinned: false, order: 9 },
+  { id: "chatgpt", title: "ChatGPT", url: "https://chatgpt.com", category: "general", area: "ai", openMode: "external", allowInsecureHttp: false, pinned: false, order: 4 },
+  { id: "doubao", title: "豆包", url: "https://www.doubao.com/chat/", category: "general", area: "ai", openMode: "external", allowInsecureHttp: false, pinned: false, order: 5 },
+  { id: "zhipu", title: "智谱清言", url: "https://chatglm.cn/", category: "general", area: "ai", openMode: "external", allowInsecureHttp: false, pinned: false, order: 6 },
+  { id: "claude", title: "Claude", url: "https://claude.ai/", category: "general", area: "ai", openMode: "external", allowInsecureHttp: false, pinned: false, order: 7 },
+  { id: "kimi", title: "Kimi", url: "https://www.kimi.com/zh/", category: "general", area: "ai", openMode: "external", allowInsecureHttp: false, pinned: false, order: 8 },
+  { id: "bilibili", title: "哔哩哔哩", url: "https://www.bilibili.com", category: "content", area: "entertainment", openMode: "internal", allowInsecureHttp: false, pinned: true, order: 9 },
+  { id: "douyin", title: "抖音", url: "https://www.douyin.com", category: "content", area: "entertainment", openMode: "internal", allowInsecureHttp: false, pinned: false, order: 10 },
+  { id: "zotero", title: "Zotero", url: "https://www.zotero.org", category: "research", area: "web", openMode: "external", allowInsecureHttp: false, pinned: true, order: 11 },
+  { id: "github", title: "GitHub", url: "https://github.com", category: "creative", area: "development", openMode: "internal", allowInsecureHttp: false, pinned: true, order: 12 },
+  { id: "arxiv", title: "arXiv", url: "https://arxiv.org", category: "research", area: "web", openMode: "external", allowInsecureHttp: false, pinned: false, order: 13 },
+  { id: "scholar", title: "Google 学术", url: "https://scholar.google.com", category: "research", area: "web", openMode: "external", allowInsecureHttp: false, pinned: false, order: 14 },
 ];
 
 export function normalizeDisplayName(value: string) {
@@ -109,6 +114,19 @@ export function addDefaultEntertainmentLinks(links: QuickLink[]) {
     .filter((link) => !existingHosts.has(hostOf(link.url)))
     .map((link, index) => ({ ...link, order: migrated.length + index }));
   return [...migrated, ...additions];
+}
+
+export function addDefaultAiLinks(links: QuickLink[]) {
+  const defaults = defaultQuickLinks.filter((link) => link.area === "ai" && link.id !== "deepseek");
+  const upgraded = links.map((link) => link.area === "ai" && link.id === "qwen"
+    ? { ...link, title: "千问", url: "https://www.qianwen.com/" }
+    : link);
+  const existingIds = new Set(upgraded.filter((link) => link.area === "ai").map((link) => link.id));
+  const existingHosts = new Set(upgraded.filter((link) => link.area === "ai").map((link) => hostOf(link.url)).filter(Boolean));
+  const additions = defaults
+    .filter((link) => !existingIds.has(link.id) && !existingHosts.has(hostOf(link.url)))
+    .map((link, index) => ({ ...link, order: upgraded.length + index }));
+  return [...upgraded, ...additions];
 }
 
 function isQuickLinkCategory(value: unknown): value is QuickLinkCategory {

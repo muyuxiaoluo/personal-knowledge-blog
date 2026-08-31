@@ -1,0 +1,7 @@
+@font-face {
+  font-family: "LXGW WenKai App";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url("../node_modules/@fontsource/lxgw-wenkai/files/lxgw-wenkai-latin-500-normal.woff2") format("woff2");
+}

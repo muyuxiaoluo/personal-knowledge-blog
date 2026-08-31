@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { WorkspacePreferencesRepository } from "../app/data/workspace-preferences-repository";
 import type { SqliteDatabase, SqliteExecuteResult, SqliteValue } from "../app/data/sqlite-article-repository";
-import { addDefaultEntertainmentLinks, normalizeAvatarDataUrl, normalizeDisplayName, normalizeQuickLinks, readLegacyQuickLinks, workspaceTitle } from "../app/workspace-preferences";
+import { addDefaultAiLinks, addDefaultEntertainmentLinks, normalizeAvatarDataUrl, normalizeDisplayName, normalizeQuickLinks, readLegacyQuickLinks, workspaceTitle } from "../app/workspace-preferences";
 
 class NodeSqliteAdapter implements SqliteDatabase {
   constructor(private readonly database: DatabaseSync) {}
@@ -64,5 +64,22 @@ test("moves the built-in entertainment platforms into the editable link library 
   database.prepare("INSERT INTO app_meta(key, value) VALUES(?, ?)").run("workspace_quick_links_v1", JSON.stringify(legacyLinks));
   const migrated = await repository.getPreferences();
   assert.deepEqual(migrated.quickLinks?.filter((link) => link.area === "entertainment").map((link) => link.title), ["哔哩哔哩", "抖音"]);
+  database.close();
+});
+
+test("adds editable AI links, including the official ChatGPT website, only during migration", async () => {
+  const links = addDefaultAiLinks([]);
+  assert.deepEqual(links.map((link) => link.title), ["千问", "Gemini", "Grok", "ChatGPT", "豆包", "智谱清言", "Claude", "Kimi"]);
+  assert.equal(links.find((link) => link.id === "chatgpt")?.url, "https://chatgpt.com");
+  assert.equal(addDefaultAiLinks(links).length, links.length);
+
+  const database = new DatabaseSync(":memory:");
+  const repository = new WorkspacePreferencesRepository(new NodeSqliteAdapter(database));
+  await repository.getPreferences();
+  database.prepare("INSERT INTO app_meta(key, value) VALUES(?, ?)").run("workspace_quick_links_v3", JSON.stringify([]));
+  const migrated = await repository.getPreferences();
+  assert.deepEqual(migrated.quickLinks?.map((link) => link.title), ["哔哩哔哩", "抖音", "千问", "Gemini", "Grok", "ChatGPT", "豆包", "智谱清言", "Claude", "Kimi"]);
+  await repository.saveQuickLinks(migrated.quickLinks?.filter((link) => link.id !== "chatgpt") ?? []);
+  assert.equal((await repository.getPreferences()).quickLinks?.some((link) => link.id === "chatgpt"), false);
   database.close();
 });

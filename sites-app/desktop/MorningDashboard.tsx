@@ -16,6 +16,7 @@ import type {
 import type { DashboardRepository } from "../app/data/dashboard-repository";
 import { officialHolidayDays, officialHolidayOn, officialHolidaySource } from "../app/official-holidays";
 import { desktopApi } from "./integrationApi";
+import "./styles/dashboard.css";
 
 type SharedProps = {
   today: string;

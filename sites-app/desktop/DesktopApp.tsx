@@ -4,10 +4,14 @@ import { isRegistered, register } from "@tauri-apps/plugin-global-shortcut";
 import Database from "@tauri-apps/plugin-sql";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppUpdater } from "./AppUpdater";
-import { DesktopWorkbench } from "./DesktopWorkbench";
 import { loadDesktopTheme, saveDesktopTheme, type ThemeId } from "./DesktopThemes";
+import {
+  loadDesktopFontPreset,
+  saveDesktopFontPreset,
+  type FontPresetId,
+} from "./DesktopTypography";
 import { WorkbenchIcon } from "./WorkbenchIcon";
 import {
   CloudSyncClient,
@@ -17,6 +21,10 @@ import {
 } from "../app/data/cloud-sync-client";
 import { initialProjectSeeds } from "../app/data/project-seeds";
 import { SqliteArticleRepository } from "../app/data/sqlite-article-repository";
+import {
+  AttachmentRepository,
+  migrateLegacyInlineImages,
+} from "../app/data/attachment-repository";
 import { SqliteProjectRepository } from "../app/data/sqlite-project-repository";
 import { SqliteWorkRepository } from "../app/data/sqlite-work-repository";
 import { WorkspacePreferencesRepository } from "../app/data/workspace-preferences-repository";
@@ -24,6 +32,14 @@ import { SqliteAiRepository } from "../app/data/sqlite-ai-repository";
 import { IntegrationRepository } from "../app/data/integration-repository";
 import { DashboardRepository } from "../app/data/dashboard-repository";
 import {
+  UniversalSyncRepository,
+  type SyncConflict,
+  type SyncItemError,
+  type SyncRecycleItem,
+} from "../app/data/universal-sync-repository";
+
+import {
+  addDefaultAiLinks,
   addDefaultEntertainmentLinks,
   normalizeDisplayName,
   readLegacyQuickLinks,
@@ -39,6 +55,10 @@ import {
 } from "../app/entertainment-capture";
 import { useConfirmDialog } from "./DesktopControls";
 
+const DesktopWorkbench = lazy(async () => ({
+  default: (await import("./DesktopWorkbench")).DesktopWorkbench,
+}));
+
 const defaultServerUrl = "https://mind.47-108-88-117.sslip.io";
 const quickCaptureShortcut = "CommandOrControl+Shift+Space";
 let shortcutInitialization: Promise<void> | null = null;
@@ -47,20 +67,107 @@ type BackupPath = {
   path: string;
 };
 
+type StoredRefreshSession = {
+  serverUrl: string;
+  username: string;
+  refreshToken: string;
+  expiresAt: string;
+};
+
 type DesktopRuntime = {
   articleRepository: SqliteArticleRepository;
+  attachmentRepository: AttachmentRepository;
   projectRepository: SqliteProjectRepository;
   workRepository: SqliteWorkRepository;
   preferencesRepository: WorkspacePreferencesRepository;
   aiRepository: SqliteAiRepository;
   integrationRepository: IntegrationRepository;
   dashboardRepository: DashboardRepository;
+  syncRepository: UniversalSyncRepository;
   database: Database;
 };
 
 type TauriSqliteDatabase = Database & {
   transaction(statements: Array<{ sql: string; bindValues?: Array<string | number | null | Uint8Array> }>): Promise<void>;
 };
+
+type DesktopRuntimeStartup = {
+  runtime: DesktopRuntime;
+  activeFocusId: string | null;
+  displayName: string;
+  avatarDataUrl: string;
+  quickLinks: QuickLink[];
+  pendingCount: number;
+};
+
+let desktopRuntimeInitialization: Promise<DesktopRuntimeStartup> | null = null;
+let attachmentMigration: Promise<Awaited<ReturnType<typeof migrateLegacyInlineImages>>> | null = null;
+
+function initializeDesktopRuntime() {
+  desktopRuntimeInitialization ??= Database.load("sqlite:mind-garden.db")
+    .then(async (database) => {
+      const transactionalDatabase = database as TauriSqliteDatabase;
+      transactionalDatabase.transaction = async (statements) => {
+        await invoke("execute_sqlite_transaction", { statements });
+      };
+      const articleRepository = new SqliteArticleRepository(transactionalDatabase, {
+        seedArticles: seedArticles as Article[],
+      });
+      const attachmentRepository = new AttachmentRepository(transactionalDatabase);
+      const projectRepository = new SqliteProjectRepository(transactionalDatabase, {
+        seedProjects: initialProjectSeeds,
+      });
+      const workRepository = new SqliteWorkRepository(transactionalDatabase);
+      const preferencesRepository = new WorkspacePreferencesRepository(transactionalDatabase);
+      const aiRepository = new SqliteAiRepository(transactionalDatabase);
+      const integrationRepository = new IntegrationRepository(transactionalDatabase);
+      const dashboardRepository = new DashboardRepository(transactionalDatabase);
+      await Promise.all([
+        articleRepository.ready(),
+        attachmentRepository.initialize(),
+        projectRepository.ready(),
+        workRepository.ready(),
+        preferencesRepository.ready(),
+        dashboardRepository.ready(),
+        aiRepository.cleanupExpired(),
+      ]);
+      const syncRepository = new UniversalSyncRepository(transactionalDatabase);
+      await syncRepository.initialize();
+      await attachmentRepository.cleanupAbandonedDrafts();
+      const [activeFocusAtStartup, preferences, pending] = await Promise.all([
+        workRepository.getActiveSession(),
+        preferencesRepository.getPreferences(),
+        syncRepository.getStatus(),
+      ]);
+      const resolvedQuickLinks = preferences.quickLinks
+        ?? addDefaultAiLinks(addDefaultEntertainmentLinks(readLegacyQuickLinks(localStorage)));
+      if (!preferences.quickLinks) await preferencesRepository.saveQuickLinks(resolvedQuickLinks);
+      return {
+        runtime: {
+          articleRepository,
+          attachmentRepository,
+          projectRepository,
+          workRepository,
+          preferencesRepository,
+          aiRepository,
+          integrationRepository,
+          dashboardRepository,
+          syncRepository,
+          database,
+        },
+        activeFocusId: activeFocusAtStartup?.id ?? null,
+        displayName: preferences.displayName,
+        avatarDataUrl: preferences.avatarDataUrl,
+        quickLinks: resolvedQuickLinks,
+        pendingCount: pending.pending,
+      };
+    })
+    .catch((error) => {
+      desktopRuntimeInitialization = null;
+      throw error;
+    });
+  return desktopRuntimeInitialization;
+}
 
 function describeStartupError(error: unknown) {
   if (!(error instanceof Error)) return "无法打开本地资料库";
@@ -89,6 +196,10 @@ export function DesktopApp() {
   );
   const [session, setSession] = useState<LoginResult | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
+  const [syncCenter, setSyncCenter] = useState({ pending: 0, errors: 0, conflicts: 0, recycled: 0, cursor: "" });
+  const [syncConflicts, setSyncConflicts] = useState<SyncConflict[]>([]);
+  const [syncErrors, setSyncErrors] = useState<SyncItemError[]>([]);
+  const [syncRecycle, setSyncRecycle] = useState<SyncRecycleItem[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -103,9 +214,15 @@ export function DesktopApp() {
     text: "本地资料库准备中…",
   });
   const [themeId, setThemeId] = useState<ThemeId>(loadDesktopTheme);
+  const [fontPresetId, setFontPresetId] = useState<FontPresetId>(loadDesktopFontPreset);
   const autoSyncTimer = useRef<number | null>(null);
   const syncInFlight = useRef(false);
   const activeCaptureRequests = useRef(new Set<string>());
+
+  useEffect(() => {
+    if (fontPresetId === "wenkai") void import("./font-wenkai.css");
+    if (fontPresetId === "serif") void import("./font-serif.css");
+  }, [fontPresetId]);
 
   useEffect(() => {
     if (notice.tone !== "success" || !notice.text) return;
@@ -190,45 +307,39 @@ export function DesktopApp() {
 
   useEffect(() => {
     let active = true;
-    Database.load("sqlite:mind-garden.db")
-      .then(async (database) => {
-        const transactionalDatabase = database as TauriSqliteDatabase;
-        transactionalDatabase.transaction = async (statements) => {
-          await invoke("execute_sqlite_transaction", { statements });
-        };
-        const articleRepository = new SqliteArticleRepository(transactionalDatabase, {
-          seedArticles: seedArticles as Article[],
-        });
-        const projectRepository = new SqliteProjectRepository(transactionalDatabase, {
-          seedProjects: initialProjectSeeds,
-        });
-        const workRepository = new SqliteWorkRepository(transactionalDatabase);
-        const preferencesRepository = new WorkspacePreferencesRepository(transactionalDatabase);
-        const aiRepository = new SqliteAiRepository(transactionalDatabase);
-        const integrationRepository = new IntegrationRepository(transactionalDatabase);
-        const dashboardRepository = new DashboardRepository(transactionalDatabase);
-        await Promise.all([
-          articleRepository.list(),
-          projectRepository.list(),
-          workRepository.listPlans(),
-          aiRepository.cleanupExpired(),
-          integrationRepository.listGitHubRepositories(),
-          dashboardRepository.getPreferences(),
-          dashboardRepository.listEvents(),
-        ]);
-        const activeFocusAtStartup = await workRepository.getActiveSession();
-        const preferences = await preferencesRepository.getPreferences();
-        const resolvedQuickLinks = preferences.quickLinks ?? addDefaultEntertainmentLinks(readLegacyQuickLinks(localStorage));
-        if (!preferences.quickLinks) await preferencesRepository.saveQuickLinks(resolvedQuickLinks);
-        const pending = await articleRepository.listPendingChanges();
+    initializeDesktopRuntime()
+      .then((startup) => {
         if (!active) return;
-        setRuntime({ articleRepository, projectRepository, workRepository, preferencesRepository, aiRepository, integrationRepository, dashboardRepository, database });
-        setStartupActiveFocusId(activeFocusAtStartup?.id ?? null);
-        setDisplayName(preferences.displayName);
-        setAvatarDataUrl(preferences.avatarDataUrl);
-        setQuickLinks(resolvedQuickLinks);
-        setPendingCount(pending.length);
+        setRuntime(startup.runtime);
+        setStartupActiveFocusId(startup.activeFocusId);
+        setDisplayName(startup.displayName);
+        setAvatarDataUrl(startup.avatarDataUrl);
+        setQuickLinks(startup.quickLinks);
+        setPendingCount(startup.pendingCount);
         setNotice({ tone: "quiet", text: "" });
+        attachmentMigration ??= migrateLegacyInlineImages(
+          startup.runtime.articleRepository,
+          startup.runtime.attachmentRepository,
+          async () => { await invoke("create_backup_bundle"); },
+        );
+        void attachmentMigration.then((result) => {
+          if (!active || (!result.migratedArticles && !result.failedArticles)) return;
+          setRevision((value) => value + 1);
+          setNotice({
+            tone: result.failedArticles ? "warning" : "success",
+            text: result.failedArticles
+              ? `已迁移 ${result.migratedImages} 张旧图片；${result.failedArticles} 篇笔记需稍后处理，原文未被修改。`
+              : `已安全迁移 ${result.migratedImages} 张旧图片。`,
+          });
+        }).catch((error) => {
+          if (!active) return;
+          setNotice({
+            tone: "warning",
+            text: error instanceof Error
+              ? `旧图片迁移尚未开始：${error.message}`
+              : "旧图片迁移尚未开始，升级前安全备份失败。",
+          });
+        });
       })
       .catch((error) => {
         if (!active) return;
@@ -303,16 +414,81 @@ export function DesktopApp() {
   const syncClient = useMemo(
     () =>
       runtime
-        ? new CloudSyncClient(runtime.articleRepository, serverUrl)
+        ? new CloudSyncClient(runtime.articleRepository, serverUrl, {
+          universalRepository: runtime.syncRepository,
+          attachmentRepository: runtime.attachmentRepository,
+        })
         : null,
     [runtime, serverUrl],
   );
 
   const updatePendingCount = useCallback(async () => {
     if (!runtime) return;
-    const pending = await runtime.articleRepository.listPendingChanges();
-    setPendingCount(pending.length);
+    const [status, conflicts, errors, recycle] = await Promise.all([
+      runtime.syncRepository.getStatus(),
+      runtime.syncRepository.listConflicts(),
+      runtime.syncRepository.listErrors(),
+      runtime.syncRepository.listRecycle(),
+    ]);
+    setPendingCount(status.pending);
+    setSyncCenter(status);
+    setSyncConflicts(conflicts);
+    setSyncErrors(errors);
+    setSyncRecycle(recycle);
   }, [runtime]);
+
+  useEffect(() => {
+    void updatePendingCount();
+  }, [updatePendingCount]);
+
+  const storeRefreshSession = useCallback(async (loginResult: LoginResult) => {
+    if (!loginResult.refreshToken || !loginResult.refreshExpiresAt) return;
+    await invoke("sync_refresh_session_store", {
+      session: {
+        serverUrl: serverUrl.replace(/\/+$/, ""),
+        username: loginResult.username,
+        refreshToken: loginResult.refreshToken,
+        expiresAt: loginResult.refreshExpiresAt,
+      } satisfies StoredRefreshSession,
+    });
+  }, [serverUrl]);
+
+  useEffect(() => {
+    if (!runtime || !session) {
+      runtime?.attachmentRepository.setRemoteLoader(null);
+      return;
+    }
+    runtime.attachmentRepository.setRemoteLoader((manifest, original) => (
+      runtime.attachmentRepository.downloadForSync(
+        serverUrl,
+        session.accessToken,
+        manifest,
+        original,
+      ).then(() => undefined)
+    ));
+    return () => runtime.attachmentRepository.setRemoteLoader(null);
+  }, [runtime, serverUrl, session]);
+
+  useEffect(() => {
+    if (!syncClient || session || !isTauri()) return;
+    let active = true;
+    void invoke<StoredRefreshSession | null>("sync_refresh_session_load")
+      .then(async (stored) => {
+        if (!stored || stored.serverUrl.replace(/\/+$/, "") !== serverUrl.replace(/\/+$/, "")) return;
+        const refreshed = await syncClient.refresh(stored.refreshToken);
+        if (!active) return;
+        await storeRefreshSession(refreshed);
+        setSession(refreshed);
+        setUsername(refreshed.username);
+        setNotice({ tone: "quiet", text: "登录状态已恢复，正在同步…" });
+      })
+      .catch(async (error) => {
+        if (error instanceof CloudSyncError && error.code === "unauthorized") {
+          await invoke("sync_refresh_session_delete").catch(() => undefined);
+        }
+      });
+    return () => { active = false; };
+  }, [serverUrl, session, storeRefreshSession, syncClient]);
 
   const syncNow = useCallback(
     async (showSuccess = true) => {
@@ -327,12 +503,22 @@ export function DesktopApp() {
       setSyncing(true);
       setNotice({ tone: "quiet", text: "正在安全同步…" });
       try {
-        const result = await syncClient.sync(session.accessToken);
+        let activeSession = session;
+        if (
+          activeSession.refreshToken
+          && new Date(activeSession.expiresAt).getTime() <= Date.now() + 60_000
+        ) {
+          activeSession = await syncClient.refresh(activeSession.refreshToken);
+          await storeRefreshSession(activeSession);
+          setSession(activeSession);
+        }
+        const result = await syncClient.sync(activeSession.accessToken);
         await updatePendingCount();
         setRevision((value) => value + 1);
         setNotice(syncMessage(result, showSuccess));
       } catch (error) {
         if (error instanceof CloudSyncError && error.code === "unauthorized") {
+          await invoke("sync_refresh_session_delete").catch(() => undefined);
           setSession(null);
           setShowAccount(true);
         }
@@ -345,7 +531,7 @@ export function DesktopApp() {
         setSyncing(false);
       }
     },
-    [runtime, session, syncClient, updatePendingCount, workbenchEditing],
+    [runtime, session, storeRefreshSession, syncClient, updatePendingCount, workbenchEditing],
   );
 
   useEffect(() => {
@@ -359,6 +545,28 @@ export function DesktopApp() {
     };
   }, [mutationRevision, session, syncNow, workbenchEditing]);
 
+  useEffect(() => {
+    if (!session) return;
+    void syncNow(false);
+    let timer = 0;
+    const schedule = () => {
+      const jitter = Math.round((Math.random() - 0.5) * 60_000);
+      timer = window.setTimeout(async () => {
+        await syncNow(false);
+        schedule();
+      }, 5 * 60_000 + jitter);
+    };
+    const resume = () => void syncNow(false);
+    schedule();
+    window.addEventListener("online", resume);
+    window.addEventListener("focus", resume);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("online", resume);
+      window.removeEventListener("focus", resume);
+    };
+  }, [session, syncNow]);
+
   async function login(event: React.FormEvent) {
     event.preventDefault();
     if (!syncClient || !username.trim() || !password) return;
@@ -371,6 +579,7 @@ export function DesktopApp() {
     setNotice({ tone: "quiet", text: "正在登录同步账户…" });
     try {
       const result = await syncClient.login(username.trim(), password);
+      await storeRefreshSession(result);
       localStorage.setItem("mind-garden.username", result.username);
       localStorage.setItem("mind-garden.server-url", serverUrl);
       setSession(result);
@@ -396,8 +605,7 @@ export function DesktopApp() {
     setBackingUp(true);
     setNotice({ tone: "quiet", text: "正在整理本地备份…" });
     try {
-      const target = await invoke<BackupPath>("reserve_backup_path");
-      await runtime.articleRepository.createBackup(target.path);
+      const target = await invoke<BackupPath>("create_backup_bundle");
       setNotice({
         tone: "success",
         text: `备份已保存到：${target.path}`,
@@ -409,6 +617,39 @@ export function DesktopApp() {
       });
     } finally {
       setBackingUp(false);
+    }
+  }
+
+  async function logout() {
+    const refreshToken = session?.refreshToken;
+    setSession(null);
+    setShowAccount(false);
+    if (refreshToken) await syncClient?.logout(refreshToken).catch(() => undefined);
+    await invoke("sync_refresh_session_delete").catch(() => undefined);
+    setNotice({ tone: "quiet", text: "已退出同步，本地内容仍可正常使用。" });
+  }
+
+  async function resolveSyncConflict(id: string, strategy: "local" | "remote" | "copy") {
+    if (!runtime) return;
+    try {
+      await runtime.syncRepository.resolveConflict(id, strategy);
+      await updatePendingCount();
+      setRevision((value) => value + 1);
+      setNotice({ tone: "success", text: strategy === "local" ? "已保留本机版本，等待重新同步。" : strategy === "copy" ? "已复制本机版本为新记录。" : "已采用云端版本。" });
+    } catch (error) {
+      setNotice({ tone: "warning", text: error instanceof Error ? error.message : "冲突处理失败" });
+    }
+  }
+
+  async function restoreSyncRecycle(item: SyncRecycleItem) {
+    if (!runtime) return;
+    try {
+      await runtime.syncRepository.restoreRecycled(item.entityType, item.entityId);
+      await updatePendingCount();
+      setRevision((value) => value + 1);
+      setNotice({ tone: "success", text: "记录已从同步回收站恢复。" });
+    } catch (error) {
+      setNotice({ tone: "warning", text: error instanceof Error ? error.message : "恢复失败" });
     }
   }
 
@@ -452,6 +693,11 @@ export function DesktopApp() {
     saveDesktopTheme(next);
   }
 
+  function changeFontPreset(next: FontPresetId) {
+    setFontPresetId(next);
+    saveDesktopFontPreset(next);
+  }
+
   if (startupError) {
     return (
       <main className="desktop-startup">
@@ -476,8 +722,10 @@ export function DesktopApp() {
     <div className="desktop-app">
       {notice.text && notice.tone !== "quiet" && <div className="floating-system-alert system-alert visible"><i className={notice.tone} /><span>{notice.text}</span></div>}
 
+      <Suspense fallback={<main className="desktop-startup"><span>个人工作台</span><h1>正在整理桌面</h1></main>}>
       <DesktopWorkbench
         repository={runtime.articleRepository}
+        attachmentRepository={runtime.attachmentRepository}
         projectRepository={runtime.projectRepository}
         workRepository={runtime.workRepository}
         aiRepository={runtime.aiRepository}
@@ -488,8 +736,10 @@ export function DesktopApp() {
         quickLinks={quickLinks}
         dataRevision={revision}
         themeId={themeId}
+        fontPresetId={fontPresetId}
         backingUp={backingUp}
         onThemeChange={changeTheme}
+        onFontPresetChange={changeFontPreset}
         onCreateBackup={() => void createBackup()}
         onRestoreBackup={() => void restoreLatestBackup()}
         onSaveDisplayName={async (name) => {
@@ -520,6 +770,7 @@ export function DesktopApp() {
           setMutationRevision((value) => value + 1);
         }}
       />
+      </Suspense>
 
       {showAccount && (
         <div className="account-backdrop" role="presentation">
@@ -548,17 +799,35 @@ export function DesktopApp() {
                 <strong>{session.username}</strong>
                 <small>本次登录有效至 {formatTime(session.expiresAt)}</small>
                 <button
-                  onClick={() => {
-                    setSession(null);
-                    setShowAccount(false);
-                    setNotice({
-                      tone: "quiet",
-                      text: "已退出同步，本地内容仍可正常使用。",
-                    });
-                  }}
+                  onClick={() => void logout()}
                 >
                   退出同步账户
                 </button>
+                <details className="sync-center" open={Boolean(syncCenter.conflicts || syncCenter.errors)}>
+                  <summary><strong>同步中心</strong><span>{syncCenter.pending} 待同步 · {syncCenter.conflicts} 冲突 · {syncCenter.errors} 错误 · {syncCenter.recycled} 回收站</span></summary>
+                  <div className="sync-center-body">
+                    <p>后台失败不会中断本地编辑；附件会先同步展示版，需要原图时再按需读取。</p>
+                    {syncConflicts.map((item) => (
+                      <article key={item.id} className="sync-center-item">
+                        <div><strong>{syncEntityLabel(item.localPayload, item.entityId)}</strong><small>{item.entityType} · 本机与云端都修改过</small></div>
+                        <div><button onClick={() => void resolveSyncConflict(item.id, "remote")}>用云端</button><button onClick={() => void resolveSyncConflict(item.id, "local")}>用本机</button><button onClick={() => void resolveSyncConflict(item.id, "copy")}>复制本机</button></div>
+                      </article>
+                    ))}
+                    {syncErrors.map((item) => (
+                      <article key={`${item.entityType}:${item.entityId}`} className="sync-center-item error">
+                        <div><strong>{item.entityId}</strong><small>{item.error}</small></div>
+                        <button onClick={async () => { await runtime?.syncRepository.retryError(item.entityType, item.entityId); await updatePendingCount(); }}>重试</button>
+                      </article>
+                    ))}
+                    {syncRecycle.slice(0, 20).map((item) => (
+                      <article key={`${item.entityType}:${item.entityId}`} className="sync-center-item recycled">
+                        <div><strong>{syncEntityLabel(item.payload, item.entityId)}</strong><small>保留至 {formatTime(item.purgeAfter)}</small></div>
+                        <button onClick={() => void restoreSyncRecycle(item)}>恢复</button>
+                      </article>
+                    ))}
+                    {!syncCenter.pending && !syncCenter.conflicts && !syncCenter.errors && !syncCenter.recycled && <p>当前没有待处理项目。</p>}
+                  </div>
+                </details>
               </div>
             ) : (
               <form onSubmit={login}>
@@ -608,6 +877,12 @@ function syncMessage(
   result: SyncResult,
   showSuccess: boolean,
 ): SyncNotice {
+  if (result.limited) {
+    return {
+      tone: "warning",
+      text: "服务器暂不支持完整工作台同步，已回退到 v2；附件与其他工作台数据仍安全保留在本机。",
+    };
+  }
   if (result.conflicts) {
     return {
       tone: "warning",
@@ -620,8 +895,16 @@ function syncMessage(
   }
   return {
     tone: "success",
-    text: `同步完成：上传 ${result.uploaded} 条，接收 ${result.downloaded} 条。`,
+    text: `同步完成：上传 ${result.uploaded} 条，接收 ${result.downloaded} 条${result.attachmentUploads || result.attachmentDownloads ? `，附件上传 ${result.attachmentUploads ?? 0} 个、下载 ${result.attachmentDownloads ?? 0} 个` : ""}。`,
   };
+}
+
+function syncEntityLabel(payload: Record<string, unknown>, fallback: string) {
+  for (const key of ["title", "label", "primary_outcome", "value"]) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) return value.trim().slice(0, 80);
+  }
+  return fallback;
 }
 
 function AccountDock({

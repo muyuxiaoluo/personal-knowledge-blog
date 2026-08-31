@@ -4,9 +4,10 @@ import type {
   DashboardCache,
   DashboardLocation,
   DashboardPreferences,
+  RestDay,
 } from "../dashboard-types";
 import { defaultDashboardPreferences } from "../dashboard-types";
-import { normalizeAiHighlightKeywords } from "../dashboard-helpers";
+import { normalizeAiHighlightKeywords } from "../dashboard-normalization";
 import type { SqliteDatabase } from "./sqlite-article-repository";
 
 type PreferenceRow = {
@@ -46,6 +47,13 @@ type EventRow = {
   color: string;
   reminder_days: number;
   notes: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type RestDayRow = {
+  rest_date: string;
+  note: string;
   created_at: string;
   updated_at: string;
 };
@@ -91,6 +99,12 @@ const migrations = [
     updated_at TEXT NOT NULL
   )`,
   "CREATE INDEX IF NOT EXISTS idx_calendar_events_updated ON calendar_events(updated_at DESC)",
+  `CREATE TABLE IF NOT EXISTS rest_days (
+    rest_date TEXT PRIMARY KEY NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
 ] as const;
 
 export class DashboardRepository {
@@ -120,6 +134,10 @@ export class DashboardRepository {
       throw error;
     });
     await this.initialization;
+  }
+
+  async ready() {
+    await this.initialize();
   }
 
   async getPreferences(): Promise<DashboardPreferences> {
@@ -246,6 +264,40 @@ export class DashboardRepository {
   async deleteEvent(id: string) {
     await this.initialize();
     await this.database.execute("DELETE FROM calendar_events WHERE id = ?", [id]);
+  }
+
+  async listRestDays(): Promise<RestDay[]> {
+    await this.initialize();
+    const rows = await this.database.select<RestDayRow>("SELECT * FROM rest_days ORDER BY rest_date DESC");
+    return rows.map((row) => ({
+      date: row.rest_date,
+      note: row.note,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  async saveRestDay(date: string, note = ""): Promise<RestDay> {
+    await this.initialize();
+    if (!validDate(date)) throw new Error("休息日期不正确");
+    const timestamp = this.clock().toISOString();
+    const normalizedNote = note.trim().slice(0, 200);
+    await this.database.execute(
+      `INSERT INTO rest_days(rest_date, note, created_at, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(rest_date) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at`,
+      [date, normalizedNote, timestamp, timestamp],
+    );
+    const rows = await this.database.select<RestDayRow>("SELECT * FROM rest_days WHERE rest_date = ? LIMIT 1", [date]);
+    const saved = rows[0];
+    if (!saved) throw new Error("休息日期保存失败");
+    return { date: saved.rest_date, note: saved.note, createdAt: saved.created_at, updatedAt: saved.updated_at };
+  }
+
+  async deleteRestDay(date: string): Promise<void> {
+    await this.initialize();
+    if (!validDate(date)) throw new Error("休息日期不正确");
+    await this.database.execute("DELETE FROM rest_days WHERE rest_date = ?", [date]);
   }
 }
 

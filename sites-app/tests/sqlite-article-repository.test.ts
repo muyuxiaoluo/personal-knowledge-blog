@@ -69,6 +69,9 @@ test("persists articles and sync metadata in a real SQLite database", async () =
   assert.equal(seeded.length, 1);
   assert.equal(seeded[0].storage.syncStatus, "pending");
   assert.deepEqual(seeded[0].tags, ["旧记录"]);
+  const summaries = await repository.listSummaries();
+  assert.equal(summaries[0].body, "");
+  assert.equal((await repository.get(seedArticle.id))?.body, seedArticle.body);
   assert.equal(await repository.getDeviceId(), "windows-test-device");
   await repository.markSynced([
     { id: seeded[0].id, version: seeded[0].storage.version },

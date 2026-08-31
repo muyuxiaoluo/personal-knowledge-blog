@@ -1,6 +1,6 @@
 [package]
 name = "life-strategy-library"
-version = "0.8.0"
+version = "0.9.0"
 description = "本地优先的私人思考花园"
 authors = ["Muyuxiaoluo"]
 edition = "2021"
@@ -21,11 +21,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 hex = "0.4"
 hmac = "0.12"
 keyring = { version = "3", features = ["windows-native"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 sha2 = "0.10"
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+zip = { version = "4.6.1", default-features = false }
 tauri-plugin-process = "2.3.1"
 tauri-plugin-opener = "2"
 tauri-plugin-sql = { version = "2.4.0", features = ["sqlite"] }

@@ -12,6 +12,24 @@ import { createPortal } from "react-dom";
 
 export type SelectOption = { value: string; label: string; disabled?: boolean };
 
+const SELECT_MENU_GAP = 6;
+const SELECT_MENU_VIEWPORT_MARGIN = 12;
+
+/** 计算下拉菜单的固定定位：下方空间不足时向上展开，并把高度限制在展开侧的可用空间内，避免选项被视口裁切 */
+function getMenuPosition(rect: DOMRect): { left: number; top?: number; bottom?: number; minWidth: number; maxHeight: number } {
+  const spaceBelow = window.innerHeight - rect.bottom - SELECT_MENU_VIEWPORT_MARGIN;
+  const spaceAbove = rect.top - SELECT_MENU_VIEWPORT_MARGIN;
+  const openUpward = spaceBelow < 240 && spaceAbove > spaceBelow;
+  const maxHeight = Math.min(360, Math.max(140, openUpward ? spaceAbove : spaceBelow));
+  return {
+    left: rect.left,
+    top: openUpward ? undefined : rect.bottom + SELECT_MENU_GAP,
+    bottom: openUpward ? window.innerHeight - rect.top + SELECT_MENU_GAP : undefined,
+    minWidth: rect.width,
+    maxHeight,
+  };
+}
+
 export function SelectMenu({ value, options, onChange, label, disabled = false, className = "" }: {
   value: string;
   options: SelectOption[];
@@ -59,6 +77,7 @@ export function SelectMenu({ value, options, onChange, label, disabled = false, 
   }
 
   const rect = open ? triggerRef.current?.getBoundingClientRect() : null;
+  const menuPosition = rect ? getMenuPosition(rect) : null;
   return <div className={`ui-select ${className}`}>
     <button
       ref={triggerRef}
@@ -84,7 +103,7 @@ export function SelectMenu({ value, options, onChange, label, disabled = false, 
       role="listbox"
       tabIndex={-1}
       aria-label={label}
-      style={{ left: rect.left, top: rect.bottom + 6, minWidth: rect.width }}
+      style={menuPosition ?? undefined}
       onKeyDown={(event) => {
         if (event.key === "Escape" || event.key === "Tab") return close(event.key === "Escape");
         if (event.key === "ArrowDown") { event.preventDefault(); move(1); }
@@ -127,7 +146,9 @@ export function DateField({ value, onChange, label, optional = true, className =
 
 type ConfirmOptions = {
   title: string;
+  subject?: ReactNode;
   description: ReactNode;
+  descriptionIcon?: ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
   tone?: "danger" | "warning";
@@ -166,10 +187,16 @@ export function ConfirmDialogProvider({ children }: { children: ReactNode }) {
 
   return <ConfirmContext.Provider value={confirm}>{children}{request && createPortal(
     <div className="ui-dialog-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) finish(false); }}>
-      <div className={`ui-confirm-dialog ${request.tone ?? "warning"}`} ref={dialogRef} role="alertdialog" aria-modal="true" aria-labelledby="ui-confirm-title">
-        <span>{request.tone === "danger" ? "请确认删除" : "请确认操作"}</span>
-        <h2 id="ui-confirm-title">{request.title}</h2>
-        <div className="ui-confirm-description">{request.description}</div>
+      <div className={`ui-confirm-dialog ${request.tone ?? "warning"}`} ref={dialogRef} role="alertdialog" aria-modal="true" aria-labelledby="ui-confirm-title" aria-describedby="ui-confirm-description">
+        <header className="ui-confirm-header">
+          <span className="ui-confirm-icon" aria-hidden="true">{request.tone === "danger" ? "!" : "?"}</span>
+          <div>
+            <span className="ui-confirm-eyebrow">{request.tone === "danger" ? "删除确认" : "操作确认"}</span>
+            <h2 id="ui-confirm-title">{request.title}</h2>
+          </div>
+        </header>
+        {request.subject && <div className="ui-confirm-subject"><span>即将删除</span><strong>{request.subject}</strong></div>}
+        <div className="ui-confirm-description" id="ui-confirm-description"><span aria-hidden="true">{request.descriptionIcon ?? "i"}</span><div>{request.description}</div></div>
         <footer><button type="button" onClick={() => finish(false)}>{request.cancelLabel ?? "取消"}</button><button type="button" className={request.tone === "danger" ? "danger" : "primary"} onClick={() => finish(true)}>{request.confirmLabel ?? "确认"}</button></footer>
       </div>
     </div>, document.body,

@@ -1,6 +1,6 @@
 import type { LifeDomain } from "./domain-taxonomy";
 
-export type ProjectStatus = "active" | "waiting" | "paused" | "completed";
+export type ProjectStatus = "active" | "paused" | "completed";
 
 export type ProjectCategory = LifeDomain;
 
@@ -9,6 +9,12 @@ export type ProjectType = "main" | "side" | "experiment";
 export type MilestoneStatus = "current" | "planned" | "completed";
 
 export type ProjectTaskStatus = "next" | "later" | "waiting" | "done";
+
+export type ProjectTaskStep = {
+  id: string;
+  title: string;
+  completed: boolean;
+};
 
 export type ProposalStatus =
   | "pending"
@@ -39,6 +45,7 @@ export type Project = {
   sortOrder: number;
   isDraft: boolean;
   sourceNote: string;
+  targetDate: string;
   reviewDate: string;
   completedAt: string | null;
   createdAt: string;
@@ -63,6 +70,9 @@ export type ProjectTask = {
   milestoneId: string | null;
   title: string;
   actionType: ActionType;
+  definitionOfDone: string;
+  steps: ProjectTaskStep[];
+  currentFocus: string;
   details: string;
   benefit: string;
   dueDate: string;

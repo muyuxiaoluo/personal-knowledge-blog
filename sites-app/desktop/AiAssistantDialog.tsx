@@ -7,6 +7,7 @@ import type { AiConversation, AiMessage, DeepSeekModeOptions, DeepSeekPrimaryMod
 import type { SqliteAiRepository } from "../app/data/sqlite-ai-repository";
 import { BrandLogo } from "./BrandLogo";
 import { desktopApi } from "./integrationApi";
+import "./styles/ai-tools.css";
 
 type PendingAnswer = {
   conversationId: string;
@@ -47,10 +48,14 @@ const defaultModeOptions: DeepSeekModeOptions = {
   smartSearch: false,
 };
 
-export function AiAssistantDialog({ open, repository, onClose }: {
+const modeOperationTimeoutMs = 12_000;
+
+export function AiAssistantDialog({ open, repository, onClose, embedded = false, onPendingChange }: {
   open: boolean;
   repository: SqliteAiRepository;
-  onClose: () => void;
+  onClose?: () => void;
+  embedded?: boolean;
+  onPendingChange?: (pending: boolean) => void;
 }) {
   const [conversations, setConversations] = useState<AiConversation[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -67,7 +72,11 @@ export function AiAssistantDialog({ open, repository, onClose }: {
   const pending = useRef<PendingAnswer | null>(null);
   const selectedIdRef = useRef("");
   const imageInputRef = useRef<HTMLInputElement | null>(null);
-  const initializedModes = useRef(false);
+
+  const setPendingAnswer = useCallback((value: PendingAnswer | null) => {
+    pending.current = value;
+    onPendingChange?.(Boolean(value));
+  }, [onPendingChange]);
 
   const refreshConversations = useCallback(async (preferredId?: string) => {
     const next = await repository.listConversations();
@@ -125,7 +134,6 @@ export function AiAssistantDialog({ open, repository, onClose }: {
   useEffect(() => {
     if (!open) return;
     let disposed = false;
-    initializedModes.current = false;
     setModeOptions(defaultModeOptions);
     void (async () => {
       await repository.cleanupExpired();
@@ -136,7 +144,9 @@ export function AiAssistantDialog({ open, repository, onClose }: {
         await refreshConversations(created.id);
       }
       if (disposed || !isTauri()) return;
-      setSnapshot(await desktopApi.deepseek.prepare());
+      const prepared = await desktopApi.deepseek.prepare();
+      setSnapshot(prepared);
+      setModeOptions(modesFromSnapshot(prepared, defaultModeOptions));
       if (current.remoteRef) {
         try {
           await desktopApi.deepseek.restore(current.remoteRef);
@@ -150,30 +160,17 @@ export function AiAssistantDialog({ open, repository, onClose }: {
         }
       }
     })().catch((error) => !disposed && setNotice(describeError(error)));
-    return () => { disposed = true; void desktopApi.deepseek.release(); };
-  }, [open, refreshConversations, repository, syncLatestOfficialAnswer]);
-
-  useEffect(() => {
-    if (!open || !snapshot.ready || initializedModes.current || !isTauri()) return;
-    initializedModes.current = true;
-    let disposed = false;
-    setModeBusy(true);
-    void desktopApi.deepseek.configureModes(defaultModeOptions).then((next) => {
-      if (!disposed) {
-        setSnapshot(next);
-        setModeOptions(modesFromSnapshot(next, defaultModeOptions));
-      }
-    }).catch((error) => {
-      if (!disposed) setNotice(`默认模式没有完全同步：${describeError(error)}`);
-    }).finally(() => {
-      if (!disposed) setModeBusy(false);
-    });
-    return () => { disposed = true; };
-  }, [open, snapshot.ready]);
+    return () => {
+      disposed = true;
+      onPendingChange?.(false);
+      void desktopApi.deepseek.release();
+    };
+  }, [onPendingChange, open, refreshConversations, repository, syncLatestOfficialAnswer]);
 
   useEffect(() => {
     if (!open || !isTauri()) return;
     let disposed = false;
+    let timer: number | undefined;
     const poll = async () => {
       try {
         const next = await desktopApi.deepseek.status();
@@ -216,22 +213,26 @@ export function AiAssistantDialog({ open, repository, onClose }: {
           if (disposed) return;
           if (active.conversationId === selectedIdRef.current) setMessages((value) => [...value, saved]);
           if (next.conversationRef) await repository.updateRemoteState(active.conversationId, next.conversationRef, "restored");
-          pending.current = null;
+          setPendingAnswer(null);
           setDraftAnswer("");
           setDraftReasoning("");
           await refreshConversations(active.conversationId);
         } else if (!next.generating && !changed && Date.now() - active.startedAt > 30_000) {
-          pending.current = null;
+          setPendingAnswer(null);
           setNotice(next.error || "没有读取到新的回答。可以打开官网检查页面状态后重试。");
         }
       } catch (error) {
         if (!disposed) setNotice(describeError(error));
+      } finally {
+        if (!disposed) timer = window.setTimeout(() => void poll(), 500);
       }
     };
     void poll();
-    const timer = window.setInterval(() => void poll(), 350);
-    return () => { disposed = true; window.clearInterval(timer); };
-  }, [open, refreshConversations, repository]);
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [open, refreshConversations, repository, setPendingAnswer]);
 
   async function selectConversation(conversation: AiConversation) {
     if (pending.current) return;
@@ -259,7 +260,11 @@ export function AiAssistantDialog({ open, repository, onClose }: {
     setModeBusy(true);
     setNotice("");
     try {
-      const next = await desktopApi.deepseek.configureModes(nextOptions);
+      const next = await withTimeout(
+        desktopApi.deepseek.configureModes(nextOptions),
+        modeOperationTimeoutMs,
+        "官网模式切换超时，请重新连接后再试。",
+      );
       if (next.status === "adapter_error" && next.error) throw new Error(next.error);
       if (next.expertModeAvailable && next.expertModeEnabled !== nextOptions.expertMode) {
         throw new Error(`官网仍处于${next.expertModeEnabled ? "专家模式" : "快速模式"}。`);
@@ -321,7 +326,11 @@ export function AiAssistantDialog({ open, repository, onClose }: {
         await refreshConversations(created.id);
       }
       const quickOptions = { ...modeOptions, expertMode: false };
-      const quickSnapshot = await desktopApi.deepseek.configureModes(quickOptions);
+      const quickSnapshot = await withTimeout(
+        desktopApi.deepseek.configureModes(quickOptions),
+        modeOperationTimeoutMs,
+        "切换到识图所需模式超时，请重新连接后再试。",
+      );
       if (quickSnapshot.status === "adapter_error" && quickSnapshot.error) throw new Error(quickSnapshot.error);
       setModeOptions(modesFromSnapshot(quickSnapshot, quickOptions));
       const next = await desktopApi.deepseek.attachImage(file.name, mime, await readFileAsDataUrl(file));
@@ -358,23 +367,11 @@ export function AiAssistantDialog({ open, repository, onClose }: {
       return;
     }
     setNotice("");
-    let activeSnapshot = snapshot;
-    setModeBusy(true);
-    try {
-      activeSnapshot = await desktopApi.deepseek.configureModes(modeOptions);
-      if (activeSnapshot.status === "adapter_error" && activeSnapshot.error) throw new Error(activeSnapshot.error);
-      setSnapshot(activeSnapshot);
-      setModeOptions(modesFromSnapshot(activeSnapshot, modeOptions));
-    } catch (error) {
-      setNotice(`发送前没有完成官网模式同步：${describeError(error)}`);
-      setModeBusy(false);
-      return;
-    }
-    setModeBusy(false);
+    const activeSnapshot = snapshot;
     const userMessage = await repository.addMessage(selectedId, "user", body);
     setMessages((value) => [...value, userMessage]);
     setPrompt("");
-    pending.current = {
+    setPendingAnswer({
       conversationId: selectedId,
       baseline: activeSnapshot.text,
       baselineReasoning: activeSnapshot.reasoningText,
@@ -386,12 +383,12 @@ export function AiAssistantDialog({ open, repository, onClose }: {
       hasGenerated: false,
       observedGenerating: false,
       saving: false,
-    };
+    });
     try {
       setSnapshot(await desktopApi.deepseek.send(body));
       await refreshConversations(selectedId);
     } catch (error) {
-      pending.current = null;
+      setPendingAnswer(null);
       setNotice(describeError(error));
     }
   }
@@ -469,11 +466,8 @@ export function AiAssistantDialog({ open, repository, onClose }: {
     onSelect={(mode) => void selectPrimaryMode(mode)}
   />;
 
-  return (
-    <div className="ai-dialog-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget && !pending.current) onClose();
-    }}>
-      <section className="ai-assistant-dialog" role="dialog" aria-modal="true" aria-label="DeepSeek AI 助手">
+  const assistant = (
+      <section className={`ai-assistant-dialog${embedded ? " embedded" : ""}`} role={embedded ? "region" : "dialog"} aria-modal={embedded ? undefined : true} aria-label="DeepSeek AI 助手">
         <aside className="ai-history-panel">
           <header><div><span>AI 助手</span><strong>DeepSeek</strong></div><button onClick={() => void createConversation()} disabled={busy || Boolean(pending.current)}>＋</button></header>
           <div className="ai-history-list">
@@ -488,7 +482,7 @@ export function AiAssistantDialog({ open, repository, onClose }: {
         <div className="ai-chat-panel">
           <header className="ai-chat-header">
             <div><strong>{selected?.title || "新对话"}</strong><span className={`ai-status ${snapshot.status}`}>{status}</span></div>
-            <nav><button onClick={() => void desktopApi.deepseek.prepare().then(setSnapshot).catch((error) => setNotice(describeError(error)))}>重新连接</button><button onClick={() => void desktopApi.deepseek.showOfficial().catch((error) => setNotice(describeError(error)))}>{snapshot.status === "login_required" ? "前往登录" : "打开官网"}</button><button className="close" onClick={onClose} disabled={Boolean(pending.current)}>×</button></nav>
+            <nav><button onClick={() => void desktopApi.deepseek.prepare().then(setSnapshot).catch((error) => setNotice(describeError(error)))}>重新连接</button><button onClick={() => void desktopApi.deepseek.showOfficial().catch((error) => setNotice(describeError(error)))}>{snapshot.status === "login_required" ? "前往登录" : "打开官网"}</button>{!embedded && <button className="close" onClick={onClose} disabled={Boolean(pending.current)}>×</button>}</nav>
           </header>
 
           <div className="ai-message-scroll">
@@ -506,7 +500,7 @@ export function AiAssistantDialog({ open, repository, onClose }: {
             <input ref={imageInputRef} className="ai-image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => void attachImage(event.target.files?.[0])} />
             <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
-            }} placeholder={snapshot.status === "login_required" ? "请先在官网窗口完成登录…" : "问一个简单的问题，Enter 发送，Shift + Enter 换行"} disabled={!snapshot.ready || modeBusy || Boolean(pending.current)} />
+            }} placeholder={snapshot.status === "login_required" ? "请先在官网窗口完成登录…" : "问一个简单的问题，Enter 发送，Shift + Enter 换行"} disabled={!snapshot.ready || Boolean(pending.current)} />
             <footer>
               <div className="ai-capability-tools" aria-label="回答能力">
                 <button type="button" className={snapshot.deepThinkingAvailable && modeOptions.deepThinking ? "active" : ""} disabled={!snapshot.ready || !snapshot.deepThinkingAvailable || modeBusy || Boolean(pending.current)} title={snapshot.deepThinkingAvailable ? "使用 DeepSeek 官网的深度思考" : "官网当前未提供或适配器尚未识别"} onClick={() => void updateModes({ deepThinking: !modeOptions.deepThinking })}>◉ 深度思考</button>
@@ -521,16 +515,27 @@ export function AiAssistantDialog({ open, repository, onClose }: {
           </form>
         </div>
       </section>
-      {deleteTarget && <div className="ai-delete-confirm-backdrop" role="presentation">
-        <section className="ai-delete-confirm" role="alertdialog" aria-modal="true" aria-labelledby="ai-delete-title">
-          <span>删除会话</span>
-          <h2 id="ai-delete-title">确定删除“{deleteTarget.title}”吗？</h2>
-          {deleteTarget.remoteRef && (() => { try { return new URL(deleteTarget.remoteRef).pathname !== "/"; } catch { return false; } })()
-            ? <p>将先尝试删除 DeepSeek 官网中的对应会话；即使官网同步失败，也会删除本地记录。这个操作无法恢复。</p>
-            : <p>这个记录尚未关联到官网会话，只会删除本地内容。这个操作无法恢复。</p>}
-          <div><button onClick={() => setDeleteTarget(null)} disabled={busy}>取消</button><button className="danger" onClick={() => void removeConversation(deleteTarget)} disabled={busy}>{busy ? "正在同步删除…" : "确认删除"}</button></div>
-        </section>
-      </div>}
+  );
+
+  const confirmation = deleteTarget && <div className="ai-delete-confirm-backdrop" role="presentation">
+    <section className="ai-delete-confirm" role="alertdialog" aria-modal="true" aria-labelledby="ai-delete-title">
+      <span>删除会话</span>
+      <h2 id="ai-delete-title">确定删除“{deleteTarget.title}”吗？</h2>
+      {deleteTarget.remoteRef && (() => { try { return new URL(deleteTarget.remoteRef).pathname !== "/"; } catch { return false; } })()
+        ? <p>将先尝试删除 DeepSeek 官网中的对应会话；即使官网同步失败，也会删除本地记录。这个操作无法恢复。</p>
+        : <p>这个记录尚未关联到官网会话，只会删除本地内容。这个操作无法恢复。</p>}
+      <div><button onClick={() => setDeleteTarget(null)} disabled={busy}>取消</button><button className="danger" onClick={() => void removeConversation(deleteTarget)} disabled={busy}>{busy ? "正在同步删除…" : "确认删除"}</button></div>
+    </section>
+  </div>;
+
+  if (embedded) return <div className="ai-assistant-page">{assistant}{confirmation}</div>;
+
+  return (
+    <div className="ai-dialog-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget && !pending.current) onClose?.();
+    }}>
+      {assistant}
+      {confirmation}
     </div>
   );
 }
@@ -589,10 +594,17 @@ function sameConversationRef(left: string, right: string) {
 
 function modesFromSnapshot(snapshot: DeepSeekSnapshot, fallback: DeepSeekModeOptions): DeepSeekModeOptions {
   return {
-    deepThinking: snapshot.deepThinkingAvailable ? snapshot.deepThinkingEnabled || fallback.deepThinking : fallback.deepThinking,
+    deepThinking: snapshot.deepThinkingAvailable ? snapshot.deepThinkingEnabled : fallback.deepThinking,
     expertMode: snapshot.expertModeAvailable ? snapshot.expertModeEnabled : fallback.expertMode,
-    smartSearch: snapshot.smartSearchAvailable ? snapshot.smartSearchEnabled || fallback.smartSearch : fallback.smartSearch,
+    smartSearch: snapshot.smartSearchAvailable ? snapshot.smartSearchEnabled : fallback.smartSearch,
   };
+}
+
+function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+    operation.then(resolve, reject).finally(() => window.clearTimeout(timer));
+  });
 }
 
 function inferImageMime(file: File) {

@@ -157,6 +157,13 @@ export type CalendarOccurrence = {
   daysRemaining: number;
 };
 
+export type RestDay = {
+  date: string;
+  note: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type OfficialHolidayDay = {
   date: string;
   name: string;

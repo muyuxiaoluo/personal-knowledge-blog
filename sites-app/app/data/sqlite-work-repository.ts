@@ -6,6 +6,7 @@ import type {
   TaskPlan,
   TaskPriority,
   WeeklyFocus,
+  WeeklyReview,
 } from "../work-types";
 import { WorkRepositoryError, type WorkRepository } from "./work-repository";
 import type { SqliteDatabase } from "./sqlite-article-repository";
@@ -44,6 +45,16 @@ type DailyCloseoutRow = {
   updated_at: string;
 };
 
+type WeeklyReviewRow = {
+  week_start: string;
+  outcome_status: WeeklyReview["outcomeStatus"];
+  factor: WeeklyReview["factor"];
+  factor_note: string;
+  next_strategy: WeeklyReview["nextStrategy"];
+  adjustment: string;
+  updated_at: string;
+};
+
 const migrations = [
   `CREATE TABLE IF NOT EXISTS task_plans (
     task_id TEXT PRIMARY KEY NOT NULL,
@@ -75,6 +86,15 @@ const migrations = [
     tomorrow TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS weekly_reviews (
+    week_start TEXT PRIMARY KEY NOT NULL,
+    outcome_status TEXT NOT NULL,
+    factor TEXT NOT NULL DEFAULT '',
+    factor_note TEXT NOT NULL DEFAULT '',
+    next_strategy TEXT NOT NULL,
+    adjustment TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+  )`,
   "CREATE INDEX IF NOT EXISTS idx_task_plans_date_order ON task_plans(planned_date, sort_order)",
   "CREATE INDEX IF NOT EXISTS idx_focus_sessions_started ON focus_sessions(started_at DESC)",
   "CREATE INDEX IF NOT EXISTS idx_daily_closeouts_date ON daily_closeouts(closeout_date DESC)",
@@ -97,6 +117,10 @@ export class SqliteWorkRepository implements WorkRepository {
       throw error;
     });
     await this.initialization;
+  }
+
+  async ready() {
+    await this.initialize();
   }
 
   async listPlans(): Promise<TaskPlan[]> {
@@ -150,16 +174,20 @@ export class SqliteWorkRepository implements WorkRepository {
     }
   }
 
-  async listSessions(from = ""): Promise<FocusSession[]> {
+  async listSessions(from = "", limit = 500, before = ""): Promise<FocusSession[]> {
     try {
       await this.initialize();
-      const rows = from
+      const safeLimit = Number.isSafeInteger(limit) ? Math.min(2000, Math.max(1, limit)) : 500;
+      const rows = from || before
         ? await this.database.select<FocusSessionRow>(
-            "SELECT * FROM focus_sessions WHERE started_at >= ? ORDER BY started_at DESC",
-            [from],
+            `SELECT * FROM focus_sessions
+             WHERE (? = '' OR started_at >= ?) AND (? = '' OR started_at < ?)
+             ORDER BY started_at DESC LIMIT ?`,
+            [from, from, before, before, safeLimit],
           )
         : await this.database.select<FocusSessionRow>(
-            "SELECT * FROM focus_sessions ORDER BY started_at DESC",
+            "SELECT * FROM focus_sessions ORDER BY started_at DESC LIMIT ?",
+            [safeLimit],
           );
       return rows.map(rowToSession);
     } catch (error) {
@@ -285,6 +313,53 @@ export class SqliteWorkRepository implements WorkRepository {
     }
   }
 
+  async getWeeklyReview(weekStart: string): Promise<WeeklyReview | null> {
+    try {
+      await this.initialize();
+      const rows = await this.database.select<WeeklyReviewRow>(
+        "SELECT * FROM weekly_reviews WHERE week_start = ? LIMIT 1",
+        [weekStart],
+      );
+      return rows[0] ? rowToWeeklyReview(rows[0]) : null;
+    } catch (error) {
+      throw new WorkRepositoryError("读取本周校准失败", "read_failed", error);
+    }
+  }
+
+  async saveWeeklyReview(review: WeeklyReview): Promise<WeeklyReview> {
+    if (!review.weekStart.trim()) {
+      throw new WorkRepositoryError("本周开始日期不能为空", "invalid_data");
+    }
+    if (!review.outcomeStatus || !review.nextStrategy) {
+      throw new WorkRepositoryError("请先选择本周结果和下周策略", "invalid_data");
+    }
+    try {
+      await this.initialize();
+      const saved = {
+        ...review,
+        factorNote: review.factorNote.trim(),
+        adjustment: review.adjustment.trim(),
+        updatedAt: this.clock().toISOString(),
+      };
+      await this.database.execute(
+        `INSERT INTO weekly_reviews(week_start, outcome_status, factor, factor_note, next_strategy, adjustment, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(week_start) DO UPDATE SET
+           outcome_status = excluded.outcome_status,
+           factor = excluded.factor,
+           factor_note = excluded.factor_note,
+           next_strategy = excluded.next_strategy,
+           adjustment = excluded.adjustment,
+           updated_at = excluded.updated_at`,
+        [saved.weekStart, saved.outcomeStatus, saved.factor, saved.factorNote, saved.nextStrategy, saved.adjustment, saved.updatedAt],
+      );
+      return saved;
+    } catch (error) {
+      if (error instanceof WorkRepositoryError) throw error;
+      throw new WorkRepositoryError("保存本周校准失败", "save_failed", error);
+    }
+  }
+
   async listDailyCloseouts(from = ""): Promise<DailyCloseout[]> {
     try {
       await this.initialize();
@@ -361,6 +436,18 @@ function rowToWeeklyFocus(row: WeeklyFocusRow): WeeklyFocus {
     weekStart: row.week_start,
     primaryOutcome: row.primary_outcome,
     secondaryOutcome: row.secondary_outcome,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToWeeklyReview(row: WeeklyReviewRow): WeeklyReview {
+  return {
+    weekStart: row.week_start,
+    outcomeStatus: row.outcome_status,
+    factor: row.factor,
+    factorNote: row.factor_note,
+    nextStrategy: row.next_strategy,
+    adjustment: row.adjustment,
     updatedAt: row.updated_at,
   };
 }

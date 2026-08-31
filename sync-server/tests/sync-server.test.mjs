@@ -228,6 +228,123 @@ test("authenticates and synchronizes article changes", async (context) => {
   assert.equal(limited.status, 429);
 });
 
+test("applies CORS headers only for allowlisted origins", async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "mind-cors-"));
+  const database = new SyncDatabase(path.join(directory, "test.sqlite3"));
+  database.ensureOwner("owner", "a-secure-test-password");
+  const server = createSyncServer({
+    database,
+    authSecret,
+    logger: { error() {} },
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  context.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  // 无 Origin（非浏览器客户端）：不输出 CORS 头，请求正常成功。
+  const plain = await fetch(`${baseUrl}/v1/health`);
+  assert.equal(plain.status, 200);
+  assert.equal(plain.headers.get("access-control-allow-origin"), null);
+
+  // 白名单内的桌面端来源：回显 Origin。
+  const allowed = await fetch(`${baseUrl}/v1/health`, {
+    headers: { Origin: "http://tauri.localhost" },
+  });
+  assert.equal(
+    allowed.headers.get("access-control-allow-origin"),
+    "http://tauri.localhost",
+  );
+  assert.equal(allowed.headers.get("vary"), "Origin");
+
+  // 白名单外的来源：不输出 CORS 头，由浏览器拦截。
+  const blocked = await fetch(`${baseUrl}/v1/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: "https://evil.example" },
+    body: JSON.stringify({ username: "owner", password: "wrong" }),
+  });
+  assert.equal(blocked.status, 401);
+  assert.equal(
+    blocked.headers.get("access-control-allow-origin"),
+    null,
+  );
+
+  // 预检请求：白名单内返回 CORS 头，白名单外不返回。
+  const preflightAllowed = await fetch(`${baseUrl}/v1/sync`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "http://tauri.localhost",
+      "Access-Control-Request-Method": "POST",
+    },
+  });
+  assert.equal(preflightAllowed.status, 204);
+  assert.equal(
+    preflightAllowed.headers.get("access-control-allow-origin"),
+    "http://tauri.localhost",
+  );
+  const preflightBlocked = await fetch(`${baseUrl}/v1/sync`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://evil.example",
+      "Access-Control-Request-Method": "POST",
+    },
+  });
+  assert.equal(preflightBlocked.status, 204);
+  assert.equal(
+    preflightBlocked.headers.get("access-control-allow-origin"),
+    null,
+  );
+});
+
+test("honors custom CORS origins and wildcard opt-in", async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "mind-cors-"));
+  const database = new SyncDatabase(path.join(directory, "test.sqlite3"));
+  database.ensureOwner("owner", "a-secure-test-password");
+  const server = createSyncServer({
+    database,
+    authSecret,
+    logger: { error() {} },
+    allowedOrigins: ["https://custom.example"],
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  context.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  // 自定义来源被放行，默认 Tauri 来源反而被拒。
+  const custom = await fetch(`${baseUrl}/v1/health`, {
+    headers: { Origin: "https://custom.example" },
+  });
+  assert.equal(
+    custom.headers.get("access-control-allow-origin"),
+    "https://custom.example",
+  );
+  const tauri = await fetch(`${baseUrl}/v1/health`, {
+    headers: { Origin: "http://tauri.localhost" },
+  });
+  assert.equal(tauri.headers.get("access-control-allow-origin"), null);
+
+  // 空白名单应在启动时直接报错。
+  assert.throws(
+    () =>
+      createSyncServer({
+        database,
+        authSecret,
+        logger: { error() {} },
+        allowedOrigins: ["  "],
+      }),
+    /至少需要包含一个来源/,
+  );
+});
+
 function loginRequest(baseUrl, password, headers = {}) {
   return fetch(`${baseUrl}/v1/auth/login`, {
     method: "POST",

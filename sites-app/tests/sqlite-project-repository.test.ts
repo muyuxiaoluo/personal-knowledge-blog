@@ -11,6 +11,8 @@ import type {
 } from "../app/data/sqlite-article-repository";
 
 class NodeSqliteAdapter implements SqliteDatabase {
+  selectCount = 0;
+
   constructor(private readonly database: DatabaseSync) {}
 
   async execute(
@@ -25,9 +27,25 @@ class NodeSqliteAdapter implements SqliteDatabase {
   }
 
   async select<T>(sql: string, bindValues: SqliteValue[] = []): Promise<T[]> {
+    this.selectCount += 1;
     return this.database.prepare(sql).all(...bindValues) as T[];
   }
 }
+
+test("loads the project index in three reads and a selected project in two more", async () => {
+  const adapter = new NodeSqliteAdapter(new DatabaseSync(":memory:"));
+  const repository = new SqliteProjectRepository(adapter, {
+    seedProjects: initialProjectSeeds,
+  });
+  await repository.ready();
+  adapter.selectCount = 0;
+  const projects = await repository.list();
+  assert.equal(adapter.selectCount, 3);
+  assert.ok(projects[0]);
+  adapter.selectCount = 0;
+  await repository.get(projects[0].id);
+  assert.equal(adapter.selectCount, 2);
+});
 
 test("seeds staged projects and persists project progress", async () => {
   const database = new DatabaseSync(":memory:");
@@ -39,7 +57,7 @@ test("seeds staged projects and persists project progress", async () => {
 
   const seeded = await repository.list();
   assert.equal(seeded.length, 5);
-  assert.deepEqual(rootProjectStatusCounts(seeded), { active: 4, waiting: 0, paused: 1, completed: 0 });
+  assert.deepEqual(rootProjectStatusCounts(seeded), { active: 4, paused: 1, completed: 0 });
   assert.equal(seeded[0].title, "科研方向选择");
   assert.equal(seeded[0].category, "learning");
   assert.equal(seeded[0].isDraft, true);
@@ -147,6 +165,45 @@ test("seeds staged projects and persists project progress", async () => {
   database.close();
 });
 
+test("persists structured actions and records daily progress without completing the action", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-08-25T10:00:00.000Z"),
+  });
+  const detail = await repository.get("project-research-direction");
+  assert.ok(detail);
+  const task = detail.tasks[0];
+  const saved = await repository.saveTask({
+    ...task,
+    definitionOfDone: "能不看原文讲清研究问题、方法、证据和局限。",
+    currentFocus: "读完方法部分并画出输入到输出流程",
+    steps: [
+      { id: "step-method", title: "读方法部分", completed: true },
+      { id: "step-figure", title: "画流程图", completed: false },
+    ],
+  });
+  assert.equal(saved.definitionOfDone, "能不看原文讲清研究问题、方法、证据和局限。");
+  assert.equal(saved.currentFocus, "读完方法部分并画出输入到输出流程");
+  assert.deepEqual(saved.steps, [
+    { id: "step-method", title: "读方法部分", completed: true },
+    { id: "step-figure", title: "画流程图", completed: false },
+  ]);
+
+  await repository.recordTaskProgress(saved.id, "读完方法部分并画出了主流程。", "核对实验设置与消融实验");
+  const progressed = await repository.get(detail.project.id);
+  const continuedTask = progressed?.tasks.find((item) => item.id === saved.id);
+  assert.equal(continuedTask?.status, "next");
+  assert.equal(continuedTask?.currentFocus, "核对实验设置与消融实验");
+  assert.equal(continuedTask?.resumeAction, "核对实验设置与消融实验");
+  const progressLog = progressed?.logs.find((log) => log.body.startsWith("行动推进｜"));
+  assert.ok(progressLog);
+  const logBody = JSON.parse(progressLog.body.slice("行动推进｜".length));
+  assert.equal(logBody.result, "读完方法部分并画出了主流程。");
+  assert.equal(logBody.nextFocus, "核对实验设置与消融实验");
+  database.close();
+});
+
 test("records a project completion time and clears it when reopened", async () => {
   let now = new Date("2026-08-20T10:00:00.000Z");
   const repository = new SqliteProjectRepository(new NodeSqliteAdapter(new DatabaseSync(":memory:")), {
@@ -159,6 +216,58 @@ test("records a project completion time and clears it when reopened", async () =
   now = new Date("2026-08-21T10:00:00.000Z");
   await repository.updateProjectStatus("project-life-workbench-v01", "active", "重新开启项目");
   assert.equal((await repository.get("project-life-workbench-v01"))?.project.completedAt, null);
+});
+
+test("persists lightweight projects with a target date and no stage route", async () => {
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(new DatabaseSync(":memory:")), {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-08-28T10:00:00.000Z"),
+  });
+  const source = await repository.get("project-research-direction");
+  assert.ok(source);
+
+  const saved = await repository.saveWorkspace({
+    ...source.project,
+    id: "project-teacher-exam",
+    title: "教资考试冲刺",
+    outcome: "完成重点复习与模拟，并按时参加考试。",
+    targetDate: "2026-09-12",
+    createdAt: "",
+    updatedAt: "",
+  }, [], null);
+
+  const detail = await repository.get(saved.id);
+  assert.equal(detail?.project.targetDate, "2026-09-12");
+  assert.deepEqual(detail?.milestones, []);
+});
+
+test("completes the current stage, advances the route, and keeps unfinished actions", async () => {
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(new DatabaseSync(":memory:")), {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-08-28T10:00:00.000Z"),
+  });
+  const detail = await repository.get("project-research-direction");
+  assert.ok(detail);
+  const current = detail.milestones.find((milestone) => milestone.status === "current");
+  assert.ok(current);
+  const next = await repository.saveMilestone({
+    ...current,
+    id: "project-research-direction-milestone-next",
+    title: "完成第一轮基线复现",
+    status: "planned",
+    sortOrder: current.sortOrder + 10,
+    createdAt: "",
+    updatedAt: "",
+  });
+
+  const activated = await repository.completeMilestone(current.id, `完成阶段：${current.title}`);
+  const saved = await repository.get(detail.project.id);
+  assert.equal(saved?.milestones.find((milestone) => milestone.id === current.id)?.status, "completed");
+  assert.equal(activated?.id, next.id);
+  assert.equal(saved?.milestones.find((milestone) => milestone.id === next.id)?.status, "current");
+  assert.equal(saved?.tasks[0].status, "next");
+  assert.equal(saved?.tasks[0].milestoneId, current.id);
+  assert.ok(saved?.logs.some((log) => log.body === `完成阶段：${current.title}`));
 });
 
 test("rolls back task completion when the progress log cannot be written", async () => {
@@ -428,6 +537,7 @@ test("adds proposal storage to an existing version 3 project database", async ()
   assert.ok(projectColumns.some((column) => String(column.name) === "project_type"));
   assert.ok(projectColumns.some((column) => String(column.name) === "parent_project_id"));
   assert.ok(projectColumns.some((column) => String(column.name) === "supports_milestone_id"));
+  assert.ok(projectColumns.some((column) => String(column.name) === "target_date"));
   database.close();
 });
 
@@ -463,11 +573,28 @@ test("maps legacy project categories into the shared life domains", async () => 
     "2026-08-01T00:00:00.000Z",
     "2026-08-01T00:00:00.000Z",
   );
+  database.prepare(`INSERT INTO projects(
+    id, title, outcome, motivation, status, category, sort_order, is_draft, source_note, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    "legacy-waiting",
+    "旧等待项目",
+    "保留原项目内容",
+    "",
+    "waiting",
+    "systems",
+    20,
+    0,
+    "",
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-01T00:00:00.000Z",
+  );
 
   const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database));
   const projects = await repository.list();
-  assert.equal(projects[0].category, "learning");
+  assert.equal(projects.find((project) => project.id === "legacy-research")?.category, "learning");
+  assert.equal(projects.find((project) => project.id === "legacy-waiting")?.status, "paused");
   assert.equal(database.prepare("SELECT category FROM projects WHERE id = ?").get("legacy-research")?.category, "learning");
+  assert.equal(database.prepare("SELECT status FROM projects WHERE id = ?").get("legacy-waiting")?.status, "paused");
   database.close();
 });
 
