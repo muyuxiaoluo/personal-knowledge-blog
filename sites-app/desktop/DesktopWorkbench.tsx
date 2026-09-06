@@ -18,6 +18,7 @@ import {
   type ClipboardEvent as ReactClipboardEvent,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import type { ArticleRepository } from "../app/data/article-repository";
@@ -34,6 +35,15 @@ import type { WorkRepository } from "../app/data/work-repository";
 import type { SqliteAiRepository } from "../app/data/sqlite-ai-repository";
 import type { IntegrationRepository } from "../app/data/integration-repository";
 import type { DashboardRepository } from "../app/data/dashboard-repository";
+import type { HealthRepository } from "../app/data/health-repository";
+import type { FinanceRepository } from "../app/data/finance-repository";
+import type { DeepSeekModel, DeepSeekModelSettings } from "../app/ai-api-types";
+import {
+  cacheDeepSeekModels,
+  loadCachedDeepSeekModels,
+  loadDeepSeekModelSettings,
+  saveDeepSeekModelSettings,
+} from "../app/ai-model-settings";
 import { rootProjectStatusCounts } from "../app/project-selectors";
 import type { ProjectDetail, ProjectProposal, ProjectSummary, ProjectTask } from "../app/project-types";
 import type { Article, StoredArticle } from "../app/types";
@@ -45,8 +55,11 @@ import {
   sourceForCapturedResult,
 } from "../app/entertainment-capture";
 import { workspaceTitle, type QuickLink } from "../app/workspace-preferences";
-import type { FocusSession, TaskPlan, WeeklyFocus, WeeklyReview } from "../app/work-types";
+import type { DailySituation, SituationPlanChange, TaskPlanHistory, FocusSession, TaskPlan, WeeklyFocus, WeeklyReview } from "../app/work-types";
+import { DailySituationDialog } from "./DailySituationDialog";
+import { isContinuablePlan } from "../app/action-planning";
 import { defaultDashboardPreferences, type CalendarEvent, type DashboardPreferences, type ExternalSourceInput, type RestDay } from "../app/dashboard-types";
+import { emptyHealthDailyLog, emptyHealthProfile, type HealthDailyLog, type HealthMeal, type HealthProfile } from "../app/health-types";
 import { normalizeExternalSourceInput } from "../app/dashboard-normalization";
 import { MarkdownDocument } from "./MarkdownDocument";
 import {
@@ -56,28 +69,34 @@ import {
   validateUpdateProxyPort,
 } from "./updateProxy";
 import { WorkbenchIcon, type WorkbenchIconName } from "./WorkbenchIcon";
-import { SearchField, SelectMenu, useConfirmDialog } from "./DesktopControls";
+import { Button, SearchField, SelectMenu, useConfirmDialog } from "./DesktopControls";
 import type {
   NewActionInput,
   SourceOrganizationInput,
   WorkspaceTask,
 } from "./WorkPages";
 import { formatFocusDuration } from "./focus-format";
-import { DESKTOP_THEMES, ThemeArtwork, type ThemeId } from "./DesktopThemes";
+import { DESKTOP_THEMES, ThemeArtwork, ThemeSticker, type ThemeId } from "./DesktopThemes";
 import { DESKTOP_FONT_PRESETS, type FontPresetId } from "./DesktopTypography";
+import { desktopApi } from "./integrationApi";
 
 const ProjectWorkspace = lazy(async () => ({ default: (await import("./ProjectWorkspace")).ProjectWorkspace }));
 const AiAssistantDialog = lazy(async () => ({ default: (await import("./AiAssistantDialog")).AiAssistantDialog }));
 const ToolCenterPage = lazy(async () => ({ default: (await import("./ToolCenter")).ToolCenterPage }));
 const DashboardSettingsSection = lazy(async () => ({ default: (await import("./MorningDashboard")).DashboardSettingsSection }));
 const HomeDashboard = lazy(async () => ({ default: (await import("./WorkPages")).HomeDashboard }));
+const HealthPage = lazy(async () => ({ default: (await import("./HealthPage")).HealthPage }));
+const WealthPage = lazy(async () => ({ default: (await import("./WealthPage")).WealthPage }));
 const TasksPage = lazy(async () => ({ default: (await import("./WorkPages")).TasksPage }));
 const ExplorePage = lazy(async () => ({ default: (await import("./WorkPages")).ExplorePage }));
 const InboxPage = lazy(async () => ({ default: (await import("./WorkPages")).InboxPage }));
 const ReviewPage = lazy(async () => ({ default: (await import("./WorkPages")).ReviewPage }));
 const ArchivePage = lazy(async () => ({ default: (await import("./WorkPages")).ArchivePage }));
 
-export type DeskSection = "home" | "tasks" | "projects" | "notes" | "explore" | "inbox" | "review" | "archive" | "ai" | "tools" | "settings";
+const NotesStyles = lazy(async () => { await import("./styles/notes-final.css"); return { default: () => null }; });
+const SettingsStyles = lazy(async () => { await import("./styles/avatar-settings.css"); return { default: () => null }; });
+
+export type DeskSection = "home" | "tasks" | "health" | "wealth" | "projects" | "notes" | "explore" | "inbox" | "review" | "archive" | "ai" | "tools" | "settings";
 type UndoOffer = { message: string; run: () => Promise<void> };
 type ArticleOrganizationPatch = {
   category?: NoteCategory;
@@ -105,6 +124,8 @@ type DesktopWorkbenchProps = {
   aiRepository: SqliteAiRepository;
   integrationRepository: IntegrationRepository;
   dashboardRepository: DashboardRepository;
+  healthRepository: HealthRepository;
+  financeRepository: FinanceRepository;
   displayName: string;
   avatarDataUrl: string;
   quickLinks: QuickLink[];
@@ -133,6 +154,8 @@ const sections: Array<{
 }> = [
   { id: "home", label: "首页", icon: "home", group: "action" },
   { id: "tasks", label: "今日行动", icon: "today", group: "action" },
+  { id: "health", label: "健康", icon: "health", group: "action" },
+  { id: "wealth", label: "财富", icon: "wealth", group: "action" },
   { id: "projects", label: "项目", icon: "projects", group: "action" },
   { id: "notes", label: "笔记", icon: "notes", group: "knowledge" },
   { id: "explore", label: "探索库", icon: "explore", group: "knowledge" },
@@ -184,6 +207,8 @@ export function DesktopWorkbench({
   aiRepository,
   integrationRepository,
   dashboardRepository,
+  healthRepository,
+  financeRepository,
   displayName,
   avatarDataUrl,
   quickLinks,
@@ -207,7 +232,11 @@ export function DesktopWorkbench({
   const [articles, setArticles] = useState<StoredArticle[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectDetails, setProjectDetails] = useState<ProjectDetail[]>([]);
+  const [standaloneTasks, setStandaloneTasks] = useState<ProjectTask[]>([]);
   const [plans, setPlans] = useState<TaskPlan[]>([]);
+  const [planHistory, setPlanHistory] = useState<TaskPlanHistory[]>([]);
+  const [dailySituations, setDailySituations] = useState<DailySituation[]>([]);
+  const [situationDate, setSituationDate] = useState<string | null>(null);
   const [activeSession, setActiveSession] = useState<FocusSession | null>(null);
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
   const [weeklyFocus, setWeeklyFocus] = useState<WeeklyFocus | null>(null);
@@ -216,18 +245,23 @@ export function DesktopWorkbench({
   const [dashboardPreferences, setDashboardPreferences] = useState<DashboardPreferences>(() => structuredClone(defaultDashboardPreferences));
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
   const [restDays, setRestDays] = useState<RestDay[]>([]);
+  const [healthProfile, setHealthProfile] = useState<HealthProfile>(() => structuredClone(emptyHealthProfile));
+  const [healthToday, setHealthToday] = useState<HealthDailyLog>(() => emptyHealthDailyLog(localDate()));
+  const [healthMealsToday, setHealthMealsToday] = useState<HealthMeal[]>([]);
   const [section, setSection] = useState<DeskSection>("home");
   const [noteView, setNoteView] = useState<"recent" | NoteCategory>("recent");
   const [organizeId, setOrganizeId] = useState<string | null>(null);
   const [batchMode, setBatchMode] = useState(false);
   const [batchIds, setBatchIds] = useState<Set<string>>(new Set());
   const [requestedProjectId, setRequestedProjectId] = useState<string | null>(null);
+  const [requestedTaskId, setRequestedTaskId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draftDirty, setDraftDirty] = useState(false);
+  const [projectEditing, setProjectEditing] = useState(false);
   const [appending, setAppending] = useState(false);
   const [draft, setDraft] = useState<Article>({ ...emptyDraft });
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
@@ -259,13 +293,13 @@ export function DesktopWorkbench({
   }, []);
 
   useEffect(() => {
-    onEditingStateChange?.(editing || (quickCaptureOpen && Boolean(quickText.trim())));
-  }, [editing, onEditingStateChange, quickCaptureOpen, quickText]);
+    onEditingStateChange?.(editing || projectEditing || (quickCaptureOpen && Boolean(quickText.trim())));
+  }, [editing, onEditingStateChange, projectEditing, quickCaptureOpen, quickText]);
 
   useEffect(() => () => onEditingStateChange?.(false), [onEditingStateChange]);
 
   useEffect(() => {
-    const hasUnsavedInput = (editing && draftDirty) || (quickCaptureOpen && Boolean(quickText.trim()));
+    const hasUnsavedInput = (editing && draftDirty) || projectEditing || (quickCaptureOpen && Boolean(quickText.trim()));
     if (!hasUnsavedInput) return;
     const preventClose = (event: BeforeUnloadEvent) => {
       event.preventDefault();
@@ -273,7 +307,7 @@ export function DesktopWorkbench({
     };
     window.addEventListener("beforeunload", preventClose);
     return () => window.removeEventListener("beforeunload", preventClose);
-  }, [draftDirty, editing, quickCaptureOpen, quickText]);
+  }, [draftDirty, editing, projectEditing, quickCaptureOpen, quickText]);
 
   useEffect(() => () => {
     if (messageTimer.current) window.clearTimeout(messageTimer.current);
@@ -322,9 +356,13 @@ export function DesktopWorkbench({
 
   const refreshProjects = useCallback(async () => {
     const next = await projectRepository.list();
-    const details = await projectRepository.listIndexDetails();
+    const [details, standalone] = await Promise.all([
+      projectRepository.listIndexDetails(),
+      projectRepository.listStandaloneTasks(),
+    ]);
     setProjects(next);
     setProjectDetails(details);
+    setStandaloneTasks(standalone);
     return next;
   }, [projectRepository]);
 
@@ -333,15 +371,19 @@ export function DesktopWorkbench({
     const previousWeekStart = shiftLocalDate(weekStart, -7);
     const focusHistoryFrom = new Date();
     focusHistoryFrom.setFullYear(focusHistoryFrom.getFullYear() - 1);
-    const [nextPlans, nextActive, nextSessions, nextFocus, nextReview, previousReview] = await Promise.all([
+    const [nextPlans, nextActive, nextSessions, nextFocus, nextReview, previousReview, nextHistory, nextSituations] = await Promise.all([
       workRepository.listPlans(),
       workRepository.getActiveSession(),
       workRepository.listSessions(focusHistoryFrom.toISOString(), 2000),
       workRepository.getWeeklyFocus(weekStart),
       workRepository.getWeeklyReview(weekStart),
       workRepository.getWeeklyReview(previousWeekStart),
+      workRepository.listPlanHistory(),
+      workRepository.listDailySituations(),
     ]);
     setPlans(nextPlans);
+    setPlanHistory(nextHistory);
+    setDailySituations(nextSituations);
     setActiveSession(nextActive);
     setFocusSessions(nextSessions);
     setWeeklyFocus(nextFocus);
@@ -360,10 +402,22 @@ export function DesktopWorkbench({
     setRestDays(rests);
   }, [dashboardRepository]);
 
+  const refreshHealth = useCallback(async () => {
+    const date = localDate();
+    const [nextProfile, nextDaily, nextMeals] = await Promise.all([
+      healthRepository.getProfile(),
+      healthRepository.getDaily(date),
+      healthRepository.listMeals(date),
+    ]);
+    setHealthProfile(nextProfile);
+    setHealthToday(nextDaily);
+    setHealthMealsToday(nextMeals);
+  }, [healthRepository]);
+
   useEffect(() => {
     let active = true;
     setLoading(true);
-    Promise.all([refreshArticles(), refreshProjects(), refreshWork(), refreshDashboardLocal()])
+    Promise.all([refreshArticles(), refreshProjects(), refreshWork(), refreshDashboardLocal(), refreshHealth()])
       .catch((error) => {
         if (active) showMessage(error instanceof Error ? error.message : "无法读取本地工作台");
       })
@@ -371,7 +425,7 @@ export function DesktopWorkbench({
         if (active) setLoading(false);
       });
     return () => { active = false; };
-  }, [refreshArticles, refreshDashboardLocal, refreshProjects, refreshWork, showMessage]);
+  }, [refreshArticles, refreshDashboardLocal, refreshHealth, refreshProjects, refreshWork, showMessage]);
 
   const articleSearchInitialized = useRef(false);
   useEffect(() => {
@@ -423,11 +477,12 @@ export function DesktopWorkbench({
     return () => window.removeEventListener("keydown", handleKeyboard);
   });
 
-  const workspaceTasks = useMemo<WorkspaceTask[]>(() => projectDetails.flatMap((detail) =>
-    detail.tasks.map((task) => {
-      const milestone = detail.milestones.find((item) => item.id === task.milestoneId) ?? null;
+  const workspaceTasks = useMemo<WorkspaceTask[]>(() => {
+    const projectTasks = projectDetails.flatMap((detail) => detail.tasks.map((task) => {
+      const activeMilestones = detail.milestones.filter((item) => item.status !== "superseded");
+      const milestone = activeMilestones.find((item) => item.id === task.milestoneId) ?? null;
       const stageTasks = detail.tasks.filter((item) => item.milestoneId === task.milestoneId);
-      const stageIndex = milestone ? detail.milestones.findIndex((item) => item.id === milestone.id) + 1 : 0;
+      const stageIndex = milestone ? activeMilestones.findIndex((item) => item.id === milestone.id) + 1 : 0;
       const storedPlan = plans.find((plan) => plan.taskId === task.id) ?? null;
       const planCarriedFrom = storedPlan && task.status !== "done" && storedPlan.plannedDate < today
         ? storedPlan.plannedDate
@@ -439,14 +494,34 @@ export function DesktopWorkbench({
         stageTitle: milestone?.title ?? "",
         stageDueDate: milestone?.dueDate ?? "",
         stageIndex,
-        stageCount: detail.milestones.length,
+        stageCount: activeMilestones.length,
         stageCompletedTasks: stageTasks.filter((item) => item.status === "done").length,
         stageTaskCount: stageTasks.length,
-        plan: planCarriedFrom ? { ...storedPlan!, plannedDate: today } : storedPlan,
+        plan: storedPlan,
         planCarriedFrom,
       };
-    }),
-  ), [plans, projectDetails, today]);
+    }));
+    const independentTasks = standaloneTasks.map((task): WorkspaceTask => {
+      const storedPlan = plans.find((plan) => plan.taskId === task.id) ?? null;
+      const planCarriedFrom = storedPlan && task.status !== "done" && storedPlan.plannedDate < today
+        ? storedPlan.plannedDate
+        : "";
+      return {
+        ...task,
+        projectTitle: "独立行动",
+        projectStatus: null,
+        stageTitle: "",
+        stageDueDate: "",
+        stageIndex: 0,
+        stageCount: 0,
+        stageCompletedTasks: 0,
+        stageTaskCount: 0,
+        plan: storedPlan,
+        planCarriedFrom,
+      };
+    });
+    return [...projectTasks, ...independentTasks];
+  }, [plans, projectDetails, standaloneTasks, today]);
 
   const selected = useMemo(
     () => articles.find((article) => article.id === selectedId) ?? null,
@@ -478,33 +553,51 @@ export function DesktopWorkbench({
   const projectCounts = rootProjectStatusCounts(projects);
   const counts: Record<DeskSection, number | null> = {
     home: null,
-    tasks: workspaceTasks.filter((task) => task.status !== "done" && task.plan?.plannedDate === today).length,
+    tasks: workspaceTasks.filter((task) => !["done", "cancelled", "waiting"].includes(task.status) && (task.plan?.plannedDate === today || isContinuablePlan(task.plan, today))).length,
+    health: null,
+    wealth: null,
     projects: projectCounts.active,
     notes: articles.filter((article) => !isSourceArticle(article) && !isThoughtInboxArticle(article)).length,
     explore: articles.filter(isSourceArticle).filter((article) => article.branch !== "已归档").length,
     inbox: inboxCount,
     review: null,
-    archive: projects.filter((project) => project.status === "completed").length + workspaceTasks.filter((task) => task.status === "done").length,
+    archive: projects.filter((project) => project.status === "completed").length + workspaceTasks.filter((task) => task.status === "done" || task.status === "cancelled").length,
     ai: null,
     tools: null,
     settings: null,
   };
 
-  function switchSection(next: DeskSection) {
+  async function switchSection(next: DeskSection) {
+    if (next === section) return true;
     if (section === "ai" && next !== "ai" && aiResponsePending) {
       showMessage("DeepSeek 正在生成回答，请先等待完成或点击停止。");
-      return;
+      return false;
+    }
+    if (section === "projects" && next !== "projects" && projectEditing) {
+      if (!await confirm({
+        title: "离开项目编辑页？",
+        description: "当前项目编辑尚未保存，离开后这些修改将被放弃。",
+        confirmLabel: "放弃并离开",
+        tone: "danger",
+      })) return false;
+      setProjectEditing(false);
     }
     setSection(next);
     setSelectedId(null);
     setOrganizeId(null);
     setEditing(false);
     setQuery("");
+    return true;
   }
 
-  function openProject(projectId: string) {
+  async function openProject(projectId: string) {
+    if (!await switchSection("projects")) return;
     setRequestedProjectId(projectId);
-    switchSection("projects");
+  }
+
+  async function openTask(taskId: string) {
+    if (!await switchSection("tasks")) return;
+    setRequestedTaskId(taskId);
   }
 
   async function openArticle(article: StoredArticle) {
@@ -692,7 +785,7 @@ export function DesktopWorkbench({
     if (saved) {
       setQuickText("");
       setQuickCaptureOpen(false);
-      switchSection("inbox");
+      await switchSection("inbox");
     }
   }
 
@@ -792,9 +885,11 @@ export function DesktopWorkbench({
   async function removeFromToday(task: WorkspaceTask) {
     const previous = task.plan;
     if (!previous) return;
-    await workRepository.removePlan(task.id);
+    const moveToPending = previous.plannedDate === today;
+    if (moveToPending) await workRepository.savePlan({ ...previous, plannedDate: "" });
+    else await workRepository.removePlan(task.id);
     await refreshWork();
-    offerUndo("已移出今天", async () => {
+    offerUndo(moveToPending ? "已移入待继续，有空再做" : "已暂时收起，可从已有行动找回", async () => {
       await workRepository.savePlan(previous);
       await refreshWork();
     });
@@ -840,12 +935,12 @@ export function DesktopWorkbench({
       const stopped = activeSession?.taskId === task.id ? await workRepository.stopSession(activeSession.id) : null;
       await projectRepository.completeTask(task.id, `完成行动：${task.title}`);
       await Promise.all([refreshProjects(), refreshWork()]);
-      offerUndo(stopped ? `任务已完成 · 本次投入 ${formatFocusDuration(stopped.durationSeconds)}` : "任务已完成", async () => {
+      offerUndo(stopped ? `行动已完成 · 本次投入 ${formatFocusDuration(stopped.durationSeconds)}` : "行动已完成", async () => {
         await projectRepository.updateTaskStatus(task.id, task.status);
         await refreshProjects();
       });
     } catch (error) {
-      showMessage(error instanceof Error ? error.message : "无法完成任务");
+      showMessage(error instanceof Error ? error.message : "无法完成行动");
     }
   }
 
@@ -860,20 +955,26 @@ export function DesktopWorkbench({
     }
   }
 
+  async function saveDailySituation(situation: DailySituation, changes: SituationPlanChange[]) {
+    await workRepository.saveDailySituation(situation, changes);
+    await refreshWork();
+    showMessage("当天情况已保存，后续可以从留下的行动继续。");
+  }
+
   async function closeToday(task: WorkspaceTask, result: string, nextFocus: string) {
     try {
       if (activeSession?.taskId === task.id) await workRepository.stopSession(activeSession.id);
       await projectRepository.recordTaskProgress(task.id, result, nextFocus);
       await workRepository.savePlan({
         taskId: task.id,
-        plannedDate: nextLocalDate(today),
+        plannedDate: "",
         priority: task.plan?.priority || "normal",
         estimateMinutes: task.plan?.estimateMinutes || 0,
         sortOrder: task.plan?.sortOrder || 0,
         updatedAt: "",
       });
       await Promise.all([refreshProjects(), refreshWork()]);
-      showMessage("今日进展已记录，明天会从新的起点继续。");
+      showMessage("进展已记录，行动留在待继续，有空再做。");
       return true;
     } catch (error) {
       await Promise.all([refreshProjects(), refreshWork()]);
@@ -886,12 +987,12 @@ export function DesktopWorkbench({
     try {
       await projectRepository.updateTaskStatus(task.id, "later");
       await refreshProjects();
-      offerUndo("任务已经恢复", async () => {
-        await projectRepository.updateTaskStatus(task.id, "done");
+      offerUndo("行动已经恢复", async () => {
+        await projectRepository.updateTaskStatus(task.id, task.status);
         await refreshProjects();
       });
     } catch (error) {
-      showMessage(error instanceof Error ? error.message : "无法恢复任务");
+      showMessage(error instanceof Error ? error.message : "无法恢复行动");
     }
   }
 
@@ -921,6 +1022,7 @@ export function DesktopWorkbench({
       id: "",
       projectId: input.projectId,
       milestoneId: input.milestoneId,
+      direction: input.direction,
       title: input.title,
       actionType: "organize",
       definitionOfDone: input.definitionOfDone,
@@ -940,20 +1042,20 @@ export function DesktopWorkbench({
     };
     try {
       const saved = await projectRepository.saveTask(task);
-      if (input.plannedToday) {
-        await workRepository.savePlan({ taskId: saved.id, plannedDate: today, priority: "normal", estimateMinutes: 0, sortOrder: 99, updatedAt: "" });
+      if (input.plannedToday || input.keepAvailable) {
+        await workRepository.savePlan({ taskId: saved.id, plannedDate: input.plannedToday ? today : "", priority: "normal", estimateMinutes: 0, sortOrder: 99, updatedAt: "" });
       }
       await Promise.all([refreshProjects(), refreshWork()]);
-      showMessage("任务已经添加。 ");
+      showMessage("行动已经添加。");
       return saved;
     } catch (error) {
-      showMessage(error instanceof Error ? error.message : "无法添加任务");
+      showMessage(error instanceof Error ? error.message : "无法添加行动");
       return null;
     }
   }
 
   async function addTask(input: NewActionInput) {
-    await createTask(input);
+    return Boolean(await createTask(input));
   }
 
   async function saveWeeklyFocus(primaryOutcome: string, secondaryOutcome: string) {
@@ -1005,6 +1107,7 @@ export function DesktopWorkbench({
     const created = await createTask({
       projectId,
       milestoneId: project.milestones.find((item) => item.status === "current")?.id ?? null,
+      direction: project.project.category,
       title: article.title,
       definitionOfDone: "",
       steps: [],
@@ -1085,6 +1188,7 @@ export function DesktopWorkbench({
           id: "",
           projectId: input.projectId,
           milestoneId: input.milestoneId,
+          direction: input.direction,
           title: input.title,
           actionType: "organize",
           definitionOfDone: input.definitionOfDone,
@@ -1167,7 +1271,6 @@ export function DesktopWorkbench({
       <WorkbenchSidebar
         section={section}
         counts={counts}
-        inboxCount={inboxCount}
         title={workspaceTitle(displayName)}
         avatarDataUrl={avatarDataUrl}
         collapsed={sidebarCollapsed}
@@ -1179,9 +1282,10 @@ export function DesktopWorkbench({
 
       <ThemeArtwork themeId={themeId} section={section} documentMode={documentMode} />
 
-      {activeSession && <GlobalFocusBar session={activeSession} task={workspaceTasks.find((task) => task.id === activeSession.taskId) ?? null} onShow={() => switchSection("tasks")} onPause={() => void stopFocus()} />}
+      {activeSession && <GlobalFocusBar session={activeSession} task={workspaceTasks.find((task) => task.id === activeSession.taskId) ?? null} onShow={() => activeSession.taskId ? openTask(activeSession.taskId) : switchSection("tasks")} onPause={() => void stopFocus()} />}
 
       <Suspense fallback={<section className="workspace-page-loading"><span>个人工作台</span><strong>正在打开这一页…</strong></section>}>
+      {(documentMode || section === "notes") && <NotesStyles />}
       {documentMode ? (
         <section className="document-stage">
           {editing ? (
@@ -1218,9 +1322,10 @@ export function DesktopWorkbench({
           onProjectsChange={refreshProjects}
           onBackToHall={() => setRequestedProjectId(null)}
           onRemoveTask={removeTask}
+          onEditingStateChange={setProjectEditing}
         />
       ) : section === "notes" ? (
-        <NotesWorkspace
+        <><NotesWorkspace
           articles={noteArticles}
           projects={projects}
           counts={noteViewCounts}
@@ -1247,18 +1352,20 @@ export function DesktopWorkbench({
           onExitBatch={exitBatchMode}
           onOrganize={organizeArticle}
           onBatchOrganize={batchOrganize}
-        />
+        /></>
       ) : (
         <section className="workspace-main-stage">
-          {section === "home" && <HomeDashboard today={today} tasks={workspaceTasks} articles={articles} weeklyFocus={weeklyFocus} integrationRepository={integrationRepository} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} calendarEvents={calendarEvents} restDays={restDays} onOpenTools={() => switchSection("tools")} onSaveWeeklyFocus={saveWeeklyFocus} onSaveDashboardPreferences={saveDashboardPreferences} onSaveCalendarEvent={saveCalendarEvent} onDeleteCalendarEvent={deleteCalendarEvent} onSetRestDay={setRestDay} onSaveSource={saveExternalSource} onNotice={showMessage} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
-          {section === "tasks" && <TasksPage today={today} tasks={workspaceTasks} projects={projects} projectDetails={projectDetails} onAddTask={addTask} onRemoveTask={removeTask} onOpenProject={openProject} {...taskActions} />}
+          {section === "home" && <HomeDashboard dailySituations={dailySituations} onSupplementDay={setSituationDate} today={today} tasks={workspaceTasks} articles={articles} weeklyFocus={weeklyFocus} integrationRepository={integrationRepository} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} calendarEvents={calendarEvents} restDays={restDays} healthProfile={healthProfile} healthToday={healthToday} healthMeals={healthMealsToday} onOpenHealth={() => switchSection("health")} onOpenTools={() => switchSection("tools")} onSaveWeeklyFocus={saveWeeklyFocus} onSaveDashboardPreferences={saveDashboardPreferences} onSaveCalendarEvent={saveCalendarEvent} onDeleteCalendarEvent={deleteCalendarEvent} onSetRestDay={setRestDay} onSaveSource={saveExternalSource} onNotice={showMessage} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTask={openTask} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
+          {section === "tasks" && <TasksPage onSupplementDay={setSituationDate} dailySituations={dailySituations} today={today} tasks={workspaceTasks} projects={projects} projectDetails={projectDetails} initialTaskId={requestedTaskId} onTaskOpened={() => setRequestedTaskId(null)} onAddTask={addTask} onRemoveTask={removeTask} onOpenProject={openProject} {...taskActions} />}
+          {section === "health" && <HealthPage repository={healthRepository} today={today} onChanged={() => void refreshHealth()} onNotice={showMessage} onOpenAiSettings={() => switchSection("settings")} />}
+          {section === "wealth" && <WealthPage repository={financeRepository} projects={projects} today={today} onNotice={showMessage} />}
           {section === "explore" && <ExplorePage articles={articles} projects={projects} projectDetails={projectDetails} onSaveLink={saveExternalLink} onArchive={archiveSource} onDelete={removeArticle} onOpenArticle={openArticle} onOpenProject={openProject} onOrganize={organizeSource} />}
           {section === "inbox" && <InboxPage articles={articles} projects={projects} onOpenArticle={openArticle} onNewCapture={() => setQuickCaptureOpen(true)} onMoveArticle={moveInboxArticle} onConvertToAction={convertInboxToAction} onConvertToProposal={convertInboxToProposal} onDelete={removeArticle} />}
-          {section === "review" && <ReviewPage projects={projects} projectDetails={projectDetails} articles={articles} tasks={workspaceTasks} weeklyFocus={weeklyFocus} weeklyReview={weeklyReview} previousWeeklyReview={previousWeeklyReview} onSaveWeeklyReview={saveWeeklyReview} />}
-          {section === "archive" && <ArchivePage projects={projects} tasks={workspaceTasks} focusSessions={focusSessions} onOpenProject={openProject} onRestoreTask={restoreTask} />}
+          {section === "review" && <ReviewPage dailySituations={dailySituations} onSupplementDay={setSituationDate} projects={projects} projectDetails={projectDetails} articles={articles} tasks={workspaceTasks} weeklyFocus={weeklyFocus} weeklyReview={weeklyReview} previousWeeklyReview={previousWeeklyReview} onSaveWeeklyReview={saveWeeklyReview} onOpenTask={openTask} />}
+          {section === "archive" && <ArchivePage projects={projects} tasks={workspaceTasks} focusSessions={focusSessions} onOpenProject={openProject} onOpenTask={openTask} onRestoreTask={restoreTask} />}
           {section === "ai" && <AiAssistantDialog open repository={aiRepository} embedded onPendingChange={setAiResponsePending} />}
-          {section === "tools" && <ToolCenterPage repository={integrationRepository} quickLinks={quickLinks} onSaveQuickLinks={onSaveQuickLinks} onOpenAi={() => switchSection("ai")} />}
-          {section === "settings" && <SettingsPage displayName={displayName} avatarDataUrl={avatarDataUrl} themeId={themeId} fontPresetId={fontPresetId} backingUp={backingUp} dashboardPreferences={dashboardPreferences} onSaveDashboardPreferences={saveDashboardPreferences} onSaveDisplayName={onSaveDisplayName} onSaveAvatarDataUrl={onSaveAvatarDataUrl} onThemeChange={onThemeChange} onFontPresetChange={onFontPresetChange} onCreateBackup={onCreateBackup} onRestoreBackup={onRestoreBackup} />}
+          {section === "tools" && <ToolCenterPage repository={integrationRepository} quickLinks={quickLinks} onSaveQuickLinks={onSaveQuickLinks} onOpenAi={() => switchSection("ai")} onOpenAiSettings={() => switchSection("settings")} />}
+          {section === "settings" && <><SettingsStyles /><SettingsPage displayName={displayName} avatarDataUrl={avatarDataUrl} themeId={themeId} fontPresetId={fontPresetId} backingUp={backingUp} dashboardPreferences={dashboardPreferences} onSaveDashboardPreferences={saveDashboardPreferences} onSaveDisplayName={onSaveDisplayName} onSaveAvatarDataUrl={onSaveAvatarDataUrl} onThemeChange={onThemeChange} onFontPresetChange={onFontPresetChange} onCreateBackup={onCreateBackup} onRestoreBackup={onRestoreBackup} /></>}
         </section>
       )}
       </Suspense>
@@ -1268,21 +1375,22 @@ export function DesktopWorkbench({
           if (event.currentTarget === event.target) closeQuickCapture();
         }}>
           <form className="capture-dialog" onSubmit={quickCapture}>
-            <header><span>随手记录</span><button type="button" onClick={closeQuickCapture} aria-label="关闭快速记录">×</button></header>
+            <header><span>随手记录</span><Button variant="secondary" size="small" iconOnly type="button" onClick={closeQuickCapture} aria-label="关闭快速记录">×</Button></header>
             <h2>先把它留下来</h2>
             <p>不必分类、不必写完整，保存后会进入独立的待整理清单。</p>
             <textarea autoFocus value={quickText} onChange={(event) => setQuickText(event.target.value)} onKeyDown={(event) => {
               if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
             }} placeholder="一句念头、一段感受，或突然想写下的东西……" />
-            <footer><span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 保存</span><button disabled={saving || !quickText.trim()} type="submit">{saving ? "正在保存…" : "放进待整理"}</button></footer>
+            <footer><span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 保存</span><Button variant="primary" disabled={saving || !quickText.trim()} type="submit">{saving ? "正在保存…" : "放进待整理"}</Button></footer>
           </form>
         </div>
       )}
 
-      {activeSession?.id === focusRecoveryId && <div className="focus-recovery-backdrop"><section className="focus-recovery-dialog" role="dialog" aria-modal="true" aria-label="处理上次未结束的投入"><span>投入记录恢复</span><h2>上次投入没有正常结束</h2><p>“{activeSession.label}”开始于 {new Date(activeSession.startedAt).toLocaleString("zh-CN")}。请选择实际结束时间，或者继续本次投入。</p><label><span>实际结束时间</span><input type="datetime-local" min={toLocalDateTimeInput(new Date(activeSession.startedAt))} max={toLocalDateTimeInput(new Date())} value={focusRecoveryEnd} onChange={(event) => setFocusRecoveryEnd(event.target.value)} /></label><footer><button onClick={() => setFocusRecoveryId(null)}>继续投入</button><button className="primary" onClick={() => void finishRecoveredFocus()}>按此时间暂停并记录</button></footer></section></div>}
+      {situationDate && <DailySituationDialog date={situationDate} today={today} tasks={workspaceTasks} history={planHistory} situations={dailySituations} activeTaskId={activeSession?.taskId} onClose={() => setSituationDate(null)} onSave={saveDailySituation} />}
+      {activeSession?.id === focusRecoveryId && <div className="focus-recovery-backdrop"><section className="focus-recovery-dialog" role="dialog" aria-modal="true" aria-label="处理上次未结束的投入"><span>投入记录恢复</span><h2>上次投入没有正常结束</h2><p>“{activeSession.label}”开始于 {new Date(activeSession.startedAt).toLocaleString("zh-CN")}。请选择实际结束时间，或者继续本次投入。</p><label><span>实际结束时间</span><input type="datetime-local" min={toLocalDateTimeInput(new Date(activeSession.startedAt))} max={toLocalDateTimeInput(new Date())} value={focusRecoveryEnd} onChange={(event) => setFocusRecoveryEnd(event.target.value)} /></label><footer><Button variant="secondary" type="button" onClick={() => setFocusRecoveryId(null)}>继续投入</Button><Button variant="primary" onClick={() => void finishRecoveredFocus()}>按此时间暂停并记录</Button></footer></section></div>}
 
       {message && <div className="desktop-toast" role="status">{message}</div>}
-      {undoOffer && <div className="desktop-toast undo-toast" role="status"><span>{undoOffer.message}</span><button onClick={() => void runUndo()}>撤销</button></div>}
+      {undoOffer && <div className="desktop-toast undo-toast" role="status"><span>{undoOffer.message}</span><Button variant="ghost" size="small" type="button" onClick={() => void runUndo()}>撤销</Button></div>}
     </main>
   );
 }
@@ -1290,7 +1398,6 @@ export function DesktopWorkbench({
 function WorkbenchSidebar({
   section,
   counts,
-  inboxCount,
   collapsed,
   onSwitch,
   onToggle,
@@ -1300,7 +1407,6 @@ function WorkbenchSidebar({
 }: {
   section: DeskSection;
   counts: Record<DeskSection, number | null>;
-  inboxCount: number;
   collapsed: boolean;
   onSwitch: (section: DeskSection) => void;
   onToggle: () => void;
@@ -1311,7 +1417,7 @@ function WorkbenchSidebar({
   return (
     <aside className="workbench-sidebar">
       <button className="sidebar-collapse-toggle" onClick={onToggle} aria-label={collapsed ? "展开侧栏" : "收起侧栏"} title={collapsed ? "展开侧栏" : "收起侧栏"}>{collapsed ? "›" : "‹"}</button>
-      <div className="sidebar-brand"><span className={`sidebar-brand-mark${avatarDataUrl ? " has-image" : ""}`}>{avatarDataUrl ? <img src={avatarDataUrl} alt="" /> : <WorkbenchIcon name="brand" />}</span><span><strong title={title}>{title}</strong></span></div>
+      <div className="sidebar-brand"><span className={`sidebar-brand-mark${avatarDataUrl ? " has-image" : ""}`}>{avatarDataUrl ? <img src={avatarDataUrl} alt="" width={42} height={42} /> : <WorkbenchIcon name="brand" />}</span><span><strong title={title}>{title}</strong></span></div>
       <nav className="sidebar-navigation" aria-label="工作台导航">
         {(["action", "knowledge", "tools"] as const).map((group) => (
           <div className="sidebar-group" key={group}>
@@ -1345,15 +1451,32 @@ function GlobalFocusBar({ session, task, onShow, onPause }: {
     return () => window.clearInterval(timer);
   }, [session.id]);
   const elapsed = Math.max(0, Math.floor((now - new Date(session.startedAt).getTime()) / 1_000));
-  return <aside className="global-focus-bar" aria-live="polite"><button className="global-focus-main" onClick={onShow}><i /><span><small>正在投入{task?.projectTitle ? ` · ${task.projectTitle}` : ""}</small><strong>{task ? task.title : session.label}</strong></span><time>{formatFocusDuration(elapsed, true)}</time></button><button className="global-focus-pause" onClick={onPause}>Ⅱ 暂停</button></aside>;
+  return <aside className="global-focus-bar" aria-live="polite"><button className="global-focus-main" onClick={onShow}><i /><span><small>正在投入{task?.projectTitle ? ` · ${task.projectTitle}` : ""}</small><strong>{task ? task.title : session.label}</strong></span><time>{formatFocusDuration(elapsed, true)}</time></button><Button variant="secondary" type="button" className="global-focus-pause" onClick={onPause}>Ⅱ 暂停</Button></aside>;
 }
 
 const avatarImageTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+const avatarCropViewportSize = 300;
+const avatarOutputByteLimit = 240 * 1024;
 
-async function createAvatarDataUrl(file: File) {
+type AvatarCropSource = {
+  url: string;
+  width: number;
+  height: number;
+};
+
+type AvatarCropSelection = {
+  zoom: number;
+  offsetX: number;
+  offsetY: number;
+};
+
+function validateAvatarFile(file: File) {
   if (!avatarImageTypes.has(file.type)) throw new Error("请选择 JPG、PNG 或 WebP 图片。");
   if (file.size > 8 * 1024 * 1024) throw new Error("图片不能超过 8 MB。");
+}
 
+async function loadAvatarCropSource(file: File): Promise<AvatarCropSource> {
+  validateAvatarFile(file);
   const objectUrl = URL.createObjectURL(file);
   try {
     const image = await new Promise<HTMLImageElement>((resolve, reject) => {
@@ -1363,24 +1486,130 @@ async function createAvatarDataUrl(file: File) {
       candidate.src = objectUrl;
     });
     if (!image.naturalWidth || !image.naturalHeight) throw new Error("这张图片没有可用的尺寸信息。");
+    return { url: objectUrl, width: image.naturalWidth, height: image.naturalHeight };
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl);
+    throw error;
+  }
+}
 
+async function createAvatarDataUrl(source: AvatarCropSource, crop: AvatarCropSelection) {
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const candidate = new Image();
+    candidate.onload = () => resolve(candidate);
+    candidate.onerror = () => reject(new Error("无法读取这张图片，请换一张重试。"));
+    candidate.src = source.url;
+  });
+  const baseScale = Math.max(avatarCropViewportSize / source.width, avatarCropViewportSize / source.height);
+  const sourceSize = avatarCropViewportSize / (baseScale * crop.zoom);
+  const sourceX = Math.max(0, Math.min(source.width - sourceSize, (source.width - sourceSize) / 2 - crop.offsetX / (baseScale * crop.zoom)));
+  const sourceY = Math.max(0, Math.min(source.height - sourceSize, (source.height - sourceSize) / 2 - crop.offsetY / (baseScale * crop.zoom)));
+
+  for (const outputSize of [512, 448, 384, 320, 256]) {
     const canvas = document.createElement("canvas");
-    canvas.width = 512;
-    canvas.height = 512;
+    canvas.width = outputSize;
+    canvas.height = outputSize;
     const context = canvas.getContext("2d");
     if (!context) throw new Error("当前设备暂时无法处理头像图片。");
-    const sourceSize = Math.min(image.naturalWidth, image.naturalHeight);
-    const sourceX = (image.naturalWidth - sourceSize) / 2;
-    const sourceY = (image.naturalHeight - sourceSize) / 2;
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = "high";
     context.drawImage(image, sourceX, sourceY, sourceSize, sourceSize, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL("image/webp", 0.86);
-    if (!dataUrl.startsWith("data:image/webp;base64,")) throw new Error("头像图片转换失败，请换一张重试。");
-    return dataUrl;
-  } finally {
-    URL.revokeObjectURL(objectUrl);
+    for (const quality of [0.86, 0.78, 0.7, 0.62, 0.56, 0.48]) {
+      const dataUrl = canvas.toDataURL("image/webp", quality);
+      if (!dataUrl.startsWith("data:image/webp;base64,")) throw new Error("头像图片转换失败，请换一张重试。");
+      const estimatedBytes = Math.ceil((dataUrl.length - dataUrl.indexOf(",") - 1) * 3 / 4);
+      if (estimatedBytes <= avatarOutputByteLimit) return dataUrl;
+    }
   }
+  throw new Error("头像图片压缩失败，请换一张重试。");
+}
+
+function AvatarCropDialog({ source, busy, message, onCancel, onConfirm }: {
+  source: AvatarCropSource;
+  busy: boolean;
+  message: string;
+  onCancel: () => void;
+  onConfirm: (selection: AvatarCropSelection) => void;
+}) {
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const dragRef = useRef<{ pointerId: number; x: number; y: number; offsetX: number; offsetY: number } | null>(null);
+  const baseScale = Math.max(avatarCropViewportSize / source.width, avatarCropViewportSize / source.height);
+  const renderedWidth = source.width * baseScale * zoom;
+  const renderedHeight = source.height * baseScale * zoom;
+  const limitX = Math.max(0, (renderedWidth - avatarCropViewportSize) / 2);
+  const limitY = Math.max(0, (renderedHeight - avatarCropViewportSize) / 2);
+  const clampOffset = (x: number, y: number) => ({
+    x: Math.max(-limitX, Math.min(limitX, x)),
+    y: Math.max(-limitY, Math.min(limitY, y)),
+  });
+
+  useEffect(() => {
+    setOffset((current) => clampOffset(current.x, current.y));
+  }, [limitX, limitY]);
+
+  useEffect(() => {
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [busy, onCancel]);
+
+  function moveByKeyboard(event: ReactKeyboardEvent<HTMLDivElement>) {
+    const step = event.shiftKey ? 12 : 3;
+    const movement = event.key === "ArrowLeft" ? [step, 0] : event.key === "ArrowRight" ? [-step, 0] : event.key === "ArrowUp" ? [0, step] : event.key === "ArrowDown" ? [0, -step] : null;
+    if (!movement) return;
+    event.preventDefault();
+    setOffset((current) => clampOffset(current.x + movement[0], current.y + movement[1]));
+  }
+
+  function startDragging(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || busy) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, offsetX: offset.x, offsetY: offset.y };
+  }
+
+  function continueDragging(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setOffset(clampOffset(drag.offsetX + event.clientX - drag.x, drag.offsetY + event.clientY - drag.y));
+  }
+
+  function stopDragging(event: ReactPointerEvent<HTMLDivElement>) {
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
+  return (
+    <div className="avatar-crop-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target && !busy) onCancel(); }}>
+      <section className="avatar-crop-dialog" role="dialog" aria-modal="true" aria-labelledby="avatar-crop-title">
+        <header><div><span>调整头像</span><h2 id="avatar-crop-title">选择要保留的区域</h2><p>拖动图片改变位置，使用滑块放大；方框内就是最终头像。</p></div><Button variant="secondary" size="small" iconOnly type="button" disabled={busy} onClick={onCancel} aria-label="关闭裁剪器">×</Button></header>
+        <div
+          className="avatar-crop-viewport"
+          tabIndex={0}
+          aria-label="头像裁剪区域，可拖动图片，或使用方向键微调"
+          onKeyDown={moveByKeyboard}
+          onPointerDown={startDragging}
+          onPointerMove={continueDragging}
+          onPointerUp={stopDragging}
+          onPointerCancel={stopDragging}
+          onDoubleClick={() => setOffset({ x: 0, y: 0 })}
+        >
+          <img
+            src={source.url}
+            alt="待裁剪头像"
+            draggable={false}
+            style={{ width: renderedWidth, height: renderedHeight, transform: `translate(-50%, -50%) translate(${offset.x}px, ${offset.y}px)` }}
+          />
+        </div>
+        <label className="avatar-crop-zoom"><span>缩放</span><input type="range" min="1" max="3" step="0.01" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /><output>{Math.round(zoom * 100)}%</output></label>
+        {message && <p className="avatar-crop-message" role="status">{message}</p>}
+        <footer><Button variant="secondary" type="button" disabled={busy} onClick={onCancel}>取消</Button><Button type="button" variant="primary" disabled={busy} onClick={() => onConfirm({ zoom, offsetX: offset.x, offsetY: offset.y })}>{busy ? "正在处理…" : "使用此裁剪"}</Button></footer>
+      </section>
+    </div>
+  );
 }
 
 function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backingUp, dashboardPreferences, onSaveDashboardPreferences, onSaveDisplayName, onSaveAvatarDataUrl, onThemeChange, onFontPresetChange, onCreateBackup, onRestoreBackup }: {
@@ -1402,7 +1631,9 @@ function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backi
   const [nameMessage, setNameMessage] = useState("");
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [avatarMessage, setAvatarMessage] = useState("");
+  const [avatarCropSource, setAvatarCropSource] = useState<AvatarCropSource | null>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
+  const avatarObjectUrlRef = useRef("");
   const [updateProxyPort, setUpdateProxyPort] = useState(loadUpdateProxyPort);
   const [proxyMessage, setProxyMessage] = useState("");
   const [autostartOn, setAutostartOn] = useState(false);
@@ -1421,16 +1652,83 @@ function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backi
     }
   }
 
+  const beginAvatarCrop = useCallback(async (file: File) => {
+    setAvatarBusy(true);
+    setAvatarMessage("");
+    try {
+      const source = await loadAvatarCropSource(file);
+      if (avatarObjectUrlRef.current) URL.revokeObjectURL(avatarObjectUrlRef.current);
+      avatarObjectUrlRef.current = source.url;
+      setAvatarCropSource(source);
+    } catch (error) {
+      setAvatarMessage(error instanceof Error ? error.message : "无法读取剪贴板中的图片，请换一张重试。");
+    } finally {
+      setAvatarBusy(false);
+    }
+  }, []);
+
+  function closeAvatarCrop() {
+    if (avatarObjectUrlRef.current) URL.revokeObjectURL(avatarObjectUrlRef.current);
+    avatarObjectUrlRef.current = "";
+    setAvatarCropSource(null);
+  }
+
+  useEffect(() => () => {
+    if (avatarObjectUrlRef.current) URL.revokeObjectURL(avatarObjectUrlRef.current);
+  }, []);
+
+  useEffect(() => {
+    const pasteAvatar = (event: globalThis.ClipboardEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (avatarBusy || avatarCropSource || target?.closest("input, textarea, [contenteditable='true']")) return;
+      const imageItem = Array.from(event.clipboardData?.items ?? []).find((item) => item.kind === "file" && avatarImageTypes.has(item.type));
+      const file = imageItem?.getAsFile();
+      if (!file) return;
+      event.preventDefault();
+      void beginAvatarCrop(file);
+    };
+    window.addEventListener("paste", pasteAvatar);
+    return () => window.removeEventListener("paste", pasteAvatar);
+  }, [avatarBusy, avatarCropSource, beginAvatarCrop]);
+
   async function chooseAvatar(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
+    await beginAvatarCrop(file);
+  }
+
+  async function readAvatarFromClipboard() {
+    if (!navigator.clipboard?.read) {
+      setAvatarMessage("请复制图片后，在此页面直接按 Ctrl+V 粘贴。");
+      return;
+    }
     setAvatarBusy(true);
     setAvatarMessage("");
     try {
-      const dataUrl = await createAvatarDataUrl(file);
+      const clipboardItems = await navigator.clipboard.read();
+      const item = clipboardItems.find((candidate) => candidate.types.some((type) => avatarImageTypes.has(type)));
+      const type = item?.types.find((candidate) => avatarImageTypes.has(candidate));
+      if (!item || !type) throw new Error("剪贴板中没有 JPG、PNG 或 WebP 图片。");
+      const blob = await item.getType(type);
+      await beginAvatarCrop(new File([blob], "clipboard-avatar", { type }));
+    } catch (error) {
+      const fallback = "无法直接读取剪贴板，请复制图片后在此页面按 Ctrl+V。";
+      setAvatarMessage(error instanceof Error && !error.name.includes("NotAllowed") ? error.message : fallback);
+    } finally {
+      setAvatarBusy(false);
+    }
+  }
+
+  async function saveCroppedAvatar(selection: AvatarCropSelection) {
+    if (!avatarCropSource) return;
+    setAvatarBusy(true);
+    setAvatarMessage("");
+    try {
+      const dataUrl = await createAvatarDataUrl(avatarCropSource, selection);
       await onSaveAvatarDataUrl(dataUrl);
-      setAvatarMessage("头像已更新。");
+      closeAvatarCrop();
+      setAvatarMessage("头像已裁剪、压缩并更新。");
     } catch (error) {
       setAvatarMessage(error instanceof Error ? error.message : "头像更新失败，请换一张图片重试。");
     } finally {
@@ -1508,7 +1806,7 @@ function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backi
 
   return (
     <div className="settings-page workspace-scroll">
-      <header className="workspace-page-heading"><div><h1>设置</h1><p>统一管理外观、数据与以后新增的工作台偏好。</p></div></header>
+      <header className="workspace-page-heading"><div><h1>设置</h1><p>统一管理外观、数据与以后新增的工作台偏好。</p></div><ThemeSticker section="settings" /></header>
       <div className="settings-grid">
         <section className="workspace-card settings-section settings-identity-section">
           <header><span>身份</span><h2>名称与头像</h2></header>
@@ -1517,10 +1815,11 @@ function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backi
               <span className={`settings-avatar-preview${avatarDataUrl ? " has-image" : ""}`}>{avatarDataUrl ? <img src={avatarDataUrl} alt="当前头像" /> : <WorkbenchIcon name="brand" />}</span>
               <div className="settings-avatar-details">
                 <strong>个人头像</strong>
-                <small>支持 JPG、PNG、WebP，图片会自动居中裁成方形。</small>
+                <small>支持 JPG、PNG、WebP；可上传或按 Ctrl+V 粘贴，保存前可拖动裁剪与缩放。</small>
                 <div className="settings-avatar-actions">
-                  <button type="button" disabled={avatarBusy} onClick={() => avatarInputRef.current?.click()}>{avatarBusy ? "处理中…" : avatarDataUrl ? "更换图片" : "上传图片"}</button>
-                  {avatarDataUrl && <button type="button" className="quiet" disabled={avatarBusy} onClick={() => void removeAvatar()}>移除</button>}
+                  <Button variant="secondary" type="button" disabled={avatarBusy} onClick={() => avatarInputRef.current?.click()}>{avatarBusy ? "处理中…" : avatarDataUrl ? "更换图片" : "上传图片"}</Button>
+                  <Button type="button" variant="quiet" disabled={avatarBusy} onClick={() => void readAvatarFromClipboard()}>从剪贴板粘贴</Button>
+                  {avatarDataUrl && <Button type="button" variant="quiet" disabled={avatarBusy} onClick={() => void removeAvatar()}>移除</Button>}
                 </div>
                 <input ref={avatarInputRef} className="settings-avatar-input" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void chooseAvatar(event)} />
                 <p role="status">{avatarMessage}</p>
@@ -1528,7 +1827,7 @@ function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backi
             </div>
             <form className="settings-name-form" onSubmit={saveName}>
               <label htmlFor="workspace-display-name"><span>名称</span><small id="workspace-display-name-count">{[...nameDraft].length}/24</small></label>
-              <div><input id="workspace-display-name" value={nameDraft} onChange={(event) => { setNameDraft([...event.target.value].slice(0, 24).join("")); setNameMessage(""); }} placeholder="例如：小洛" aria-describedby="workspace-display-name-count workspace-display-name-message" /><button type="submit">保存名称</button></div>
+              <div><input id="workspace-display-name" value={nameDraft} onChange={(event) => { setNameDraft([...event.target.value].slice(0, 24).join("")); setNameMessage(""); }} placeholder="例如：小洛" aria-describedby="workspace-display-name-count workspace-display-name-message" /><Button variant="primary" type="submit">保存名称</Button></div>
               <p id="workspace-display-name-message" role="status">{nameMessage}</p>
             </form>
           </div>
@@ -1599,6 +1898,7 @@ function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backi
           </div>
           <p className="settings-toggle-message" id="settings-autostart-message" role="status">{autostartMessage}</p>
         </section>
+        <AiModelSettingsSection />
         <DashboardSettingsSection preferences={dashboardPreferences} onSave={onSaveDashboardPreferences} />
         <section className="workspace-card settings-section settings-data-section">
           <header><span>数据</span><h2>备份与恢复</h2><p>项目、行动、笔记和回顾会一起保存在完整本地备份中。</p></header>
@@ -1627,15 +1927,111 @@ function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backi
                 placeholder={DEFAULT_UPDATE_PROXY_PORT}
                 aria-describedby="update-proxy-help update-proxy-message"
               />
-              <button type="submit">保存</button>
+              <Button variant="primary" type="submit">保存</Button>
             </div>
             <small id="update-proxy-help">默认 {DEFAULT_UPDATE_PROXY_PORT}；留空后仅使用系统网络。代理连接失败时也会自动回退到系统网络。</small>
             <p id="update-proxy-message" role="status">{proxyMessage}</p>
           </form>
         </section>
       </div>
+      {avatarCropSource && <AvatarCropDialog source={avatarCropSource} busy={avatarBusy} message={avatarMessage} onCancel={closeAvatarCrop} onConfirm={(selection) => void saveCroppedAvatar(selection)} />}
     </div>
   );
+}
+
+function AiModelSettingsSection() {
+  const [settings, setSettings] = useState<DeepSeekModelSettings>(() => loadDeepSeekModelSettings());
+  const [models, setModels] = useState<DeepSeekModel[]>(() => loadCachedDeepSeekModels()?.models ?? []);
+  const [keyConfigured, setKeyConfigured] = useState(false);
+  const [keyValue, setKeyValue] = useState("");
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    desktopApi.secrets.status("deepseek_api_key").then((configured) => {
+      if (cancelled) return;
+      setKeyConfigured(configured);
+      const cached = loadCachedDeepSeekModels();
+      if (configured && !cached?.fresh) void refreshModels();
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  async function saveKey(event: FormEvent) {
+    event.preventDefault();
+    if (!keyValue.trim() || busy) return;
+    setBusy("key"); setMessage("");
+    try {
+      await desktopApi.secrets.set("deepseek_api_key", keyValue.trim());
+      setKeyValue(""); setKeyConfigured(true); setMessage("API Key 已安全保存到 Windows 凭据管理器。");
+      await refreshModels();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally { setBusy(""); }
+  }
+
+  async function deleteKey() {
+    if (busy) return;
+    setBusy("key"); setMessage("");
+    try {
+      await desktopApi.secrets.delete("deepseek_api_key");
+      setKeyConfigured(false); setMessage("API Key 已从本机删除。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally { setBusy(""); }
+  }
+
+  async function refreshModels() {
+    if (!isTauri()) return;
+    setBusy("models"); setMessage("");
+    try {
+      const next = await desktopApi.deepseek.apiModels();
+      cacheDeepSeekModels(next);
+      setModels(next);
+      setMessage(`已从 DeepSeek 读取 ${next.length} 个可用模型。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally { setBusy(""); }
+  }
+
+  function saveModels() {
+    const saved = saveDeepSeekModelSettings(settings);
+    setSettings(saved);
+    setMessage("模型偏好已保存在本机，不会同步到其他设备。");
+  }
+
+  const unavailable = new Set([
+    settings.defaultModel,
+    ...Object.values(settings.overrides).filter(Boolean),
+  ].filter((model) => !models.some((candidate) => candidate.id === model)));
+  const modelOptions = [
+    ...Array.from(unavailable).map((model) => ({ value: model, label: `${model}（当前不可用）` })),
+    ...models.map((model) => ({ value: model.id, label: model.id })),
+  ];
+  const featureRows: Array<{ key: keyof DeepSeekModelSettings["overrides"]; label: string; detail: string }> = [
+    { key: "projectCreate", label: "项目创建判断", detail: "默认使用更强模型判断行动/项目与推进方式" },
+    { key: "projectReplan", label: "重大计划重排", detail: "处理截止提前、实验失败和导师反馈" },
+    { key: "nextAction", label: "下一行动建议", detail: "留空时跟随全局默认" },
+    { key: "financeReport", label: "财务月报", detail: "留空时跟随全局默认" },
+    { key: "healthAdvice", label: "健康建议", detail: "解读手动记录并生成下一餐建议" },
+  ];
+
+  return <section className="workspace-card settings-section settings-ai-model-section" id="ai-model-settings">
+    <header><span>AI 与模型</span><h2>DeepSeek API</h2><p>这是 API Key 与模型选择的唯一入口。网页 AI 助手仍保持独立，不受这里影响。</p></header>
+    <form className="settings-ai-key" onSubmit={(event) => void saveKey(event)}>
+      <label><span>API Key</span><small>{keyConfigured ? "已保存在 Windows 凭据管理器" : "尚未配置"}</small></label>
+      <div><input type="password" autoComplete="off" value={keyValue} onChange={(event) => setKeyValue(event.target.value)} placeholder={keyConfigured ? "输入新 Key 以替换" : "sk-..."} /><Button variant="primary" type="submit" disabled={busy === "key" || !keyValue.trim()}>{busy === "key" ? "保存中…" : "保存 Key"}</Button>{keyConfigured && <Button type="button" variant="danger" disabled={Boolean(busy)} onClick={() => void deleteKey()}>删除</Button>}</div>
+      <p>Key 会用于你主动发起的项目规划、财务月报与健康建议 API 调用，也用于余额和模型列表读取；不会用于网页 AI 会话。</p>
+    </form>
+    <div className="settings-model-heading"><div><strong>API 模型</strong><small>每次调用前会检查所选模型是否仍在官方列表中；不可用时不会静默切换。</small></div><Button variant="secondary" type="button" disabled={!keyConfigured || busy === "models"} onClick={() => void refreshModels()}>{busy === "models" ? "读取中…" : "刷新官方模型"}</Button></div>
+    <div className="settings-model-fields">
+      <label><span>全局默认</span><SelectMenu label="全局默认模型" value={settings.defaultModel} onChange={(defaultModel) => setSettings({ ...settings, defaultModel })} options={modelOptions.length ? modelOptions : [{ value: settings.defaultModel, label: `${settings.defaultModel}（等待读取）` }]} /></label>
+      {featureRows.map((row) => <label key={row.key}><span>{row.label}</span><small>{row.detail}</small><SelectMenu label={`${row.label}模型`} value={settings.overrides[row.key]} onChange={(value) => setSettings({ ...settings, overrides: { ...settings.overrides, [row.key]: value } })} options={[{ value: "", label: `跟随全局（${settings.defaultModel}）` }, ...modelOptions]} /></label>)}
+    </div>
+    <footer><p role="status">{message || "AI 只会在你明确点击后调用；项目调整仍需预览确认才会写入。"}</p><Button type="button" variant="primary" onClick={saveModels}>保存模型偏好</Button></footer>
+  </section>;
 }
 
 function NotesWorkspace({ articles, projects, counts, loading, query, view, batchMode, batchIds, organizeId, organizingArticle, onQuery, onView, onOpen, onNew, onOrganizeToggle, onToggleBatch, onToggleAll, onEnterBatch, onExitBatch, onOrganize, onBatchOrganize }: {
@@ -1667,16 +2063,16 @@ function NotesWorkspace({ articles, projects, counts, loading, query, view, batc
   return (
     <>
       <section className="notes-filter-pane">
-        <header><div><span>个人笔记</span><button className="notes-help-toggle" aria-label="查看笔记分类说明" aria-expanded={helpOpen} onClick={() => setHelpOpen((value) => !value)}>?</button></div><h1>笔记</h1><p>按以后重读它的原因，选择一个主分类。</p></header>
+        <header><div><span>个人笔记</span><Button variant="ghost" size="small" iconOnly type="button" className="notes-help-toggle" aria-label="查看笔记分类说明" aria-expanded={helpOpen} onClick={() => setHelpOpen((value) => !value)}>?</Button></div><h1>笔记</h1><p>按以后重读它的原因，选择一个主分类。</p></header>
         <nav>{noteCategoryViews.map((item) => <button className={view === item.id ? "active" : ""} key={item.id} onClick={() => onView(item.id)}><span>{item.label}</span><small>{counts[item.id] ?? 0}</small></button>)}</nav>
-        {helpOpen && <aside className="notes-help-popover" role="dialog" aria-label="笔记分类说明"><header><strong>怎样整理笔记</strong><button aria-label="关闭说明" onClick={() => setHelpOpen(false)}>×</button></header><p>每篇笔记只选一个主分类；家庭、沟通、写作等具体主题用自由标签表达。</p><dl><div><dt>主分类</dt><dd>思考感悟、经历记录、学习整理、经验复盘或随手记。</dd></div><div><dt>自由标签</dt><dd>完全可选，只添加以后真的可能搜索的关键词。</dd></div><div><dt>内容边界</dt><dd>要完成的事情放进今日行动；尚未消化的外部资料放进探索库。</dd></div></dl></aside>}
+        {helpOpen && <aside className="notes-help-popover" role="dialog" aria-label="笔记分类说明"><header><strong>怎样整理笔记</strong><Button variant="secondary" size="small" iconOnly type="button" aria-label="关闭说明" onClick={() => setHelpOpen(false)}>×</Button></header><p>每篇笔记只选一个主分类；家庭、沟通、写作等具体主题用自由标签表达。</p><dl><div><dt>主分类</dt><dd>思考感悟、经历记录、学习整理、经验复盘或随手记。</dd></div><div><dt>自由标签</dt><dd>完全可选，只添加以后真的可能搜索的关键词。</dd></div><div><dt>内容边界</dt><dd>要完成的事情放进今日行动；尚未消化的外部资料放进探索库。</dd></div></dl></aside>}
       </section>
       <section className={`notes-list-stage${organizingArticle ? " has-organizer" : ""}`}>
         <div className="notes-list-content">
           <header className="notes-list-header">
             <div><strong>{query ? "搜索结果" : noteCategoryViews.find((item) => item.id === view)?.label}</strong><span>{articles.length} 条</span></div>
             <div className="notes-list-actions">
-              {batchMode ? <button className="ghost" onClick={onExitBatch}>退出管理</button> : <button className="ghost" onClick={onEnterBatch}>批量管理</button>}
+              {batchMode ? <Button variant="ghost" onClick={onExitBatch}>退出管理</Button> : <Button variant="ghost" onClick={onEnterBatch}>批量管理</Button>}
               <button className="notes-create-button" onClick={onNew}><span aria-hidden="true">＋</span>新建笔记</button>
             </div>
           </header>
@@ -1686,8 +2082,8 @@ function NotesWorkspace({ articles, projects, counts, loading, query, view, batc
               <SelectMenu label="批量设置主分类" value="" onChange={(value) => value && onBatchOrganize({ category: value as NoteCategory })} options={[{ value: "", label: "设置主分类…" }, ...NOTE_CATEGORY_OPTIONS]} />
               <form className="notes-batch-tags" onSubmit={(event) => { event.preventDefault(); const tag = batchTag.trim(); if (!tag) return; onBatchOrganize({ addTag: tag }); setBatchTag(""); }}>
                 <input value={batchTag} onChange={(event) => setBatchTag(event.target.value)} placeholder="自由标签" aria-label="批量标签" />
-                <button type="submit" disabled={!batchTag.trim()}>添加</button>
-                <button type="button" disabled={!batchTag.trim()} onClick={() => { const tag = batchTag.trim(); if (!tag) return; onBatchOrganize({ removeTag: tag }); setBatchTag(""); }}>移除</button>
+                <Button variant="ghost" size="small" type="submit" disabled={!batchTag.trim()}>添加</Button>
+                <Button variant="ghost" size="small" type="button" disabled={!batchTag.trim()} onClick={() => { const tag = batchTag.trim(); if (!tag) return; onBatchOrganize({ removeTag: tag }); setBatchTag(""); }}>移除</Button>
               </form>
             </div>
           )}
@@ -1704,7 +2100,7 @@ function NotesWorkspace({ articles, projects, counts, loading, query, view, batc
                 </button>
                 {!batchMode && <div className="note-card-organize"><button className={organizeId === article.id ? "active" : ""} aria-expanded={organizeId === article.id} onClick={() => onOrganizeToggle(organizeId === article.id ? null : article.id)}>{organizeId === article.id ? "整理中" : "整理"}</button></div>}
               </article>
-            )) : <div className="list-empty"><span>{query ? "没有找到相关笔记" : "这个分类还没有内容"}</span><button onClick={onNew}>写下第一条</button></div>}
+            )) : <div className="list-empty"><span>{query ? "没有找到相关笔记" : "这个分类还没有内容"}</span><Button variant="secondary" type="button" onClick={onNew}>写下第一条</Button></div>}
           </div>
         </div>
         {organizingArticle && <NoteOrganizePanel article={organizingArticle} projects={projects} onOrganize={onOrganize} onClose={() => onOrganizeToggle(null)} />}
@@ -1750,7 +2146,7 @@ function NoteOrganizePanel({ article, projects, onOrganize, onClose }: {
 
   return (
     <aside className={`note-organize-panel${saveState === "saving" ? " saving" : ""}`} aria-label="快速整理笔记" aria-busy={saveState === "saving"}>
-      <header><div><span>快速整理</span><strong>{article.title}</strong></div><button aria-label="关闭快速整理" onClick={onClose}>×</button></header>
+      <header><div><span>快速整理</span><strong>{article.title}</strong></div><Button variant="secondary" size="small" iconOnly type="button" aria-label="关闭快速整理" onClick={onClose}>×</Button></header>
       <div className={`note-organize-status ${saveState}`} role="status"><span>{saveState === "saving" ? "正在保存…" : saveState === "saved" ? "已保存" : saveState === "error" ? "保存失败，请重试" : "选择后自动保存"}</span></div>
       <section>
         <div className="organize-section-heading"><strong>主分类</strong><span>只选一个</span></div>
@@ -1763,7 +2159,7 @@ function NoteOrganizePanel({ article, projects, onOrganize, onClose }: {
       <form className="organize-tags-form" onSubmit={(event) => { event.preventDefault(); void save({ tags: splitTags(tagText) }); }}>
         <label htmlFor={`organize-tags-${article.id}`}><strong>自由标签</strong><span>可不填，用逗号分隔</span></label>
         <input id={`organize-tags-${article.id}`} value={tagText} onChange={(event) => setTagText(event.target.value)} placeholder="例如：沟通，边界，写作" />
-        <button type="submit">保存标签</button>
+        <Button variant="primary" type="submit">保存标签</Button>
       </form>
       <details className="organize-more-relations">
         <summary><span><strong>更多关联</strong><small>项目与来源都是可选项</small></span><i>展开</i></summary>
@@ -1771,10 +2167,10 @@ function NoteOrganizePanel({ article, projects, onOrganize, onClose }: {
           <label><span>关联项目</span><SelectMenu label="关联项目" value={article.projectId || projects.find((project) => project.title === article.project)?.id || ""} onChange={(value) => { const project = projects.find((item) => item.id === value); void save({ projectId: project?.id || "", project: project?.title || "" }); }} options={[{ value: "", label: "不关联项目" }, ...projects.map((project) => ({ value: project.id, label: project.title }))]} /></label>
           <label><span>来源</span><SelectMenu label="来源" value={sourceKind} onChange={setSourceKind} options={sourceOptions.map((source) => ({ value: source, label: source }))} /></label>
           <label><span>来源链接</span><input type="url" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="可选" /></label>
-          <button type="button" onClick={() => void saveSource()}>保存来源</button>
+          <Button variant="primary" type="button" onClick={() => void saveSource()}>保存来源</Button>
         </div>
       </details>
-      <footer><span>项目只适合确实属于某项工作的笔记。</span><button onClick={onClose}>完成</button></footer>
+      <footer><span>项目只适合确实属于某项工作的笔记。</span><Button variant="secondary" type="button" onClick={onClose}>完成</Button></footer>
     </aside>
   );
 }
@@ -1792,8 +2188,8 @@ function ArticleReader({ article, attachmentRepository, saving, onBack, onEdit, 
   return (
     <article className="desktop-reader immersive-reader">
       <header className="reader-toolbar">
-        <button className="reader-back" onClick={onBack}>← 返回笔记</button>
-        <div><span>最后修改于 {formatDate(article.updated || article.created)}</span><button className="danger" disabled={saving} onClick={onRemove}>删除</button><button className="primary" onClick={onEdit}>编辑</button></div>
+        <Button variant="ghost" type="button" className="reader-back" onClick={onBack}>← 返回笔记</Button>
+        <div><span>最后修改于 {formatDate(article.updated || article.created)}</span><Button variant="danger" disabled={saving} onClick={onRemove}>删除</Button><Button variant="primary" onClick={onEdit}>编辑</Button></div>
       </header>
       <div className="reader-scroll">
         <div className="reader-document">
@@ -1804,7 +2200,7 @@ function ArticleReader({ article, attachmentRepository, saving, onBack, onEdit, 
             {article.project && <span className="reader-project-link">↗ 关联项目 · {article.project}</span>}
           </div>
           <MarkdownDocument body={article.body} title={article.title} attachmentRepository={attachmentRepository} />
-          <footer className="reader-history"><div><strong>读到这里，有新的想法吗？</strong><span>追加会在原文末尾新建一个带日期的段落，保留前文的连贯性。</span></div><div className="reader-history-actions">{sourceUrl && <a href={sourceUrl} target="_blank" rel="noreferrer">打开原始来源 ↗</a>}<button onClick={onAppend}>＋ 在文末追加想法</button></div></footer>
+          <footer className="reader-history"><div><strong>读到这里，有新的想法吗？</strong><span>追加会在原文末尾新建一个带日期的段落，保留前文的连贯性。</span></div><div className="reader-history-actions">{sourceUrl && <a href={sourceUrl} target="_blank" rel="noreferrer">打开原始来源 ↗</a>}<Button variant="secondary" type="button" onClick={onAppend}>＋ 在文末追加想法</Button></div></footer>
         </div>
       </div>
     </article>
@@ -1846,10 +2242,10 @@ function ArticleEditor({ draft, attachmentRepository, projects, saving, appendMo
       if (!seed || !editor) return;
       for (const loaded of seed.querySelectorAll<HTMLImageElement>("img[data-attachment-id]")) {
         const id = loaded.dataset.attachmentId;
-        if (!id || !loaded.src) continue;
-        const target = Array.from(editor.querySelectorAll<HTMLImageElement>("img[data-attachment-id]"))
-          .find((image) => image.dataset.attachmentId === id);
-        if (target) target.src = loaded.src;
+        if (!id || !loaded.src || loaded.src === transparentEditorPixel) continue;
+        for (const target of editor.querySelectorAll<HTMLImageElement>("img[data-attachment-id]")) {
+          if (target.dataset.attachmentId === id && target.src !== loaded.src) target.src = loaded.src;
+        }
       }
     });
   }, []);
@@ -2172,32 +2568,18 @@ function ArticleEditor({ draft, attachmentRepository, projects, saving, appendMo
 
   return (
     <div className="workbench-editor immersive-editor" onKeyDown={handleEditorKeyDown}>
-      <header className="editor-toolbar"><div><button onClick={onCancel}>← 取消</button><span>{draft.id ? "编辑笔记" : "新建笔记"}</span></div><div className="editor-toolbar-actions"><div className="editor-history-actions" aria-label="编辑历史"><button type="button" disabled={editorMode === "markdown" && !historyAvailability.canUndo} onMouseDown={(event) => event.preventDefault()} onClick={() => runEditorHistory("undo")} title="撤回（Ctrl+Z）">↶ 撤回</button><button type="button" disabled={editorMode === "markdown" && !historyAvailability.canRedo} onMouseDown={(event) => event.preventDefault()} onClick={() => runEditorHistory("redo")} title="重做（Ctrl+Shift+Z / Ctrl+Y）">↷ 重做</button></div><small><kbd>Ctrl</kbd> + <kbd>S</kbd></small><button className="primary" disabled={saving} onClick={onSave}>{saving ? "保存中…" : "保存"}</button></div></header>
+      <header className="editor-toolbar"><div><Button variant="ghost" size="small" type="button" onClick={onCancel}>← 取消</Button><span>{draft.id ? "编辑笔记" : "新建笔记"}</span></div><div className="editor-toolbar-actions"><div className="editor-history-actions" aria-label="编辑历史"><Button variant="ghost" size="small" type="button" disabled={editorMode === "markdown" && !historyAvailability.canUndo} onMouseDown={(event) => event.preventDefault()} onClick={() => runEditorHistory("undo")} title="撤回（Ctrl+Z）">↶ 撤回</Button><Button variant="ghost" size="small" type="button" disabled={editorMode === "markdown" && !historyAvailability.canRedo} onMouseDown={(event) => event.preventDefault()} onClick={() => runEditorHistory("redo")} title="重做（Ctrl+Shift+Z / Ctrl+Y）">↷ 重做</Button></div><small><kbd>Ctrl</kbd> + <kbd>S</kbd></small><Button variant="primary" disabled={saving} onClick={onSave}>{saving ? "保存中…" : "保存"}</Button></div></header>
       <div className="editor-scroll" ref={editorScrollRef}><div className="editor-paper">
-        <details className="editor-metadata new-note-metadata">
-          <summary><div><strong>整理笔记</strong><span>主分类与自由标签可以稍后补充</span></div><em>展开整理</em></summary>
-          <fieldset><legend>主分类 · 单选</legend><div className="note-category-picker">{NOTE_CATEGORY_OPTIONS.map((option) => <button className={articleNoteCategory(draft) === option.value ? "active" : ""} type="button" key={option.value} onClick={() => update("category", option.value)}><strong>{option.label}</strong><span>{option.description}</span></button>)}</div></fieldset>
-          <label className="metadata-topic"><span>自由标签 <small>可不填，用逗号分隔</small></span><input ref={tagsRef} value={draft.tags.join("，")} onBeforeInput={(event) => rememberSelection("tags", event.currentTarget)} onChange={(event) => update("tags", splitTags(event.target.value))} placeholder="例如：沟通，边界，写作" /></label>
-          <details className="metadata-more-relations">
-            <summary><span><strong>更多关联</strong><small>项目与来源都是可选项</small></span><i>展开</i></summary>
-            <div className="metadata-grid">
-              <label className="metadata-project"><span>关联项目</span><SelectMenu label="关联项目" value={draft.projectId || projects.find((project) => project.title === draft.project)?.id || ""} onChange={(value) => { const project = projects.find((item) => item.id === value); commit({ ...draft, projectId: project?.id || "", project: project?.title || "" }); }} options={[{ value: "", label: "不关联项目" }, ...projects.map((project) => ({ value: project.id, label: project.title }))]} /></label>
-              <label className="metadata-source"><span>来源</span><SelectMenu label="来源" value={sourceKind} onChange={updateSource} options={sourceOptions.map((source) => ({ value: source, label: source }))} /></label>
-              <label className="metadata-source-link"><span>来源链接</span><input ref={sourceUrlRef} type="url" value={sourceUrl} onBeforeInput={(event) => rememberSelection("sourceUrl", event.currentTarget)} onChange={(event) => updateSource(sourceKind, event.target.value)} placeholder="可选" /></label>
-            </div>
-          </details>
-          <small className="metadata-auto-note">摘要、创建时间、修改时间和版本信息由系统自动维护。</small>
-        </details>
         <section className="editor-writing-pane">
           <input ref={titleRef} className="editor-title" autoFocus={!appendMode} value={draft.title} onBeforeInput={(event) => rememberSelection("title", event.currentTarget)} onChange={(event) => update("title", event.target.value)} placeholder="这篇笔记的标题" />
           <div className="markdown-toolbar" aria-label="正文格式工具">
             <div className="markdown-format-actions">
-              <button type="button" title="一级标题（再次点击恢复正文）" onMouseDown={(event) => event.preventDefault()} onClick={() => toggleHeading(1)}>一级标题</button>
-              <button type="button" title="二级标题（再次点击恢复正文）" onMouseDown={(event) => event.preventDefault()} onClick={() => toggleHeading(2)}>二级标题</button>
-              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("**", "**", "bold")}>加粗</button>
-              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("> ", "", "formatBlock", "blockquote")}>引用</button>
-              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("- ", "", "insertUnorderedList")}>列表</button>
-              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={applyLink}>链接</button>
+              <Button variant="ghost" size="small" type="button" title="一级标题（再次点击恢复正文）" onMouseDown={(event) => event.preventDefault()} onClick={() => toggleHeading(1)}>一级标题</Button>
+              <Button variant="ghost" size="small" type="button" title="二级标题（再次点击恢复正文）" onMouseDown={(event) => event.preventDefault()} onClick={() => toggleHeading(2)}>二级标题</Button>
+              <Button variant="ghost" size="small" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("**", "**", "bold")}>加粗</Button>
+              <Button variant="ghost" size="small" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("> ", "", "formatBlock", "blockquote")}>引用</Button>
+              <Button variant="ghost" size="small" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("- ", "", "insertUnorderedList")}>列表</Button>
+              <Button variant="ghost" size="small" type="button" onMouseDown={(event) => event.preventDefault()} onClick={applyLink}>链接</Button>
             </div>
             <div className="editor-preview-toggle" aria-label="编辑模式">
               <button className={editorMode === "visual" ? "active" : ""} type="button" onClick={() => setEditorMode("visual")}>所见即所得</button>
@@ -2217,6 +2599,20 @@ function ArticleEditor({ draft, attachmentRepository, projects, saving, appendMo
             <div ref={richSeedRef} className="editor-rich-seed" aria-hidden="true"><MarkdownDocument body={draft.body} attachmentRepository={attachmentRepository} onAttachmentReady={syncLoadedAttachments} /></div>
           </div>
         </section>
+        <aside className="editor-metadata new-note-metadata" aria-label="笔记信息">
+          <header className="note-metadata-header"><div><span>笔记信息</span><strong>整理与关联</strong></div><p>写作时随手补充，留空也可以保存。</p></header>
+          <fieldset><legend><strong>主分类</strong><span>选择一个</span></legend><div className="note-category-picker">{NOTE_CATEGORY_OPTIONS.map((option) => <button aria-pressed={articleNoteCategory(draft) === option.value} className={articleNoteCategory(draft) === option.value ? "active" : ""} type="button" key={option.value} onClick={() => update("category", option.value)}><strong>{option.label}</strong><span>{option.description}</span><i className="note-category-status" aria-hidden="true">✓</i></button>)}</div></fieldset>
+          <label className="metadata-topic"><span><strong>自由标签</strong><small>可选，用逗号分隔</small></span><input ref={tagsRef} value={draft.tags.join("，")} onBeforeInput={(event) => rememberSelection("tags", event.currentTarget)} onChange={(event) => update("tags", splitTags(event.target.value))} placeholder="沟通，边界，写作" /></label>
+          <details className="metadata-more-relations">
+            <summary><span><strong>项目与来源</strong><small>需要时再补充</small></span><i><span className="metadata-expand-label">展开</span><span className="metadata-collapse-label">收起</span></i></summary>
+            <div className="metadata-grid">
+              <label className="metadata-project"><span>关联项目</span><SelectMenu label="关联项目" value={draft.projectId || projects.find((project) => project.title === draft.project)?.id || ""} onChange={(value) => { const project = projects.find((item) => item.id === value); commit({ ...draft, projectId: project?.id || "", project: project?.title || "" }); }} options={[{ value: "", label: "不关联项目" }, ...projects.map((project) => ({ value: project.id, label: project.title }))]} /></label>
+              <label className="metadata-source"><span>来源</span><SelectMenu label="来源" value={sourceKind} onChange={updateSource} options={sourceOptions.map((source) => ({ value: source, label: source }))} /></label>
+              <label className="metadata-source-link"><span>来源链接</span><input ref={sourceUrlRef} type="url" value={sourceUrl} onBeforeInput={(event) => rememberSelection("sourceUrl", event.currentTarget)} onChange={(event) => updateSource(sourceKind, event.target.value)} placeholder="可选" /></label>
+            </div>
+          </details>
+          <small className="metadata-auto-note">摘要与时间等信息由系统自动维护。</small>
+        </aside>
       </div></div>
     </div>
   );
@@ -2394,10 +2790,6 @@ function startOfLocalWeekDate() {
   const day = date.getDay() || 7;
   date.setDate(date.getDate() - day + 1);
   return localDate(date);
-}
-
-function nextLocalDate(value: string) {
-  return shiftLocalDate(value, 1);
 }
 
 function shiftLocalDate(value: string, days: number) {

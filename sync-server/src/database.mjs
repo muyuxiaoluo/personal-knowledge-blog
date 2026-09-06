@@ -1075,6 +1075,8 @@ const syncEntityTypes = new Set([
   "log",
   "proposal",
   "task_plan",
+  "task_plan_history",
+  "daily_situation",
   "focus_session",
   "weekly_focus",
   "weekly_review",

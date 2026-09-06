@@ -12,6 +12,8 @@ mod attachments;
 mod backup;
 mod dashboard;
 mod deepseek;
+mod deepseek_api;
+mod finance;
 mod integrations;
 mod webviews;
 
@@ -216,6 +218,7 @@ pub fn run() {
         .manage(webviews::ToolWindowState::default())
         .manage(webviews::EntertainmentCaptureState::default())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_sql::Builder::default().build())
         .setup(|app| {
@@ -309,6 +312,13 @@ pub fn run() {
             deepseek::deepseek_delete_conversation,
             deepseek::deepseek_show_official,
             deepseek::deepseek_release,
+            deepseek_api::deepseek_api_list_models,
+            deepseek_api::deepseek_api_project_create,
+            deepseek_api::deepseek_api_project_replan,
+            deepseek_api::deepseek_api_next_action,
+            deepseek_api::deepseek_api_health_advice,
+            finance::finance_preview_import,
+            finance::finance_generate_monthly_report,
             dashboard::dashboard_search_cities,
             dashboard::dashboard_fetch_weather,
             dashboard::dashboard_fetch_ai_brief,

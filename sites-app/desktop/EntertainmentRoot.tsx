@@ -1,5 +1,4 @@
-import "./styles/foundation.css";
-import "./styles/capture.css";
+import "./capture-entry.css";
 import { EntertainmentCaptureApp } from "./EntertainmentCaptureApp";
 
 export default function EntertainmentRoot() {

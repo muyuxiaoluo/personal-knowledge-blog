@@ -1,5 +1,5 @@
-import { useEffect, useState, type ImgHTMLAttributes } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import { useEffect, useMemo, useState, type ImgHTMLAttributes } from "react";
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   attachmentIdFromUri,
@@ -14,6 +14,19 @@ type MarkdownDocumentProps = {
 };
 
 export function MarkdownDocument({ body, title, attachmentRepository, onAttachmentReady }: MarkdownDocumentProps) {
+  const components = useMemo<Components>(() => ({
+    a: ({ children, ...props }) => (
+      <a {...props} target="_blank" rel="noreferrer">{children}</a>
+    ),
+    input: (props) => <input {...props} disabled />,
+    img: (props) => {
+      const attachmentId = attachmentIdFromUri(String(props.src || ""));
+      return attachmentId && attachmentRepository
+        ? <AttachmentImage {...props} attachmentId={attachmentId} repository={attachmentRepository} onReady={onAttachmentReady} />
+        : <img {...props} />;
+    },
+  }), [attachmentRepository, onAttachmentReady]);
+
   return (
     <div className="desktop-markdown">
       <ReactMarkdown
@@ -26,18 +39,7 @@ export function MarkdownDocument({ body, title, attachmentRepository, onAttachme
             ? url
             : defaultUrlTransform(url)
         )}
-        components={{
-          a: ({ children, ...props }) => (
-            <a {...props} target="_blank" rel="noreferrer">{children}</a>
-          ),
-          input: (props) => <input {...props} disabled />,
-          img: (props) => {
-            const attachmentId = attachmentIdFromUri(String(props.src || ""));
-            return attachmentId && attachmentRepository
-              ? <AttachmentImage {...props} attachmentId={attachmentId} repository={attachmentRepository} onReady={onAttachmentReady} />
-              : <img {...props} />;
-          },
-        }}
+        components={components}
       >
         {normalizeMarkdown(body, title)}
       </ReactMarkdown>

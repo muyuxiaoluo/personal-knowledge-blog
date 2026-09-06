@@ -1,0 +1,5 @@
+@layer pages, visual, controls;
+@import "./styles/foundation.css" layer(pages);
+@import "./styles/capture.css";
+@import "./styles/visual-system.css" layer(visual);
+@import "./styles/controls.css" layer(controls);

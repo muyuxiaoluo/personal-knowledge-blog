@@ -1,3 +1,4 @@
+import { Button } from "./DesktopControls";
 import type { ProjectTaskStep } from "../app/project-types";
 
 type StepEditorProps = {
@@ -23,9 +24,9 @@ export function ActionStepEditor({ steps, onChange }: StepEditorProps) {
     {steps.map((step, index) => <div key={step.id}>
       <i>{index + 1}</i>
       <input value={step.title} onChange={(event) => update(step.id, event.target.value)} placeholder="例如：先筛出与问题最相关的实验" />
-      <button type="button" onClick={() => remove(step.id)} aria-label={`删除第 ${index + 1} 个步骤`}>×</button>
+      <Button variant="secondary" size="small" iconOnly type="button" onClick={() => remove(step.id)} aria-label={`删除第 ${index + 1} 个步骤`}>×</Button>
     </div>)}
-    <button className="action-step-add" type="button" onClick={add}>＋ 添加一个关键步骤</button>
+    <Button variant="secondary" className="action-step-add" type="button" onClick={add}>＋ 添加一个关键步骤</Button>
   </fieldset>;
 }
 

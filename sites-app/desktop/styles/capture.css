@@ -1,3 +1,4 @@
+@layer pages.capture {
 /* Entertainment capture and source organization ---------------------- */
 .capture-window-body {
   min-width: 0;
@@ -95,7 +96,7 @@
 .entertainment-capture-error { margin: 0; color: #ad5360; font-size: 11px; }
 .entertainment-capture-app form footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 1px; padding-bottom: 2px; }
 .entertainment-capture-app button { border: 1px solid rgba(77, 89, 145, .16); border-radius: 10px; padding: 9px 13px; background: #fff; color: #626b8d; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
-.entertainment-capture-app button.primary { border-color: #6276b8; background: #6276b8; color: #fff; }
+.entertainment-capture-app .ui-button--primary { border-color: #6276b8; background: #6276b8; color: #fff; }
 .entertainment-capture-app button:disabled { cursor: not-allowed; opacity: .55; }
 
 .source-workbench-heading {
@@ -164,4 +165,6 @@
   .source-item { grid-template-columns: minmax(0, 1fr); }
   .source-item-actions { grid-column: 1; justify-content: flex-start; }
   .source-relation-list { grid-column: 1; }
+}
+
 }

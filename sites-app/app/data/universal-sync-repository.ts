@@ -14,6 +14,8 @@ export type SyncEntityType =
   | "log"
   | "proposal"
   | "task_plan"
+  | "task_plan_history"
+  | "daily_situation"
   | "focus_session"
   | "weekly_focus"
   | "weekly_review"
@@ -120,6 +122,8 @@ const mappings: EntityMapping[] = [
   { entityType: "log", table: "project_logs", idColumn: "id" },
   { entityType: "proposal", table: "project_proposals", idColumn: "id" },
   { entityType: "task_plan", table: "task_plans", idColumn: "task_id" },
+  { entityType: "task_plan_history", table: "task_plan_history", idColumn: "id" },
+  { entityType: "daily_situation", table: "daily_situations", idColumn: "situation_date" },
   { entityType: "focus_session", table: "focus_sessions", idColumn: "id" },
   { entityType: "weekly_focus", table: "weekly_focus", idColumn: "week_start" },
   { entityType: "weekly_review", table: "weekly_reviews", idColumn: "week_start" },
@@ -303,7 +307,7 @@ export class UniversalSyncRepository {
       await this.database.execute(`DROP TRIGGER IF EXISTS sync_capture_${name}_${suffix}`);
     }
     await this.database.execute(
-      `CREATE TRIGGER sync_capture_${name}_insert AFTER INSERT ON ${table}
+      `CREATE TRIGGER IF NOT EXISTS sync_capture_${name}_insert AFTER INSERT ON ${table}
        WHEN ${insertWhen}
        BEGIN
          ${this.enqueueSql(mapping, "NEW")}
@@ -311,7 +315,7 @@ export class UniversalSyncRepository {
        END`,
     );
     await this.database.execute(
-      `CREATE TRIGGER sync_capture_${name}_update AFTER UPDATE ON ${table}
+      `CREATE TRIGGER IF NOT EXISTS sync_capture_${name}_update AFTER UPDATE ON ${table}
        WHEN ${updateWhen}
        BEGIN
          ${this.enqueueSql(mapping, "NEW")}
@@ -320,7 +324,7 @@ export class UniversalSyncRepository {
     );
     if (mapping.columns.includes("deleted_at")) {
       await this.database.execute(
-        `CREATE TRIGGER sync_capture_${name}_soft_delete AFTER UPDATE ON ${table}
+        `CREATE TRIGGER IF NOT EXISTS sync_capture_${name}_soft_delete AFTER UPDATE ON ${table}
          WHEN ${this.triggerWhen(mapping, "NEW")} AND NEW.deleted_at IS NOT NULL
          BEGIN
            ${this.recycleSql(mapping, "NEW")}
@@ -328,7 +332,7 @@ export class UniversalSyncRepository {
       );
     }
     await this.database.execute(
-      `CREATE TRIGGER sync_capture_${name}_delete AFTER DELETE ON ${table}
+      `CREATE TRIGGER IF NOT EXISTS sync_capture_${name}_delete AFTER DELETE ON ${table}
        WHEN ${deleteWhen}
        BEGIN
          ${this.enqueueSql(mapping, "OLD", "delete")}

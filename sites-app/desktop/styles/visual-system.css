@@ -1,0 +1,271 @@
+/* Shared layout and typography. Page sheets own content-specific layouts. */
+:root {
+  --ui-primary: #376253;
+  --ui-primary-hover: #294d42;
+  --ui-ink: #293c34;
+  --ui-muted: #64736c;
+  --ui-border: rgba(57, 83, 71, .2);
+  --ui-surface: #fffdf8;
+  --ui-surface-soft: #eff2ed;
+  --ui-focus: rgba(55, 98, 83, .22);
+  --ui-radius: 10px;
+  --ui-page-space: clamp(24px, 3vw, 48px);
+  --ui-text-small: 12px;
+  --ui-text-body: 14px;
+  --reading-size: 17px;
+  --reading-leading: 1.8;
+  --reading-paragraph-gap: .85em;
+}
+
+:root[data-workspace-theme="roxy"], .desktop-workbench.theme-roxy {
+  --ui-primary: #5869ad;
+  --ui-primary-hover: #485b9e;
+  --ui-ink: #343a61;
+  --ui-muted: #66708c;
+  --ui-border: rgba(82, 96, 158, .22);
+  --ui-surface: #fcfcff;
+  --ui-surface-soft: #eef1fa;
+  --ui-focus: rgba(88, 105, 173, .22);
+}
+
+:root[data-workspace-theme="asuna"], .desktop-workbench.theme-asuna {
+  --ui-primary: #a94752;
+  --ui-primary-hover: #933b46;
+  --ui-ink: #503b3c;
+  --ui-muted: #80676a;
+  --ui-border: rgba(147, 90, 82, .22);
+  --ui-surface: #fffdfa;
+  --ui-surface-soft: #faeeeb;
+  --ui-focus: rgba(169, 71, 82, .22);
+}
+
+.desktop-workbench.font-preset-modern {
+  --font-display: var(--font-ui);
+  --font-reading: var(--font-ui);
+}
+
+.desktop-workbench { font-size: var(--ui-text-body); color: var(--ui-ink); }
+/* Keep the root grid in one layer so document mode cannot inherit a sidebar column. */
+.workbench-v2 { grid-template-columns: 224px minmax(0, 1fr); }
+.workbench-v2.notes-mode { grid-template-columns: 224px var(--notes-filter-width) minmax(0, 1fr); }
+.workbench-v2.sidebar-collapsed { grid-template-columns: 72px minmax(0, 1fr); }
+.workbench-v2.sidebar-collapsed.notes-mode { grid-template-columns: 72px var(--notes-filter-width) minmax(0, 1fr); }
+.workbench-v2.document-mode { grid-template-columns: minmax(0, 1fr); }
+.desktop-workbench :is(h1, h2, h3, h4, h5, h6, .editor-title) {
+  font-family: var(--font-display);
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+.desktop-workbench :is(button, input, textarea, select) { font-family: var(--font-ui); }
+.desktop-workbench .editor-title { font-family: var(--font-display); }
+.desktop-markdown {
+  font-family: var(--font-reading);
+  font-size: var(--reading-size);
+  line-height: var(--reading-leading);
+  color: var(--ui-ink);
+  overflow-wrap: anywhere;
+}
+.desktop-markdown p { margin: 0 0 var(--reading-paragraph-gap); white-space: pre-wrap; }
+.desktop-markdown :is(ul, ol) { margin-block: 0 var(--reading-paragraph-gap); }
+.desktop-markdown :is(h1, h2, h3, h4, h5, h6) {
+  font-family: var(--font-display);
+  line-height: 1.4;
+  margin-block: 1.3em .55em;
+}
+.desktop-markdown :is(code, pre, kbd) { font-family: var(--font-code); }
+.desktop-markdown table { font-family: inherit; }
+.desktop-markdown > :first-child { margin-top: 0; }
+
+/* Writing, preview and reading share text metrics; source keeps code alignment. */
+.editor-rich-surface.desktop-markdown,
+.editor-live-preview .desktop-markdown,
+.immersive-reader .desktop-markdown {
+  font-family: var(--font-reading);
+  font-size: var(--reading-size);
+  line-height: var(--reading-leading);
+  color: var(--ui-ink);
+}
+.desktop-workbench .editor-body {
+  font-family: var(--font-code);
+  font-size: 15px;
+  line-height: 1.8;
+}
+.editor-rich-surface.desktop-markdown,
+.document-stage .editor-body,
+.editor-live-preview {
+  height: clamp(360px, 62dvh, 760px);
+  min-height: 360px;
+  border-radius: var(--ui-radius);
+  border-color: var(--ui-border);
+  background: var(--ui-surface);
+}
+.editor-rich-surface.desktop-markdown { padding: 28px clamp(24px, 3vw, 48px) 40px; }
+.document-stage .editor-body { padding: 24px; }
+.editor-preview-document { padding: 28px 24px 40px; }
+.editor-live-preview .desktop-markdown { padding-top: 0; border-top: 0; }
+.editor-title, .editor-preview-document > h1, .reader-document > h1 {
+  font-size: clamp(28px, 2.5vw, 36px);
+  line-height: 1.4;
+  font-weight: 600;
+}
+.document-stage .immersive-editor .editor-paper,
+.immersive-reader .reader-document {
+  border-radius: 16px;
+  border-color: var(--ui-border);
+  background: var(--ui-surface);
+  box-shadow: 0 8px 28px rgba(35, 43, 55, .07);
+}
+.document-stage .editor-toolbar {
+  background: var(--ui-surface);
+  border-color: var(--ui-border);
+  box-shadow: none;
+}
+.editor-pane-label span,
+.new-note-metadata > .metadata-auto-note,
+.note-organize-panel > footer span,
+.settings-font-copy small,
+.settings-font-note { font-size: var(--ui-text-small); color: var(--ui-muted); line-height: 1.6; }
+.settings-font-preview.preview-modern { font-family: var(--font-ui); }
+.settings-theme-options > button.active,
+.settings-font-options > button.active,
+.editor-preview-toggle > button.active,
+.wealth-tabs > button.active,
+.health-hero nav button.active,
+.tools-tabs button.active,
+.project-tabs button.active,
+.note-category-picker > button[aria-pressed="true"],
+.archive-tabs button.active {
+  border-color: var(--ui-primary);
+  background: var(--ui-surface-soft);
+  color: var(--ui-primary);
+  box-shadow: inset 0 0 0 1px var(--ui-border);
+}
+.settings-font-options > button > i, .note-category-status { background: var(--ui-primary); }
+
+/* Navigation scrolls independently of the account menu. */
+.workbench-v2 .workbench-sidebar { padding: 20px 12px 16px; gap: 16px; }
+.theme-default .workbench-sidebar { background: linear-gradient(180deg, #294b40, #203b33); }
+.sidebar-collapse-toggle { background: var(--ui-primary); border-color: rgba(255,255,255,.25); }
+.sidebar-collapse-toggle:hover { background: var(--ui-primary-hover); }
+.workbench-v2 .sidebar-brand { flex: 0 0 auto; padding: 0 8px; }
+.sidebar-brand strong { font-family: var(--font-ui); font-size: 16px; }
+.workbench-v2 .sidebar-navigation {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  align-content: start;
+  gap: 20px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,.24) transparent;
+}
+.sidebar-group { gap: 4px; }
+.workbench-v2 .sidebar-caption {
+  padding: 0 12px 6px;
+  color: rgba(238,241,255,.64);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: .06em;
+}
+.sidebar-navigation button, .settings-nav-entry {
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  column-gap: 12px;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 10px;
+}
+.sidebar-navigation button i, .settings-nav-entry i { display: grid; place-items: center; }
+.sidebar-navigation button i { color: rgba(240,244,250,.85); }
+.sidebar-navigation button.active i { color: var(--gold); }
+.sidebar-navigation button i svg, .settings-nav-entry i svg { width: 20px; height: 20px; }
+.sidebar-navigation button span, .settings-nav-entry span { font-size: 14px; font-weight: 500; }
+.sidebar-navigation button.active, .settings-nav-entry.active {
+  background: rgba(255,255,255,.13);
+  box-shadow: inset 3px 0 var(--gold);
+  color: #fff;
+}
+.sidebar-navigation button small { font-size: 12px; font-variant-numeric: tabular-nums; }
+.workbench-v2 .sidebar-foot { flex: 0 0 auto; margin-top: 0; gap: 8px; }
+.sidebar-collapsed .sidebar-brand > span:last-child,
+.sidebar-collapsed .sidebar-caption,
+.sidebar-collapsed .sidebar-navigation button > span,
+.sidebar-collapsed .sidebar-navigation button > small { display: none; }
+.workbench-v2.sidebar-collapsed .workbench-sidebar { padding-inline: 8px; }
+.sidebar-collapsed .sidebar-brand { justify-content: center; }
+.sidebar-collapsed .sidebar-navigation { width: 100%; }
+.sidebar-collapsed .sidebar-navigation button,
+.sidebar-collapsed .settings-nav-entry {
+  width: 48px;
+  height: 44px;
+  min-height: 44px;
+  grid-template-columns: 1fr;
+  padding: 0;
+  margin-inline: auto;
+}
+
+/* Shared page rhythm; content grids remain page-owned. */
+.home-launchpad, .action-center, .explore-page, .inbox-page, .review-page,
+.archive-page, .health-page, .wealth-page, .settings-page, .tools-center {
+  padding: 32px var(--ui-page-space) 56px;
+}
+.workspace-page-heading, .health-hero, .wealth-header, .tools-heading { margin-bottom: 24px; gap: 24px; flex-wrap: wrap; }
+.workspace-page-heading h1, .health-hero h1, .wealth-header h1, .tools-heading h1 {
+  font-family: var(--font-display);
+  font-size: clamp(28px, 2.5vw, 34px);
+  font-weight: 600;
+  line-height: 1.35;
+  margin: 4px 0 8px;
+  color: var(--ui-ink);
+}
+.workspace-page-heading p, .health-hero p, .wealth-header p, .tools-heading p {
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--ui-muted);
+}
+.workspace-card, .wealth-panel, .health-card {
+  border-radius: 16px;
+  border-color: var(--ui-border);
+  background: var(--workspace-surface);
+  box-shadow: 0 4px 18px rgba(35,43,55,.05);
+}
+.card-header { padding: 20px; }
+.card-header strong { font-size: 18px; font-weight: 600; }
+.card-header span { font-size: 13px; line-height: 1.6; color: var(--ui-muted); }
+.today-heading-actions { gap: 8px; align-items: center; }
+.activity-day-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.activity-day-detail > header { flex-wrap: wrap; gap: 12px; padding: 16px 20px; }
+.activity-day-detail > header span, .activity-day-detail > header strong { font-size: 13px; }
+.activity-day-detail > header button.active { background: var(--ui-surface-soft); color: var(--ui-primary); }
+.situation-summary { margin: 0 20px 16px; }
+
+.task-closeout-dialog, .wealth-dialog, .morning-modal, .focus-recovery-dialog,
+.avatar-crop-dialog {
+  border: 1px solid var(--ui-border);
+  border-radius: 16px;
+  padding: 24px;
+  background: var(--ui-surface);
+  color: var(--ui-ink);
+  box-shadow: 0 20px 64px rgba(25,30,45,.2);
+}
+.task-closeout-dialog h2, .wealth-dialog > header h2, .morning-modal > header h2 {
+  color: var(--ui-ink); font-family: var(--font-display); font-size: 24px; line-height: 1.4; font-weight: 600;
+}
+.task-closeout-dialog label > span, .task-closeout-dialog > header span { color: var(--ui-muted); font-size: 13px; font-weight: 600; }
+.task-closeout-dialog textarea { border-color: var(--ui-border); background: var(--ui-surface); color: var(--ui-ink); border-radius: var(--ui-radius); line-height: 1.7; }
+.task-closeout-dialog > footer, .wealth-dialog > footer { gap: 8px; padding-top: 16px; border-top: 1px solid var(--ui-border); flex-wrap: wrap; }
+.situation-candidates p, .situation-candidates small { margin: 0; color: var(--ui-muted); font-size: 13px; }
+.situation-candidates article { border-radius: var(--ui-radius); background: var(--ui-surface-soft); }
+.situation-candidates > .ui-button { justify-self: start; }
+.situation-check { grid-template-columns: 16px minmax(0, 1fr); }
+.calendar-source, .morning-source-status { min-width: 0; }
+.morning-source-status > div { min-width: 0; flex-wrap: wrap; }
+.morning-source-status :is(span, em), .calendar-upcoming small,
+.weather-three-days small, .rain-verdict small, .health-card-title > span,
+.wealth-header > div:first-child > span { font-size: 12px; line-height: 1.5; }
+
+@media (max-width: 1050px) {
+  .editor-toolbar { gap: 12px; }
+  .editor-toolbar-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .health-hero, .wealth-header { align-items: flex-start; }
+}

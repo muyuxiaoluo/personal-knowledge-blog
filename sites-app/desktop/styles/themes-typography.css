@@ -186,150 +186,108 @@
   opacity: .42;
 }
 
-.character-theme-header-sticker {
-  position: absolute;
-  z-index: 3;
-  top: 4px;
-  right: clamp(390px, 27vw, 560px);
-  display: none;
-  width: clamp(198px, 12.2vw, 236px);
-  opacity: .92;
-  filter: drop-shadow(0 12px 18px rgba(49, 54, 99, .13));
-}
-
-.character-theme-header-sticker > img {
-  position: relative;
+/* Page-owned character stickers use each layout's real blank space. */
+.theme-sticker {
   z-index: 2;
   display: block;
-  width: 100%;
-  height: auto;
-}
-
-.character-theme-layer:is(
-  [data-section="tasks"],
-  [data-section="explore"],
-  [data-section="inbox"],
-  [data-section="review"],
-  [data-section="archive"],
-  [data-section="settings"]
-) .character-theme-header-sticker {
-  display: block;
-}
-
-.character-theme-layer:is([data-section="explore"], [data-section="review"], [data-section="settings"]) .character-theme-header-sticker {
-  right: clamp(84px, 8vw, 156px);
-}
-
-.character-theme-layer[data-section="settings"] .character-theme-header-sticker {
-  top: 10px;
-  opacity: .76;
-}
-
-.theme-roxy .character-theme-header-sticker.is-expression {
-  top: 2px;
-  right: clamp(390px, 27vw, 560px);
-  display: block;
-  width: clamp(142px, 9.8vw, 176px);
+  flex: 0 0 auto;
+  width: clamp(116px, 8.8vw, 148px);
+  height: 104px;
+  margin-left: auto;
+  pointer-events: none;
+  user-select: none;
   opacity: .94;
   filter: drop-shadow(0 10px 15px rgba(49, 57, 106, .12));
 }
 
-.theme-roxy .character-theme-layer:is([data-section="explore"], [data-section="review"]) .character-theme-header-sticker.is-expression {
-  right: clamp(76px, 7vw, 138px);
-}
-
-.theme-roxy .character-theme-layer[data-section="home"] .character-theme-header-sticker.is-expression,
-.theme-roxy .character-theme-layer[data-section="projects"] .character-theme-header-sticker.is-expression {
-  top: 8px;
-}
-
-.desktop-workbench:has(> .global-focus-bar) .character-theme-layer:is(
-  [data-section="home"],
-  [data-section="tasks"],
-  [data-section="projects"],
-  [data-section="inbox"],
-  [data-section="archive"]
-) .character-theme-header-sticker {
-  display: none !important;
-}
-
-.character-theme-prop {
-  position: absolute;
-  z-index: 1;
+.theme-sticker > img {
   display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center bottom;
 }
 
-.theme-roxy .character-theme-header-sticker .prop-primary {
-  bottom: 20px;
-  left: -11px;
-  width: 34px;
-  height: 25px;
-  border: 2px solid rgba(237, 218, 159, .82);
-  border-radius: 4px 8px 8px 4px;
-  background: linear-gradient(90deg, #35458b 0 18%, #6778c7 18% 100%);
-  box-shadow: 0 6px 12px rgba(46, 49, 96, .18);
-  transform: rotate(-12deg);
+.theme-asuna .theme-sticker {
+  filter: drop-shadow(0 11px 16px rgba(117, 58, 58, .12));
 }
 
-.theme-roxy .character-theme-header-sticker .prop-primary::after {
+.theme-sticker-home-heading {
+  width: clamp(104px, 7.7vw, 128px);
+  height: 82px;
+}
+
+.home-context-line:has(> .theme-sticker-home-heading) {
+  min-height: 82px;
+}
+
+.theme-sticker-project-hero {
   position: absolute;
-  top: 5px;
   right: 6px;
-  width: 12px;
-  height: 1px;
-  background: rgba(239, 219, 155, .78);
-  box-shadow: 0 5px rgba(239, 219, 155, .48), 0 10px rgba(239, 219, 155, .34);
-  content: "";
+  bottom: -2px;
+  width: clamp(148px, 11vw, 188px);
+  height: 154px;
 }
 
-.theme-roxy .character-theme-header-sticker .prop-secondary {
-  top: 24px;
-  right: -4px;
-  width: 29px;
-  height: 29px;
-  border: 1px solid rgba(209, 224, 255, .84);
-  border-radius: 50%;
-  background: radial-gradient(circle at 35% 30%, #f6fbff 0 7%, #73b5ff 16%, #4d6bd0 48%, #313c91 74%);
-  box-shadow: 0 0 0 5px rgba(113, 144, 224, .1), 0 7px 16px rgba(61, 76, 154, .2);
+.project-hero:has(> .theme-sticker-project-hero) {
+  position: relative;
+  min-height: 154px;
+  padding-right: clamp(168px, 14vw, 214px);
 }
 
-.theme-asuna .character-theme-header-sticker {
-  filter: drop-shadow(0 12px 18px rgba(117, 58, 58, .12));
+.project-editor-layout {
+  display: grid;
+  width: min(1036px, 100%);
+  grid-template-columns: minmax(0, 820px) minmax(150px, 184px);
+  align-items: start;
+  gap: 28px;
+  margin-inline: auto;
 }
 
-.theme-asuna .character-theme-header-sticker .prop-primary {
-  bottom: 18px;
-  left: -10px;
-  width: 36px;
-  height: 25px;
-  border: 1px solid rgba(170, 101, 58, .36);
-  border-radius: 55% 55% 43% 43%;
-  background: linear-gradient(160deg, #f8d78d, #d9924e);
-  box-shadow: inset 0 -4px rgba(151, 80, 42, .12), 0 6px 12px rgba(115, 66, 46, .13);
-  transform: rotate(-9deg);
+.project-editor-layout > .project-editor-paper {
+  width: 100%;
+  max-width: none;
+  margin-inline: 0;
 }
 
-.theme-asuna .character-theme-header-sticker .prop-primary::after {
-  position: absolute;
-  top: 6px;
-  left: 9px;
-  width: 2px;
-  height: 11px;
-  border-radius: 2px;
-  background: rgba(158, 87, 47, .42);
-  box-shadow: 7px -1px rgba(158, 87, 47, .38), 14px 0 rgba(158, 87, 47, .34);
-  content: "";
-  transform: rotate(28deg);
+.project-editor-layout:not(:has(.theme-sticker-project-editor)) {
+  display: block;
+  width: min(820px, 100%);
 }
 
-.theme-asuna .character-theme-header-sticker .prop-secondary {
-  top: 22px;
-  right: -2px;
-  width: 31px;
-  height: 31px;
-  background: linear-gradient(145deg, #fff2ac, #dca64e);
-  clip-path: polygon(50% 0, 61% 35%, 98% 35%, 68% 56%, 79% 94%, 50% 71%, 21% 94%, 32% 56%, 2% 35%, 39% 35%);
-  filter: drop-shadow(0 5px 7px rgba(135, 80, 43, .18));
+.project-editor-companion {
+  position: sticky;
+  top: 28px;
+  display: grid;
+  min-height: 280px;
+  align-content: start;
+  padding-top: 34px;
+}
+
+.project-editor-companion:not(:has(.theme-sticker)) {
+  display: none;
+}
+
+.theme-sticker-project-editor {
+  width: 100%;
+  height: 178px;
+  margin: 0;
+  transform: rotate(1.5deg);
+}
+
+.theme-sticker-health-hero,
+.theme-sticker-wealth-hero {
+  width: clamp(126px, 10vw, 166px);
+  height: 132px;
+  align-self: center;
+}
+
+.theme-sticker-health-hero {
+  transform: translateY(12px) rotate(-1deg);
+}
+
+.theme-sticker-wealth-hero {
+  transform: translateY(10px) rotate(1deg);
 }
 
 :is(.theme-roxy, .theme-asuna) .workbench-sidebar {
@@ -354,32 +312,6 @@
 
 :is(.theme-roxy, .theme-asuna) .sidebar-navigation button.active i {
   color: #ecd494;
-}
-
-:is(.theme-roxy, .theme-asuna) :is(
-  .workspace-card,
-  .task-list-shell,
-  .source-inbox,
-  .link-capture-card,
-  .review-metrics article,
-  .project-gallery-card,
-  .project-stage-overview,
-  .project-section,
-  .project-current-progress,
-  .project-route-preview,
-  .project-context-panel,
-  .project-editor-paper,
-  .proposal-board,
-  .source-archive,
-  .morning-weather-card,
-  .morning-calendar-card,
-  .morning-ai-card,
-  .morning-news-card
-) {
-  border-color: var(--character-theme-border);
-  background: var(--character-theme-surface);
-  box-shadow: var(--workspace-shadow);
-  backdrop-filter: none;
 }
 
 :is(.theme-roxy, .theme-asuna) :is(
@@ -425,7 +357,7 @@
 }
 
 :is(.theme-roxy, .theme-asuna) :is(
-  button.primary,
+  .ui-button--primary,
   .home-context-actions button:last-child,
   .workspace-page-heading > button,
   .weekly-focus-card > button,
@@ -525,7 +457,25 @@
 }
 
 @media (max-width: 1220px), (max-height: 660px) {
-  .character-theme-header-sticker { display: none !important; }
+  .theme-sticker-heading,
+  .theme-sticker-home-heading,
+  .theme-sticker-project-hero,
+  .theme-sticker-project-editor,
+  .theme-sticker-health-hero,
+  .theme-sticker-wealth-hero { display: none !important; }
+
+  .home-context-line:has(> .theme-sticker-home-heading),
+  .project-hero:has(> .theme-sticker-project-hero) {
+    min-height: 0;
+    padding-right: 0;
+  }
+
+  .project-editor-layout {
+    display: block;
+    width: min(820px, 100%);
+  }
+
+  .project-editor-companion { display: none; }
 }
 
 @media (max-width: 760px) {
@@ -617,8 +567,8 @@
   cursor: pointer;
 }
 
-.project-action-buttons button.primary,
-.branch-current-action > div:last-child button.primary {
+.project-action-buttons .ui-button--primary,
+.branch-current-action > div:last-child .ui-button--primary {
   border-color: #6072ae;
   background: #6072ae;
   color: #fff;
@@ -959,7 +909,7 @@
   cursor: pointer;
 }
 
-.task-closeout-dialog > footer button.primary {
+.task-closeout-dialog > footer .ui-button--primary {
   border-color: #6072ae;
   background: #6072ae;
   color: #fff;
@@ -1002,32 +952,6 @@
 
 .desktop-workbench {
   font-family: var(--font-ui);
-}
-
-.desktop-workbench :is(
-  .desktop-markdown,
-  .reader-document > p,
-  .reader-next p,
-  .editor-rich-surface
-) {
-  font-family: var(--font-reading);
-}
-
-.desktop-workbench :is(
-  h1,
-  h2,
-  .desktop-markdown h3,
-  .desktop-markdown h4,
-  .desktop-markdown h5,
-  .desktop-markdown h6,
-  .card-header strong,
-  .home-context-line strong,
-  .home-context-echo summary strong,
-  .home-rediscovery-card > div:not(.card-header) strong,
-  .note-card-open > strong,
-  .project-overview-focus strong
-) {
-  font-family: var(--font-display);
 }
 
 .desktop-workbench :is(button, input, textarea, select) {

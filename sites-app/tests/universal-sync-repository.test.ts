@@ -9,6 +9,7 @@ import {
   type SqliteValue,
 } from "../app/data/sqlite-article-repository";
 import { UniversalSyncRepository } from "../app/data/universal-sync-repository";
+import { SqliteProjectRepository } from "../app/data/sqlite-project-repository";
 import type { Article } from "../app/types";
 
 class NodeSqliteAdapter implements SqliteDatabase {
@@ -92,4 +93,66 @@ test("captures domain mutations into one durable v3 outbox", async () => {
   assert.equal(deleted[0].operation, "delete");
   assert.equal((await sync.listRecycle()).length, 1);
   database.close();
+});
+
+test("initializes capture triggers safely when startup overlaps", async () => {
+  const database = new DatabaseSync(":memory:");
+  const adapter = new NodeSqliteAdapter(database);
+  const articles = new SqliteArticleRepository(adapter, {
+    deviceId: "test-device",
+    seedArticles: [],
+  });
+  await articles.ready();
+  await new AttachmentRepository(adapter).initialize();
+
+  const first = new UniversalSyncRepository(adapter);
+  const second = new UniversalSyncRepository(adapter);
+  await Promise.all([first.initialize(), second.initialize()]);
+
+  const triggers = database.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'sync_capture_%'").all();
+  assert.ok(triggers.length > 0);
+  assert.equal(new Set(triggers.map((row) => String(row.name))).size, triggers.length);
+  database.close();
+});
+
+test("round-trips standalone tasks and structured logs with null project ids", async () => {
+  const sourceDatabase = new DatabaseSync(":memory:");
+  const sourceAdapter = new NodeSqliteAdapter(sourceDatabase);
+  const sourceProjects = new SqliteProjectRepository(sourceAdapter);
+  await sourceProjects.ready();
+  const sourceSync = new UniversalSyncRepository(sourceAdapter);
+  await sourceSync.initialize();
+  const now = "2026-08-30T08:00:00.000Z";
+  const task = await sourceProjects.saveTask({
+    id: "standalone-sync", projectId: null, milestoneId: null, direction: "learning", title: "给导师发消息",
+    actionType: "communicate", definitionOfDone: "导师收到消息", steps: [], currentFocus: "写完并发送",
+    details: "", benefit: "", dueDate: "", status: "next", waitingFor: "", resumeAction: "", context: "phone",
+    sortOrder: 10, createdAt: now, updatedAt: now, completedAt: null,
+  });
+  const log = await sourceProjects.addLog(null, "独立行动接续点", task.id, "continuation");
+  const pending = await sourceSync.listPending();
+  const taskChange = pending.find((item) => item.entityType === "task" && item.id === task.id);
+  const logChange = pending.find((item) => item.entityType === "log" && item.id === log.id);
+  assert.equal(taskChange?.payload.project_id, null);
+  assert.equal(taskChange?.payload.direction, "learning");
+  assert.equal(logChange?.payload.project_id, null);
+  assert.equal(logChange?.payload.task_id, task.id);
+  assert.equal(logChange?.payload.kind, "continuation");
+
+  const targetDatabase = new DatabaseSync(":memory:");
+  const targetAdapter = new NodeSqliteAdapter(targetDatabase);
+  const targetProjects = new SqliteProjectRepository(targetAdapter);
+  await targetProjects.ready();
+  const targetSync = new UniversalSyncRepository(targetAdapter);
+  await targetSync.initialize();
+  await targetSync.commit({
+    protocolVersion: 3, cursor: "2", hasMore: false, accepted: [], conflicts: [], failed: [],
+    changes: [taskChange!, logChange!].map((item, index) => ({
+      entityType: item.entityType, id: item.id, operation: item.operation, payload: item.payload,
+      changeId: `remote-${index}`, version: 1, deletedAt: null, updatedAt: now,
+    })),
+  });
+  assert.equal((await targetProjects.listStandaloneTasks())[0]?.id, task.id);
+  assert.equal((await targetProjects.listTaskLogs(task.id))[0]?.kind, "continuation");
+  sourceDatabase.close(); targetDatabase.close();
 });

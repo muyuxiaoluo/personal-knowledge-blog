@@ -1,4 +1,9 @@
-import { type CSSProperties } from "react";
+import {
+  createContext,
+  useContext,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import asunaCharacter from "./assets/asuna-character-v1.webp";
 import asunaChibiSticker from "./assets/asuna-chibi-sticker-v1.webp";
 import roxyCharacter from "./assets/roxy-character-v1.webp";
@@ -6,9 +11,11 @@ import roxyChibiSticker from "./assets/roxy-chibi-sticker-v1.webp";
 import roxyCheerSticker from "./assets/roxy-expressions/cheer.webp";
 import roxyGoodNightSticker from "./assets/roxy-expressions/good-night.webp";
 import roxyHardWorkSticker from "./assets/roxy-expressions/hard-work.webp";
+import roxyHealthSticker from "./assets/roxy-expressions/health-habits-v1.png";
 import roxyPeekSticker from "./assets/roxy-expressions/peek.webp";
 import roxyStudySticker from "./assets/roxy-expressions/study.webp";
 import roxyThinkingSticker from "./assets/roxy-expressions/thinking.webp";
+import roxyWealthSticker from "./assets/roxy-expressions/wealth-budget-v1.png";
 import roxyWelcomeSticker from "./assets/roxy-expressions/welcome.webp";
 
 export type ThemeId = "default" | "roxy" | "asuna";
@@ -55,12 +62,23 @@ const legacyThemeStorageKey = "life-strategy.theme-mode";
 const roxySectionStickers: Readonly<Record<string, string>> = {
   home: roxyWelcomeSticker,
   tasks: roxyStudySticker,
+  health: roxyHealthSticker,
+  wealth: roxyWealthSticker,
   projects: roxyCheerSticker,
   explore: roxyPeekSticker,
   inbox: roxyThinkingSticker,
   review: roxyHardWorkSticker,
   archive: roxyGoodNightSticker,
 };
+const DesktopThemeContext = createContext<ThemeId>("default");
+
+export type ThemeStickerPlacement =
+  | "heading"
+  | "home-heading"
+  | "project-hero"
+  | "project-editor"
+  | "health-hero"
+  | "wealth-hero";
 
 function isThemeId(value: string | null): value is ThemeId {
   return value !== null && themeIds.has(value as ThemeId);
@@ -82,6 +100,35 @@ export function saveDesktopTheme(themeId: ThemeId, storage: Storage = localStora
   storage.setItem(themeStorageKey, themeId);
 }
 
+export function DesktopThemeProvider({ themeId, children }: {
+  themeId: ThemeId;
+  children: ReactNode;
+}) {
+  return <DesktopThemeContext.Provider value={themeId}>{children}</DesktopThemeContext.Provider>;
+}
+
+export function ThemeSticker({ section, placement = "heading" }: {
+  section: string;
+  placement?: ThemeStickerPlacement;
+}) {
+  const themeId = useContext(DesktopThemeContext);
+  const theme = DESKTOP_THEMES.find((candidate) => candidate.id === themeId);
+  if (!theme?.stickerImage) return null;
+
+  const expressionSticker = theme.id === "roxy" ? roxySectionStickers[section] : null;
+  const stickerImage = expressionSticker ?? theme.stickerImage;
+
+  return (
+    <span
+      className={`theme-sticker theme-sticker-${placement}${expressionSticker ? " is-expression" : ""}`}
+      data-sticker-section={section}
+      aria-hidden="true"
+    >
+      <img src={stickerImage} alt="" draggable={false} />
+    </span>
+  );
+}
+
 export function ThemeArtwork({ themeId, section, documentMode }: {
   themeId: ThemeId;
   section: string;
@@ -89,8 +136,6 @@ export function ThemeArtwork({ themeId, section, documentMode }: {
 }) {
   const theme = DESKTOP_THEMES.find((candidate) => candidate.id === themeId);
   if (!theme?.characterImage || documentMode) return null;
-  const expressionSticker = theme.id === "roxy" ? roxySectionStickers[section] : null;
-  const stickerImage = expressionSticker ?? theme.stickerImage;
 
   return (
     <div className="character-theme-layer" data-section={section} aria-hidden="true">
@@ -106,13 +151,6 @@ export function ThemeArtwork({ themeId, section, documentMode }: {
         })}
       </div>
       <img className="character-theme-figure" src={theme.characterImage} alt="" draggable={false} />
-      {stickerImage && (
-        <div className={`character-theme-header-sticker${expressionSticker ? " is-expression" : ""}`}>
-          {!expressionSticker && <span className="character-theme-prop prop-primary" />}
-          <img src={stickerImage} alt="" draggable={false} />
-          {!expressionSticker && <span className="character-theme-prop prop-secondary" />}
-        </div>
-      )}
     </div>
   );
 }

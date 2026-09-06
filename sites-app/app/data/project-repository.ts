@@ -10,10 +10,13 @@ import type {
   ProjectTaskStatus,
   ProposalStatus,
 } from "../project-types";
+import type { ProjectAdjustmentDraft } from "../ai-api-types";
 
 export interface ProjectRepository {
   list(): Promise<ProjectSummary[]>;
   listIndexDetails(): Promise<ProjectDetail[]>;
+  listStandaloneTasks(): Promise<ProjectTask[]>;
+  listTaskLogs(taskId: string): Promise<ProjectLog[]>;
   get(id: string): Promise<ProjectDetail | null>;
   saveProject(project: Project): Promise<Project>;
   saveWorkspace(project: Project, milestones: Milestone[], task: ProjectTask | null, branches?: Project[]): Promise<Project>;
@@ -31,7 +34,8 @@ export interface ProjectRepository {
   saveProposal(proposal: ProjectProposal): Promise<ProjectProposal>;
   updateProposalStatus(id: string, status: ProposalStatus, reviewNote: string): Promise<void>;
   removeProposal(id: string): Promise<void>;
-  addLog(projectId: string, body: string): Promise<ProjectLog>;
+  addLog(projectId: string | null, body: string, taskId?: string | null, kind?: ProjectLog["kind"]): Promise<ProjectLog>;
+  applyProjectAdjustment(draft: ProjectAdjustmentDraft): Promise<void>;
   confirmProject(id: string): Promise<void>;
 }
 

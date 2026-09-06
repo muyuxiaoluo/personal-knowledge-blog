@@ -80,6 +80,33 @@ test("v3 sync is versioned, idempotent, paged and keeps blobs private", async (c
     1,
   );
 
+  const standalone = await syncV3(baseUrl, refreshed.accessToken, {
+    cursor: first.cursor,
+    deviceId: "windows-device",
+    changes: [
+      {
+        entityType: "task", id: "standalone-task", baseVersion: 0, operation: "upsert",
+        payload: { id: "standalone-task", project_id: null, milestone_id: null, direction: "learning", status: "next" },
+        changeId: "windows-device:standalone-task:first",
+      },
+      {
+        entityType: "log", id: "standalone-log", baseVersion: 0, operation: "upsert",
+        payload: { id: "standalone-log", project_id: null, task_id: "standalone-task", kind: "continuation", body: "下次继续" },
+        changeId: "windows-device:standalone-log:first",
+      },
+    ],
+  });
+  assert.equal(standalone.accepted.length, 2);
+
+  const dailyRecords = await syncV3(baseUrl, refreshed.accessToken, {
+    cursor: standalone.cursor, deviceId: "windows-device", changes: [
+      { entityType: "task_plan_history", id: "2026-09-04:standalone-task", baseVersion: 0, operation: "upsert", payload: { id: "2026-09-04:standalone-task", task_id: "standalone-task", planned_date: "2026-09-04", task_title: "读论文", current_focus: "读方法", created_at: "2026-09-04T00:00:00Z" }, changeId: "windows:history:1" },
+      { entityType: "daily_situation", id: "2026-09-04", baseVersion: 0, operation: "upsert", payload: { situation_date: "2026-09-04", reason: "临时协助实验", actual_work: "样品测量", tasks_json: "[]", updated_at: "2026-09-05T00:00:00Z" }, changeId: "windows:situation:1" },
+    ],
+  });
+  assert.equal(dailyRecords.accepted.length, 2);
+  assert.equal(dailyRecords.failed.length, 0);
+
   const conflict = await syncV3(baseUrl, refreshed.accessToken, {
     cursor: first.cursor,
     deviceId: "second-device",
@@ -117,6 +144,10 @@ test("v3 sync is versioned, idempotent, paged and keeps blobs private", async (c
   });
   assert.equal(pulled.changes.some((item) => item.entityType === "project"), true);
   assert.equal(pulled.changes.some((item) => item.entityType === "preference"), true);
+  assert.equal(pulled.changes.find((item) => item.entityType === "daily_situation")?.payload.situation_date, "2026-09-04");
+  assert.equal(pulled.changes.find((item) => item.entityType === "task_plan_history")?.payload.task_title, "读论文");
+  assert.equal(pulled.changes.find((item) => item.entityType === "task" && item.id === "standalone-task")?.payload.project_id, null);
+  assert.equal(pulled.changes.find((item) => item.entityType === "log" && item.id === "standalone-log")?.payload.kind, "continuation");
 
   const blob = Buffer.from("not-a-real-image-but-hash-verified");
   const blobHash = createHash("sha256").update(blob).digest("hex");

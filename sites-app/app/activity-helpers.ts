@@ -1,12 +1,15 @@
 import type { RestDay } from "./dashboard-types";
 import type { FocusSession } from "./work-types";
+import type { DailySituation } from "./work-types";
+import type { LifeDomain } from "./domain-taxonomy";
 
 export type ActivityTask = {
   id: string;
-  projectId: string;
+  projectId: string | null;
   projectTitle: string;
   title: string;
   currentFocus: string;
+  direction?: LifeDomain;
   completedAt: string | null;
 };
 
@@ -18,6 +21,7 @@ export type ActivityNote = {
 };
 
 export type ActivityDay = {
+  situation?: DailySituation;
   date: string;
   tasks: ActivityTask[];
   notes: ActivityNote[];
@@ -34,11 +38,13 @@ export function buildActivityDays({
   notes,
   focusSessions,
   restDays,
+  situations = [],
 }: {
   tasks: ActivityTask[];
   notes: ActivityNote[];
   focusSessions: FocusSession[];
   restDays: RestDay[];
+  situations?: DailySituation[];
 }) {
   const days = new Map<string, ActivityDay>();
   const restDates = new Set(restDays.map((day) => day.date));
@@ -52,6 +58,7 @@ export function buildActivityDays({
   };
 
   restDates.forEach((date) => ensure(date));
+  situations.forEach((situation) => { ensure(situation.date).situation = situation; });
   tasks.forEach((task) => {
     const date = task.completedAt ? activityDateKey(task.completedAt) : "";
     if (date) ensure(date).tasks.push(task);

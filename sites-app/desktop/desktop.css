@@ -1,7 +1,13 @@
-@import "./styles/foundation.css";
-@import "./styles/workbench.css";
-@import "./styles/theme-foundation.css";
-@import "./styles/semantic-refresh.css";
-@import "./styles/editor-refinements.css";
-@import "./styles/themes-typography.css";
-@import "./styles/notes-final.css";
+/* Fixed sublayer order also applies to styles loaded with lazy page modules. */
+@layer pages, visual, controls;
+@layer pages.foundation, pages.workbench, pages.theme, pages.semantic, pages.editor, pages.dashboard, pages.ai, pages.project, pages.capture, pages.health, pages.wealth, pages.notes, pages.avatar, pages.shared, pages.typography, pages.situation;
+@import "./styles/foundation.css" layer(pages.foundation);
+@import "./styles/workbench.css" layer(pages.workbench);
+@import "./styles/theme-foundation.css" layer(pages.theme);
+@import "./styles/semantic-refresh.css" layer(pages.semantic);
+@import "./styles/editor-refinements.css" layer(pages.editor);
+@import "./styles/shared-page-layout.css" layer(pages.shared);
+@import "./styles/themes-typography.css" layer(pages.typography);
+@import "./styles/daily-situation.css" layer(pages.situation);
+@import "./styles/visual-system.css" layer(visual);
+@import "./styles/controls.css" layer(controls);

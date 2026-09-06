@@ -7,9 +7,15 @@ import type {
   TaskPriority,
   WeeklyFocus,
   WeeklyReview,
+  TaskPlanHistory,
+  DailySituation,
+  SituationPlanChange,
 } from "../work-types";
 import { WorkRepositoryError, type WorkRepository } from "./work-repository";
 import type { SqliteDatabase } from "./sqlite-article-repository";
+import { executeSqliteTransaction, type SqliteStatement } from "./sqlite-article-repository";
+import { activityDateKey } from "../activity-helpers";
+import { isValidDay } from "../action-planning";
 
 type TaskPlanRow = {
   task_id: string;
@@ -56,6 +62,21 @@ type WeeklyReviewRow = {
 };
 
 const migrations = [
+  `CREATE TABLE IF NOT EXISTS task_plan_history (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    planned_date TEXT NOT NULL,
+    task_title TEXT NOT NULL DEFAULT '',
+    current_focus TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS daily_situations (
+    situation_date TEXT PRIMARY KEY NOT NULL,
+    reason TEXT NOT NULL,
+    actual_work TEXT NOT NULL DEFAULT '',
+    tasks_json TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS task_plans (
     task_id TEXT PRIMARY KEY NOT NULL,
     planned_date TEXT NOT NULL DEFAULT '',
@@ -111,6 +132,26 @@ export class SqliteWorkRepository implements WorkRepository {
   private async initialize() {
     this.initialization ??= (async () => {
       for (const statement of migrations) await this.database.execute(statement);
+      const hasTasks = (await this.database.select<{ name: string }>("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'project_tasks'")).length > 0;
+      const snapshot = (alias: string) => hasTasks
+        ? `COALESCE((SELECT title FROM project_tasks WHERE id = ${alias}.task_id), ''), COALESCE((SELECT current_focus FROM project_tasks WHERE id = ${alias}.task_id), '')`
+        : "'', ''";
+      const remember = (alias: string) => `INSERT OR IGNORE INTO task_plan_history(id, task_id, planned_date, task_title, current_focus, created_at)
+        SELECT ${alias}.planned_date || ':' || ${alias}.task_id, ${alias}.task_id, ${alias}.planned_date, ${snapshot(alias)}, ${alias}.updated_at
+        WHERE ${alias}.planned_date != '' AND NOT EXISTS (
+          SELECT 1 FROM task_plan_history WHERE id = ${alias}.planned_date || ':' || ${alias}.task_id
+        );`;
+      // Keep the first snapshot for each date, including plans later moved or removed.
+      const triggerStatements: SqliteStatement[] = [];
+      for (const [event, alias] of [["INSERT", "NEW"], ["UPDATE", "OLD"], ["DELETE", "OLD"]]) {
+        triggerStatements.push(
+          { sql: `DROP TRIGGER IF EXISTS remember_plan_${event.toLowerCase()}` },
+          { sql: `CREATE TRIGGER remember_plan_${event.toLowerCase()} AFTER ${event} ON task_plans BEGIN ${remember(alias)} ${event === "UPDATE" ? remember("NEW") : ""} END` },
+        );
+      }
+      await executeSqliteTransaction(this.database, triggerStatements);
+      await this.database.execute(`INSERT OR IGNORE INTO task_plan_history(id, task_id, planned_date, task_title, current_focus, created_at)
+        SELECT task_plans.planned_date || ':' || task_plans.task_id, task_plans.task_id, task_plans.planned_date, ${snapshot("task_plans")}, task_plans.updated_at FROM task_plans WHERE planned_date != ''`);
       await this.database.execute("PRAGMA optimize");
     })().catch((error) => {
       this.initialization = null;
@@ -133,6 +174,52 @@ export class SqliteWorkRepository implements WorkRepository {
     } catch (error) {
       throw new WorkRepositoryError("读取任务安排失败", "read_failed", error);
     }
+  }
+
+  async listPlanHistory(date = ""): Promise<TaskPlanHistory[]> {
+    await this.initialize();
+    const rows = await this.database.select<{ id: string; task_id: string; planned_date: string; task_title: string; current_focus: string; created_at: string }>(
+      "SELECT * FROM task_plan_history WHERE (? = '' OR planned_date = ?) ORDER BY planned_date DESC, created_at", [date, date],
+    );
+    return rows.map((row) => ({ id: row.id, taskId: row.task_id, plannedDate: row.planned_date, taskTitle: row.task_title, currentFocus: row.current_focus, createdAt: row.created_at }));
+  }
+
+  async listDailySituations(): Promise<DailySituation[]> {
+    await this.initialize();
+    const rows = await this.database.select<{ situation_date: string; reason: string; actual_work: string; tasks_json: string; updated_at: string }>("SELECT * FROM daily_situations ORDER BY situation_date DESC");
+    return rows.map((row) => ({ date: row.situation_date, reason: row.reason, actualWork: row.actual_work, tasks: JSON.parse(row.tasks_json), updatedAt: row.updated_at }));
+  }
+
+  async saveDailySituation(situation: DailySituation, changes: SituationPlanChange[] = []): Promise<void> {
+    const today = activityDateKey(this.clock().toISOString());
+    if (!isValidDay(situation.date) || situation.date > today || !situation.reason.trim()) {
+      throw new WorkRepositoryError("请选择已发生的日期，并写下当天情况", "invalid_data");
+    }
+    const tasks = situation.tasks.map((task) => ({ ...task, title: task.title.trim(), progress: task.outcome === "partial" ? task.progress.trim() : "" }));
+    if (new Set(tasks.map((task) => task.taskId)).size !== tasks.length || tasks.some((task) => !task.taskId || !task.title || !["not_started", "partial"].includes(task.outcome) || (task.outcome === "partial" && !task.progress))) {
+      throw new WorkRepositoryError("请补全受影响行动的实际进展", "invalid_data");
+    }
+    await this.initialize();
+    const now = this.clock().toISOString();
+    const statements: SqliteStatement[] = [{
+      sql: `INSERT INTO daily_situations(situation_date, reason, actual_work, tasks_json, updated_at) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(situation_date) DO UPDATE SET reason = excluded.reason, actual_work = excluded.actual_work, tasks_json = excluded.tasks_json, updated_at = excluded.updated_at`,
+      bindValues: [situation.date, situation.reason.trim(), situation.actualWork.trim(), JSON.stringify(tasks), now],
+    }];
+    for (const change of changes) {
+      if (!tasks.some((task) => task.taskId === change.taskId) || change.expectedPlan.taskId !== change.taskId || !change.expectedPlan.plannedDate || change.expectedPlan.plannedDate > situation.date) continue;
+      if (change.plannedDate && (change.plannedDate < today || !isValidDay(change.plannedDate))) {
+        throw new WorkRepositoryError("后续安排请选择今天或未来的日期", "invalid_data");
+      }
+      // Compare the current plan at write time so a retrospective note cannot roll back newer work.
+      statements.push({
+        sql: `UPDATE task_plans SET planned_date = ?, updated_at = ? WHERE task_id = ? AND planned_date = ? AND updated_at = ?
+          AND EXISTS (SELECT 1 FROM project_tasks WHERE id = ? AND status NOT IN ('done', 'cancelled', 'waiting') AND deleted_at IS NULL)
+          AND NOT EXISTS (SELECT 1 FROM focus_sessions WHERE task_id = ? AND ended_at IS NULL)`,
+        bindValues: [change.plannedDate, now, change.taskId, change.expectedPlan.plannedDate, change.expectedPlan.updatedAt, change.taskId, change.taskId],
+      });
+    }
+    await executeSqliteTransaction(this.database, statements);
   }
 
   async savePlan(plan: TaskPlan): Promise<TaskPlan> {

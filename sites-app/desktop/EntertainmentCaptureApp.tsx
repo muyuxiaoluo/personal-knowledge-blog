@@ -3,6 +3,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import type { EntertainmentCaptureSnapshot } from "../app/entertainment-capture";
 import { formatPlaybackTime, providerLabel } from "../app/entertainment-capture";
 import { BrandLogo } from "./BrandLogo";
+import { Button } from "./DesktopControls";
 
 type CaptureView = {
   mode: "explore" | "thought";
@@ -58,7 +59,7 @@ export function EntertainmentCaptureApp() {
   }
 
   if (!capture) {
-    return <main className="entertainment-capture-app loading"><div className="capture-spinner" /><p>{error || "正在读取当前页面…"}</p>{error && <button onClick={() => void cancel()}>关闭</button>}</main>;
+    return <main className="entertainment-capture-app loading"><div className="capture-spinner" /><p>{error || "正在读取当前页面…"}</p>{error && <Button variant="secondary" type="button" onClick={() => void cancel()}>关闭</Button>}</main>;
   }
 
   const { snapshot } = capture;
@@ -70,7 +71,7 @@ export function EntertainmentCaptureApp() {
       <header className="entertainment-capture-heading">
         <span className={`capture-platform-mark ${snapshot.provider}`}><BrandLogo brand={brand} /></span>
         <div><span>{providerLabel(snapshot.provider)} · {!capture.requiresConfirmation && playback ? `视频 ${playback}` : "当前页面"}</span><h1>{capture.mode === "thought" ? "记录此刻" : "保存当前网页"}</h1></div>
-        <button type="button" onClick={() => void cancel()} aria-label="关闭">×</button>
+        <Button variant="secondary" size="small" iconOnly type="button" onClick={() => void cancel()} aria-label="关闭">×</Button>
       </header>
 
       <section className="capture-source-preview">
@@ -89,10 +90,10 @@ export function EntertainmentCaptureApp() {
         </>}
         {error && <p className="entertainment-capture-error" role="alert">{error}</p>}
         <footer>
-          <button type="button" onClick={() => void cancel()} disabled={busy}>取消</button>
-          <button className="primary" disabled={busy || (capture.mode === "thought" && !thought.trim())}>
+          <Button variant="secondary" type="button" onClick={() => void cancel()} disabled={busy}>取消</Button>
+          <Button variant="primary" type="submit" disabled={busy || (capture.mode === "thought" && !thought.trim())}>
             {busy ? "正在保存…" : capture.mode === "thought" ? "保存到待整理" : "仍保存到探索库"}
-          </button>
+          </Button>
         </footer>
       </form>
     </main>

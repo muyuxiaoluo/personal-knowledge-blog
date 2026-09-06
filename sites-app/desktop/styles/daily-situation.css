@@ -1,0 +1,29 @@
+.situation-dialog {
+  width: min(660px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.situation-dialog fieldset { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 16px; }
+.situation-dialog label { display: grid; gap: 8px; }
+.situation-dialog textarea { min-height: 76px; resize: vertical; }
+.situation-dialog p, .situation-dialog small { line-height: 1.65; }
+.situation-check { display: flex !important; align-items: center; gap: 10px; }
+.situation-check input[type="checkbox"] { width: 16px; height: 16px; flex: 0 0 16px; margin: 0; }
+.situation-candidates { display: grid; gap: 12px; }
+.situation-candidates article { border: 1px solid var(--workspace-border); padding: 14px; border-radius: 14px; display: grid; gap: 10px; }
+.situation-task-fields { display: grid; gap: 12px; }
+.situation-summary, .situation-week { padding: 20px; border-radius: 16px; margin: 16px 0; }
+.situation-summary { background: var(--workspace-surface-strong); border: 1px solid var(--workspace-border); }
+.situation-summary p, .situation-week p, .ai-start-reason { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }
+.situation-week > button { width: 100%; text-align: left; display: grid; gap: 8px; border-bottom: 1px solid var(--workspace-border); padding: 16px 0; }
+.situation-recent { max-width: 100%; text-align: left; padding: 12px 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.continuation-list { margin-bottom: 24px; }
+.continuation-list > header > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.activity-cell.has-situation { outline: 1px solid var(--workspace-accent, #776bc1); outline-offset: -1px; }
+.activity-cell.has-situation.selected { outline-width: 2px; }
+.today-heading-actions { flex-wrap: wrap; }
+@media (max-width: 640px) {
+  .situation-dialog { max-height: calc(100dvh - 16px); width: calc(100vw - 16px); }
+  .situation-dialog footer { flex-wrap: wrap; gap: 10px; }
+}

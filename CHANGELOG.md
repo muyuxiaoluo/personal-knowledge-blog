@@ -2,6 +2,20 @@
 
 ## 未发布
 
+## v1.0.0 — 2026-09-06
+
+- 正式版里程碑：人生攻略库从 0.x 进入 1.0，功能覆盖工作台、笔记、项目、专注、仪表盘、AI 助手、工具中心、附件、备份、云同步 v3、财务分析与健康追踪等完整场景；数据迁移和同步协议均向后兼容。
+- 新增财富页与财务分析：可导入 Excel/CSV（含 GBK 自动转码）预览账单并生成月度报表，按分类汇总收入与支出，数据持久化到本地 SQLite；Rust 后端新增 calamine、csv、encoding_rs 依赖与 finance_preview_import、finance_generate_monthly_report 命令。
+- 新增健康页与习惯追踪：记录每日健康习惯与指标，支持自定义习惯项与历史回顾；health-repository 与 health-helpers 模块持久化到 SQLite，并配独立测试。
+- 新增行动规划助手与每日情况对话：AI 可基于当前项目状态生成下一步建议与重新规划；每日情况记录临时调整原因和实际工作，作为专注记录的补充上下文。
+- 新增 AI 模型设置：可在应用内查看可用模型列表并选择偏好；Rust 后端新增 deepseek_api 模块，封装 list_models、project_create、project_replan、next_action、health_advice 等命令。
+- 同步协议扩展：v3 新增 task_plan_history 和 daily_situation 两个实体类型；支持 project_id 为 null 的独立任务与续接日志；服务端 syncEntityTypes 同步扩展，旧客户端不受影响。
+- 新增 UI 契约测试：check-ui-primitives 脚本检查公共 UI 原语的可见性，lint 流程加入 check:ui 步骤；ui-contract 测试覆盖关键交互约束。
+- TypeScript 严格度提升：tsconfig 开启 noUnusedLocals 和 noUnusedParameters，清理未使用的局部变量和参数。
+- 桌面样式重构：foundation、project-refinements、workbench、semantic-refresh、theme-foundation 等多个样式文件大幅瘦身，净减约 2000 行；新增 avatar-settings、controls、daily-situation、health、wealth、shared-page-layout、visual-system 等模块样式。
+- 新增 Tauri dialog 权限：用于财务文件导入的文件选择对话框；capabilities/default.json 增加 dialog:allow-open。
+- 新增角色表情资源：roxy-expressions 补充 health-habits 和 wealth-budget 两个表情贴纸。
+
 ## v0.9.0 — 2026-08-31
 
 - 同步协议升级到 v3：统一同步工作台实体（项目、阶段、支线、行动、提案、专注、周聚焦、工作台偏好、仪表盘偏好与日历事件）及附件清单；幂等 changeId 重试、分页游标、稳定冲突副本；Refresh Token 30 天轮换并存入 Windows 凭据管理器。

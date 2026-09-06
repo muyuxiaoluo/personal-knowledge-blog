@@ -1,3 +1,4 @@
+import "./styles/dashboard.css";
 import { isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
@@ -15,8 +16,8 @@ import type {
 } from "../app/dashboard-types";
 import type { DashboardRepository } from "../app/data/dashboard-repository";
 import { officialHolidayDays, officialHolidayOn, officialHolidaySource } from "../app/official-holidays";
+import { Button, SelectMenu } from "./DesktopControls";
 import { desktopApi } from "./integrationApi";
-import "./styles/dashboard.css";
 
 type SharedProps = {
   today: string;
@@ -327,8 +328,8 @@ export function MorningInformation({ today, repository, preferences, onSavePrefe
           <header className="morning-card-heading">
             <div><span>AI 动态</span><strong>过去 24 小时值得留意</strong></div>
             <nav className="morning-information-actions">
-              <button disabled={aiBusy} onClick={() => void refreshAi(true)}>{aiBusy ? "更新中…" : "刷新"}</button>
-              <button onClick={() => setKeywordOpen(true)}>关注词{preferences.aiHighlightKeywords.length ? ` ${preferences.aiHighlightKeywords.length}` : ""}</button>
+              <Button variant="ghost" size="small" type="button" disabled={aiBusy} onClick={() => void refreshAi(true)}>{aiBusy ? "更新中…" : "刷新"}</Button>
+              <Button variant="ghost" size="small" type="button" onClick={() => setKeywordOpen(true)}>关注词{preferences.aiHighlightKeywords.length ? ` ${preferences.aiHighlightKeywords.length}` : ""}</Button>
               {preferences.modules.morningBrief && <button className="morning-brief-header-entry" disabled={briefBusy} onClick={() => brief ? setBriefOpen(true) : void refreshBrief(true)}><b>60s 早报</b><small>{brief ? `${formatShortDate(brief.date)} · ${brief.news.length} 条` : briefBusy ? "获取中…" : "点击获取"}</small></button>}
             </nav>
           </header>
@@ -339,7 +340,7 @@ export function MorningInformation({ today, repository, preferences, onSavePrefe
               return <article key={item.id} className={matches.length ? "highlighted" : ""}>
                 <i>{index + 1}</i>
                 <div>{matches.length > 0 && <mark className="ai-interest-mark">★ 关注 · {matches.join(" / ")}</mark>}<button className="ai-item-link" disabled={!item.aihotUrl && !item.originalUrl} onClick={() => void openExternal(item.aihotUrl || item.originalUrl)}><strong>{item.title}</strong><p>{item.summary || item.reason}</p><small>{item.sourceName || "AIHOT"} · {formatPublished(item.publishedAt)}</small></button></div>
-                <nav><button disabled={!item.originalUrl} onClick={() => void openExternal(item.originalUrl)}>原文</button><button disabled={savedIds.has(item.id)} onClick={() => void saveItem(item)}>{savedIds.has(item.id) ? "已收藏" : "收藏"}</button></nav>
+                <nav><Button wrap variant="ghost" size="small" type="button" disabled={!item.originalUrl} onClick={() => void openExternal(item.originalUrl)}>原文</Button><Button variant="secondary" type="button" disabled={savedIds.has(item.id)} onClick={() => void saveItem(item)}>{savedIds.has(item.id) ? "已收藏" : "收藏"}</Button></nav>
               </article>;
             }) : <MorningEmpty busy={aiBusy} error={aiError} label="暂时没有可显示的 AI 热点" />}
           </div>
@@ -348,7 +349,7 @@ export function MorningInformation({ today, repository, preferences, onSavePrefe
       )}
       {preferences.modules.morningBrief && !preferences.modules.aiHot && (
         <section className="workspace-card morning-news-card">
-          <header className="morning-card-heading"><div><span>每日早报</span><strong>{brief ? `${formatShortDate(brief.date)} · 60 秒读懂世界` : "60 秒读懂世界"}</strong></div><button disabled={briefBusy} onClick={() => void refreshBrief(true)}>{briefBusy ? "更新中…" : "刷新"}</button></header>
+          <header className="morning-card-heading"><div><span>每日早报</span><strong>{brief ? `${formatShortDate(brief.date)} · 60 秒读懂世界` : "60 秒读懂世界"}</strong></div><Button variant="ghost" size="small" type="button" disabled={briefBusy} onClick={() => void refreshBrief(true)}>{briefBusy ? "更新中…" : "刷新"}</Button></header>
           {brief ? <button className="morning-brief-launcher" onClick={() => setBriefOpen(true)}>
             <i>60″</i><span><b>{brief.news.length} 条新闻已经整理好</b><small>{brief.news[0]}</small><em>{brief.date === beijingClock().date ? "阅读今日早报" : "阅读最近一期"} →</em></span>
           </button> : <div className="morning-brief-empty"><MorningEmpty busy={briefBusy} error={briefError} label="暂时没有可显示的每日早报" /></div>}
@@ -385,7 +386,7 @@ export function DashboardSettingsSection({ preferences, onSave }: {
 
   return <section className="workspace-card settings-section settings-morning-section">
     <header><span>晨间首页</span><h2>天气、日历与资讯</h2><p>城市只保存到本地；可以随时关闭不需要的首页卡片。</p></header>
-    <div className="settings-city-row"><div><strong>{preferences.location ? preferences.location.name : "尚未选择天气城市"}</strong><small>{preferences.location ? `${locationBreadcrumb(preferences.location) || preferences.location.country} · ${preferences.location.timezone}` : "不会读取 GPS，也不会通过 IP 猜测位置"}</small></div><button onClick={() => setCityOpen(true)}>{preferences.location ? "更换城市" : "选择城市"}</button></div>
+    <div className="settings-city-row"><div><strong>{preferences.location ? preferences.location.name : "尚未选择天气城市"}</strong><small>{preferences.location ? `${locationBreadcrumb(preferences.location) || preferences.location.country} · ${preferences.location.timezone}` : "不会读取 GPS，也不会通过 IP 猜测位置"}</small></div><Button variant="secondary" type="button" onClick={() => setCityOpen(true)}>{preferences.location ? "更换城市" : "选择城市"}</Button></div>
     <div className="settings-module-list">{modules.map((module) => <div key={module.key} className="settings-toggle-row"><button type="button" role="switch" aria-checked={preferences.modules[module.key]} disabled={Boolean(busy)} className={preferences.modules[module.key] ? "settings-switch on" : "settings-switch"} onClick={() => void toggle(module.key)}><i /></button><div><strong>{module.label}</strong><small>{module.detail}</small></div></div>)}</div>
     <p className="settings-provider-note">天气由 Open-Meteo 提供；AI 内容来自 AIHOT；综合早报来自 60s API。摘要仅作线索，重要事实请打开原文核对。</p>
     {cityOpen && <CityPickerModal current={preferences.location} onClose={() => setCityOpen(false)} onSelect={async (location) => { await onSave({ ...preferences, location }); setCityOpen(false); }} />}
@@ -402,12 +403,12 @@ function WeatherCard({ snapshot, cache, busy, error, onChooseCity, onRefresh }: 
 }) {
   const verdict = snapshot ? rainVerdict(snapshot, zonedIsoMinute(new Date(), snapshot.location.timezone)) : null;
   return <section className="workspace-card morning-weather-card">
-    <header className="morning-card-heading"><div><span>今日天气</span><strong>{snapshot?.location.name || "选择你的城市"}</strong></div><nav>{snapshot && <button disabled={busy} onClick={onRefresh}>{busy ? "更新中…" : "刷新"}</button>}<button onClick={onChooseCity}>{snapshot ? "换城市" : "选择城市"}</button></nav></header>
+    <header className="morning-card-heading"><div><span>今日天气</span><strong>{snapshot?.location.name || "选择你的城市"}</strong></div><nav>{snapshot && <Button variant="ghost" size="small" type="button" disabled={busy} onClick={onRefresh}>{busy ? "更新中…" : "刷新"}</Button>}<Button variant="ghost" size="small" type="button" onClick={onChooseCity}>{snapshot ? "换城市" : "选择城市"}</Button></nav></header>
     {snapshot ? <div className="weather-compact-body">
       <div className="weather-now"><i>{weatherIcon(snapshot.current.weatherCode, snapshot.current.isDay)}</i><div><strong>{Math.round(snapshot.current.temperature)}°</strong><span>{weatherLabel(snapshot.current.weatherCode)} · 体感 {Math.round(snapshot.current.apparentTemperature)}°</span></div></div>
       <aside className={`rain-verdict ${verdict?.tone}`}><b>{verdict?.label}</b><span>{verdict?.detail}</span><small>最高概率 {Math.round(verdict?.maxProbability ?? 0)}%</small></aside>
       <div className="weather-three-days">{snapshot.daily.map((day, index) => <article key={day.date}><span>{index === 0 ? "今天" : index === 1 ? "明天" : weekday(day.date)}</span><i>{weatherIcon(day.weatherCode, true)}</i><strong>{Math.round(day.temperatureMax)}° / {Math.round(day.temperatureMin)}°</strong><small>{Math.round(day.precipitationProbabilityMax)}%</small></article>)}</div>
-    </div> : <div className="weather-setup"><i>⌖</i><span><strong>先选择城市或区县</strong><p>只保存所选地点的中心坐标，不读取你的精确位置。</p></span><button onClick={onChooseCity}>设置天气位置</button>{error && <small>{error}</small>}</div>}
+    </div> : <div className="weather-setup"><i>⌖</i><span><strong>先选择城市或区县</strong><p>只保存所选地点的中心坐标，不读取你的精确位置。</p></span><Button variant="secondary" type="button" onClick={onChooseCity}>设置天气位置</Button>{error && <small>{error}</small>}</div>}
     {snapshot && <MorningSourceStatus cache={cache} error={error} autoLabel="每 45 分钟自动更新" name={snapshot.attribution.name} url={snapshot.attribution.url} />}
   </section>;
 }
@@ -416,9 +417,9 @@ function CalendarCard({ today, events, onOpenCalendar, onManage }: { today: stri
   const upcoming = useMemo(() => combinedUpcoming(events, today), [events, today]);
   const holiday = officialHolidayOn(today);
   return <section className="workspace-card morning-calendar-card">
-    <header className="morning-card-heading"><div><span>今日日历</span><strong>{formatCalendarToday(today)}</strong></div><nav><button onClick={onOpenCalendar}>查看月历</button><button onClick={() => onManage(today)}>＋ 标记</button></nav></header>
+    <header className="morning-card-heading"><div><span>今日日历</span><strong>{formatCalendarToday(today)}</strong></div><nav><Button variant="ghost" size="small" type="button" onClick={onOpenCalendar}>查看月历</Button><Button variant="ghost" size="small" type="button" onClick={() => onManage(today)}>＋ 标记</Button></nav></header>
     <div className="calendar-compact-body"><div className="calendar-today-tile"><span>{weekday(today)}</span><strong>{Number(today.slice(8))}</strong><small>{holiday ? `${holiday.name} · ${holiday.kind === "workday" ? "调休上班" : "休息"}` : "普通工作日"}</small></div><CalendarUpcoming upcoming={upcoming} onManage={onManage} /></div>
-    <footer className="calendar-source"><button onClick={() => void openExternal(officialHolidaySource.url)}>法定节假日来源：{officialHolidaySource.label} ↗</button></footer>
+    <footer className="calendar-source"><Button wrap variant="ghost" size="small" type="button" onClick={() => void openExternal(officialHolidaySource.url)}>法定节假日来源：{officialHolidaySource.label} ↗</Button></footer>
   </section>;
 }
 
@@ -446,7 +447,7 @@ function CityPickerModal({ current, onClose, onSelect }: { current: DashboardPre
     }
   }
 
-  return <div className="morning-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="morning-modal city-picker-modal" role="dialog" aria-modal="true" aria-label="选择天气位置"><header><div><span>天气位置</span><h2>选择城市或区县</h2></div><button onClick={onClose} aria-label="关闭">×</button></header><form onSubmit={search}><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="例如：成都、武侯区、成都, 四川" /><button disabled={busy || !query.trim()}>{busy ? "查询中…" : "搜索"}</button></form><p className="city-privacy-note">结果按行政层级和人口排序；同一路径只保留一项。只保存中心坐标，不读取 GPS。</p><div className="city-results">{results.map((city) => <button key={`${city.providerLabel}-${city.id}`} onClick={() => void onSelect(city)}><span><strong>{city.name}<em>{city.kindLabel}</em></strong><small>{locationBreadcrumb(city) || city.country}</small></span><time>{city.timezone === "auto" ? "跟随位置" : city.timezone}</time></button>)}</div>{message && <p className="morning-modal-message" role="status">{message}</p>}<footer className="city-search-attribution"><span>城市：Open-Meteo / GeoNames</span><button onClick={() => void openExternal("https://www.openstreetmap.org/copyright")}>区县：© OpenStreetMap contributors ↗</button></footer></section></div>;
+  return <div className="morning-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="morning-modal city-picker-modal" role="dialog" aria-modal="true" aria-label="选择天气位置"><header><div><span>天气位置</span><h2>选择城市或区县</h2></div><Button variant="secondary" size="small" iconOnly type="button" onClick={onClose} aria-label="关闭">×</Button></header><form onSubmit={search}><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="例如：成都、武侯区、成都, 四川" /><Button variant="secondary" type="submit" disabled={busy || !query.trim()}>{busy ? "查询中…" : "搜索"}</Button></form><p className="city-privacy-note">结果按行政层级和人口排序；同一路径只保留一项。只保存中心坐标，不读取 GPS。</p><div className="city-results">{results.map((city) => <button key={`${city.providerLabel}-${city.id}`} onClick={() => void onSelect(city)}><span><strong>{city.name}<em>{city.kindLabel}</em></strong><small>{locationBreadcrumb(city) || city.country}</small></span><time>{city.timezone === "auto" ? "跟随位置" : city.timezone}</time></button>)}</div>{message && <p className="morning-modal-message" role="status">{message}</p>}<footer className="city-search-attribution"><span>城市：Open-Meteo / GeoNames</span><Button wrap variant="secondary" type="button" onClick={() => void openExternal("https://www.openstreetmap.org/copyright")}>区县：© OpenStreetMap contributors ↗</Button></footer></section></div>;
 }
 
 function CalendarOverviewModal({ today, events, onClose, onManage }: {
@@ -459,8 +460,8 @@ function CalendarOverviewModal({ today, events, onClose, onManage }: {
   const cells = useMemo(() => calendarCells(month), [month]);
   const upcoming = useMemo(() => combinedUpcoming(events, today), [events, today]);
   useDialogEscape(onClose);
-  return <div className="morning-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="morning-modal calendar-overview-modal" role="dialog" aria-modal="true" aria-label="查看月历"><header><div><span>重要日期</span><h2>{Number(month.slice(0, 4))} 年 {Number(month.slice(5))} 月</h2></div><button onClick={onClose} aria-label="关闭">×</button></header>
-    <div className="calendar-overview-toolbar"><button onClick={() => setMonth(shiftMonth(month, -1))}>‹ 上月</button><button onClick={() => setMonth(today.slice(0, 7))}>回到本月</button><button onClick={() => setMonth(shiftMonth(month, 1))}>下月 ›</button></div>
+  return <div className="morning-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="morning-modal calendar-overview-modal" role="dialog" aria-modal="true" aria-label="查看月历"><header><div><span>重要日期</span><h2>{Number(month.slice(0, 4))} 年 {Number(month.slice(5))} 月</h2></div><Button variant="secondary" size="small" iconOnly type="button" onClick={onClose} aria-label="关闭">×</Button></header>
+    <div className="calendar-overview-toolbar"><Button variant="ghost" size="small" type="button" onClick={() => setMonth(shiftMonth(month, -1))}>‹ 上月</Button><Button variant="ghost" size="small" type="button" onClick={() => setMonth(today.slice(0, 7))}>回到本月</Button><Button variant="ghost" size="small" type="button" onClick={() => setMonth(shiftMonth(month, 1))}>下月 ›</Button></div>
     <div className="mini-calendar"><div className="calendar-weekdays">{["一", "二", "三", "四", "五", "六", "日"].map((day) => <span key={day}>{day}</span>)}</div><div className="calendar-days">{cells.map((date, index) => {
       if (!date) return <i key={`blank-${index}`} />;
       const holiday = officialHolidayOn(date);
@@ -468,7 +469,7 @@ function CalendarOverviewModal({ today, events, onClose, onManage }: {
       return <button key={date} className={`${date === today ? "today" : ""} ${holiday?.kind || ""} ${custom.length ? "custom" : ""}`} title={[holiday?.name, ...custom.map((event) => event.title)].filter(Boolean).join(" · ")} onClick={() => onManage(date, custom[0])}><span>{Number(date.slice(8))}</span>{holiday && <small>{holiday.kind === "workday" ? "班" : "休"}</small>}{custom.length > 0 && <b style={{ background: custom[0].color }} />}</button>;
     })}</div></div>
     <CalendarUpcoming upcoming={upcoming} onManage={onManage} />
-    <footer className="calendar-overview-footer"><button onClick={() => onManage(today)}>＋ 标记重要日期</button><button onClick={() => void openExternal(officialHolidaySource.url)}>节假日来源：{officialHolidaySource.label} ↗</button></footer>
+    <footer className="calendar-overview-footer"><Button variant="secondary" type="button" onClick={() => onManage(today)}>＋ 标记重要日期</Button><Button wrap variant="ghost" size="small" type="button" onClick={() => void openExternal(officialHolidaySource.url)}>节假日来源：{officialHolidaySource.label} ↗</Button></footer>
   </section></div>;
 }
 
@@ -487,7 +488,7 @@ function MorningBriefModal({ brief, cache, error, busy, onRefresh, onClose }: {
   onClose: () => void;
 }) {
   useDialogEscape(onClose);
-  return <div className="morning-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="morning-modal morning-brief-modal" role="dialog" aria-modal="true" aria-label="每日早报"><header><div><span>每日早报 · {formatShortDate(brief.date)}</span><h2>60 秒读懂世界</h2></div><nav><button disabled={busy} onClick={onRefresh}>{busy ? "更新中…" : "刷新"}</button><button onClick={onClose} aria-label="关闭">×</button></nav></header>
+  return <div className="morning-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="morning-modal morning-brief-modal" role="dialog" aria-modal="true" aria-label="每日早报"><header><div><span>每日早报 · {formatShortDate(brief.date)}</span><h2>60 秒读懂世界</h2></div><nav><Button variant="secondary" type="button" disabled={busy} onClick={onRefresh}>{busy ? "更新中…" : "刷新"}</Button><Button variant="secondary" size="small" iconOnly type="button" onClick={onClose} aria-label="关闭">×</Button></nav></header>
     <div className="morning-news-sheet"><ol>{brief.news.map((item, index) => <li key={`${brief.date}-${index}`}><i>{String(index + 1).padStart(2, "0")}</i><span>{item}</span></li>)}</ol>{brief.tip && <blockquote>{brief.tip}</blockquote>}{brief.date !== beijingClock().date && <p className="brief-date-warning">今天的早报尚未发布，当前显示最近一期。</p>}</div>
     <MorningSourceStatus cache={cache} error={error} autoLabel="每天 8–11 点整点检查" name={brief.attribution.name} url={brief.sourceUrl || brief.attribution.url} />
   </section></div>;
@@ -518,12 +519,12 @@ function AiKeywordModal({ keywords, onClose, onSave }: {
     }
   }
 
-  return <div className="morning-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="morning-modal ai-keyword-modal" role="dialog" aria-modal="true" aria-label="设置 AI 关注词"><header><div><span>AI 动态</span><h2>设置关注词</h2></div><button onClick={onClose} aria-label="关闭">×</button></header><form onSubmit={submit}>
+  return <div className="morning-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="morning-modal ai-keyword-modal" role="dialog" aria-modal="true" aria-label="设置 AI 关注词"><header><div><span>AI 动态</span><h2>设置关注词</h2></div><Button variant="secondary" size="small" iconOnly type="button" onClick={onClose} aria-label="关闭">×</Button></header><form onSubmit={submit}>
     <label><span>每行一个，也可以用逗号分隔</span><textarea autoFocus maxLength={360} value={value} onChange={(event) => setValue(event.target.value)} placeholder={"新模型\n模型发布\n开源"} /></label>
     <p>关注词会匹配标题、摘要、推荐理由和分类。命中的资讯会排在前面并高亮，其余资讯仍会保留。</p>
     <div className="ai-keyword-preview"><strong>{normalized.length}/12 个关注词</strong><div>{normalized.length ? normalized.map((keyword) => <span key={keyword}>{keyword}</span>) : <small>尚未设置关注词</small>}</div></div>
     {error && <p className="morning-modal-message" role="status">{error}</p>}
-    <footer><button type="button" onClick={() => setValue("")}>清空</button><button type="button" onClick={onClose}>取消</button><button className="primary" disabled={busy}>{busy ? "保存中…" : "保存关注词"}</button></footer>
+    <footer><Button variant="secondary" type="button" onClick={() => setValue("")}>清空</Button><Button variant="secondary" type="button" onClick={onClose}>取消</Button><Button variant="primary" type="submit" disabled={busy}>{busy ? "保存中…" : "保存关注词"}</Button></footer>
   </form></section></div>;
 }
 
@@ -570,19 +571,19 @@ function CalendarManagerModal({ initialDate, initialEvent, events, onClose, onSa
     }
   }
 
-  return <div className="morning-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="morning-modal calendar-manager-modal" role="dialog" aria-modal="true" aria-label="管理重要日期"><header><div><span>日历</span><h2>{draft.id ? "编辑重要日期" : "标记重要日期"}</h2></div><button onClick={onClose} aria-label="关闭">×</button></header><div className="calendar-manager-body"><form onSubmit={submit}>
+  return <div className="morning-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="morning-modal calendar-manager-modal" role="dialog" aria-modal="true" aria-label="管理重要日期"><header><div><span>日历</span><h2>{draft.id ? "编辑重要日期" : "标记重要日期"}</h2></div><Button variant="secondary" size="small" iconOnly type="button" onClick={onClose} aria-label="关闭">×</Button></header><div className="calendar-manager-body"><form onSubmit={submit}>
     <label><span>名称</span><input autoFocus maxLength={60} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="例如：家人生日" /></label>
-    <div className="calendar-form-grid"><label><span>重复方式</span><select value={draft.recurrence} onChange={(event) => setDraft({ ...draft, recurrence: event.target.value as CalendarEvent["recurrence"] })}><option value="once">仅这一次</option><option value="yearlyGregorian">每年公历</option><option value="yearlyLunar">每年农历</option></select></label>{draft.recurrence !== "yearlyLunar" ? <label><span>日期</span><input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} /></label> : <><label><span>农历月</span><input type="number" min={1} max={12} value={draft.lunarMonth ?? 1} onChange={(event) => setDraft({ ...draft, lunarMonth: Number(event.target.value) })} /></label><label><span>农历日</span><input type="number" min={1} max={30} value={draft.lunarDay ?? 1} onChange={(event) => setDraft({ ...draft, lunarDay: Number(event.target.value) })} /></label></>}</div>
+    <div className="calendar-form-grid"><label><span>重复方式</span><SelectMenu label="重复方式" value={draft.recurrence} onChange={(value) => setDraft({ ...draft, recurrence: value as CalendarEvent["recurrence"] })} options={[{ value: "once", label: "仅这一次" }, { value: "yearlyGregorian", label: "每年公历" }, { value: "yearlyLunar", label: "每年农历" }]} /></label>{draft.recurrence !== "yearlyLunar" ? <label><span>日期</span><input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} /></label> : <><label><span>农历月</span><input type="number" min={1} max={12} value={draft.lunarMonth ?? 1} onChange={(event) => setDraft({ ...draft, lunarMonth: Number(event.target.value) })} /></label><label><span>农历日</span><input type="number" min={1} max={30} value={draft.lunarDay ?? 1} onChange={(event) => setDraft({ ...draft, lunarDay: Number(event.target.value) })} /></label></>}</div>
     {draft.recurrence === "yearlyLunar" && <label className="calendar-check"><input type="checkbox" checked={draft.lunarLeapMonth} onChange={(event) => setDraft({ ...draft, lunarLeapMonth: event.target.checked })} /><span>只在对应的农历闰月出现</span></label>}
     <div className="calendar-form-grid"><label><span>标记颜色</span><input type="color" value={draft.color} onChange={(event) => setDraft({ ...draft, color: event.target.value })} /></label><label><span>提前提醒天数</span><input type="number" min={0} max={365} value={draft.reminderDays} onChange={(event) => setDraft({ ...draft, reminderDays: Number(event.target.value) })} /></label></div>
     <label className="calendar-check"><input type="checkbox" checked={draft.important} onChange={(event) => setDraft({ ...draft, important: event.target.checked })} /><span>作为重要日期显示在首页</span></label>
     <label><span>备注</span><textarea maxLength={500} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder="可选：需要提前准备什么？" /></label>
-    <footer><button type="button" onClick={onClose}>关闭</button>{draft.id && <button type="button" className="danger" disabled={busy} onClick={() => void remove()}>{confirmDelete ? "再次点击确认删除" : "删除"}</button>}<button className="primary" disabled={busy || !draft.title.trim()}>{busy ? "保存中…" : "保存日期"}</button></footer>
+    <footer><Button variant="secondary" type="button" onClick={onClose}>关闭</Button>{draft.id && <Button type="button" variant="danger" disabled={busy} onClick={() => void remove()}>{confirmDelete ? "再次点击确认删除" : "删除"}</Button>}<Button variant="primary" type="submit" disabled={busy || !draft.title.trim()}>{busy ? "保存中…" : "保存日期"}</Button></footer>
   </form><aside><strong>已标记的日期</strong><div>{events.length ? events.map((item) => <button key={item.id} className={item.id === draft.id ? "active" : ""} onClick={() => { setDraft({ ...item }); setConfirmDelete(false); }}><i style={{ background: item.color }} /><span><b>{item.title}</b><small>{calendarEventDescription(item)}</small></span></button>) : <p>还没有自定义重要日期。</p>}</div></aside></div></section></div>;
 }
 
 function MorningSourceStatus<T>({ cache, error, autoLabel, name, url }: { cache: DashboardCache<T> | null; error: string; autoLabel?: string; name: string; url: string }) {
-  return <footer className="morning-source-status"><span className={error ? "stale" : ""}>{error ? `显示缓存 · ${formatCacheTime(cache)}` : formatCacheTime(cache)}</span><div>{autoLabel && <em>{autoLabel}</em>}<button onClick={() => void openExternal(url)}>数据来源：{name} ↗</button></div></footer>;
+  return <footer className="morning-source-status"><span className={error ? "stale" : ""}>{error ? `显示缓存 · ${formatCacheTime(cache)}` : formatCacheTime(cache)}</span><div>{autoLabel && <em>{autoLabel}</em>}<Button wrap variant="ghost" size="small" type="button" onClick={() => void openExternal(url)}>数据来源：{name} ↗</Button></div></footer>;
 }
 
 function MorningEmpty({ busy, error, label }: { busy: boolean; error: string; label: string }) {

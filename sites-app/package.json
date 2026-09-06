@@ -1,6 +1,6 @@
 {
   "name": "life-strategy-library-desktop",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -15,7 +15,8 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "test": "node --require ./scripts/node-user-info-shim.cjs ./node_modules/tsx/dist/cli.mjs --test tests/*.test.ts",
-    "lint": "tsc -p desktop/tsconfig.json",
+    "check:ui": "node scripts/check-ui-primitives.mjs",
+    "lint": "npm run check:ui && tsc -p desktop/tsconfig.json",
     "check": "npm run lint && npm test"
   },
   "dependencies": {
@@ -23,6 +24,7 @@
     "@fontsource/lxgw-wenkai": "^5.3.0",
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-autostart": "^2.5.1",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-global-shortcut": "^2.3.0",
     "@tauri-apps/plugin-opener": "2.5.4",
     "@tauri-apps/plugin-process": "^2.3.1",

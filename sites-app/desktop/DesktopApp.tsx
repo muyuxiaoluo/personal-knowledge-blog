@@ -1,3 +1,4 @@
+import { Button } from "./DesktopControls";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isRegistered, register } from "@tauri-apps/plugin-global-shortcut";
@@ -6,7 +7,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppUpdater } from "./AppUpdater";
-import { loadDesktopTheme, saveDesktopTheme, type ThemeId } from "./DesktopThemes";
+import { DesktopThemeProvider, loadDesktopTheme, saveDesktopTheme, type ThemeId } from "./DesktopThemes";
 import {
   loadDesktopFontPreset,
   saveDesktopFontPreset,
@@ -31,6 +32,8 @@ import { WorkspacePreferencesRepository } from "../app/data/workspace-preference
 import { SqliteAiRepository } from "../app/data/sqlite-ai-repository";
 import { IntegrationRepository } from "../app/data/integration-repository";
 import { DashboardRepository } from "../app/data/dashboard-repository";
+import { HealthRepository } from "../app/data/health-repository";
+import { FinanceRepository } from "../app/data/finance-repository";
 import {
   UniversalSyncRepository,
   type SyncConflict,
@@ -83,6 +86,8 @@ type DesktopRuntime = {
   aiRepository: SqliteAiRepository;
   integrationRepository: IntegrationRepository;
   dashboardRepository: DashboardRepository;
+  healthRepository: HealthRepository;
+  financeRepository: FinanceRepository;
   syncRepository: UniversalSyncRepository;
   database: Database;
 };
@@ -122,15 +127,19 @@ function initializeDesktopRuntime() {
       const aiRepository = new SqliteAiRepository(transactionalDatabase);
       const integrationRepository = new IntegrationRepository(transactionalDatabase);
       const dashboardRepository = new DashboardRepository(transactionalDatabase);
+      const healthRepository = new HealthRepository(transactionalDatabase);
+      const financeRepository = new FinanceRepository(transactionalDatabase);
       await Promise.all([
         articleRepository.ready(),
         attachmentRepository.initialize(),
         projectRepository.ready(),
-        workRepository.ready(),
         preferencesRepository.ready(),
         dashboardRepository.ready(),
+        healthRepository.ready(),
+        financeRepository.ready(),
         aiRepository.cleanupExpired(),
       ]);
+      await workRepository.ready();
       const syncRepository = new UniversalSyncRepository(transactionalDatabase);
       await syncRepository.initialize();
       await attachmentRepository.cleanupAbandonedDrafts();
@@ -152,6 +161,8 @@ function initializeDesktopRuntime() {
           aiRepository,
           integrationRepository,
           dashboardRepository,
+          healthRepository,
+          financeRepository,
           syncRepository,
           database,
         },
@@ -170,6 +181,7 @@ function initializeDesktopRuntime() {
 }
 
 function describeStartupError(error: unknown) {
+  if (typeof error === "string" && error.trim()) return error;
   if (!(error instanceof Error)) return "无法打开本地资料库";
   const cause = (error as Error & { cause?: unknown }).cause;
   if (cause instanceof Error) return `${error.message}：${cause.message}`;
@@ -215,6 +227,11 @@ export function DesktopApp() {
   });
   const [themeId, setThemeId] = useState<ThemeId>(loadDesktopTheme);
   const [fontPresetId, setFontPresetId] = useState<FontPresetId>(loadDesktopFontPreset);
+  useEffect(() => {
+    // Portalled menus and confirmations must share the workspace palette.
+    document.documentElement.dataset.workspaceTheme = themeId;
+    return () => { delete document.documentElement.dataset.workspaceTheme; };
+  }, [themeId]);
   const autoSyncTimer = useRef<number | null>(null);
   const syncInFlight = useRef(false);
   const activeCaptureRequests = useRef(new Set<string>());
@@ -723,7 +740,8 @@ export function DesktopApp() {
       {notice.text && notice.tone !== "quiet" && <div className="floating-system-alert system-alert visible"><i className={notice.tone} /><span>{notice.text}</span></div>}
 
       <Suspense fallback={<main className="desktop-startup"><span>个人工作台</span><h1>正在整理桌面</h1></main>}>
-      <DesktopWorkbench
+      <DesktopThemeProvider themeId={themeId}>
+        <DesktopWorkbench
         repository={runtime.articleRepository}
         attachmentRepository={runtime.attachmentRepository}
         projectRepository={runtime.projectRepository}
@@ -731,6 +749,8 @@ export function DesktopApp() {
         aiRepository={runtime.aiRepository}
         integrationRepository={runtime.integrationRepository}
         dashboardRepository={runtime.dashboardRepository}
+        healthRepository={runtime.healthRepository}
+        financeRepository={runtime.financeRepository}
         displayName={displayName}
         avatarDataUrl={avatarDataUrl}
         quickLinks={quickLinks}
@@ -769,7 +789,8 @@ export function DesktopApp() {
           void updatePendingCount();
           setMutationRevision((value) => value + 1);
         }}
-      />
+        />
+      </DesktopThemeProvider>
       </Suspense>
 
       {showAccount && (
@@ -780,13 +801,13 @@ export function DesktopApp() {
             aria-modal="true"
             aria-labelledby="account-title"
           >
-            <button
+            <Button variant="secondary" size="small" iconOnly type="button"
               className="account-close"
               onClick={() => setShowAccount(false)}
               aria-label="关闭账户设置"
             >
               ×
-            </button>
+            </Button>
             <span>个人同步</span>
             <h2 id="account-title">
               {session ? "同步账户" : "登录后同步"}
@@ -798,11 +819,11 @@ export function DesktopApp() {
               <div className="account-current">
                 <strong>{session.username}</strong>
                 <small>本次登录有效至 {formatTime(session.expiresAt)}</small>
-                <button
+                <Button variant="secondary" type="button"
                   onClick={() => void logout()}
                 >
                   退出同步账户
-                </button>
+                </Button>
                 <details className="sync-center" open={Boolean(syncCenter.conflicts || syncCenter.errors)}>
                   <summary><strong>同步中心</strong><span>{syncCenter.pending} 待同步 · {syncCenter.conflicts} 冲突 · {syncCenter.errors} 错误 · {syncCenter.recycled} 回收站</span></summary>
                   <div className="sync-center-body">
@@ -810,19 +831,19 @@ export function DesktopApp() {
                     {syncConflicts.map((item) => (
                       <article key={item.id} className="sync-center-item">
                         <div><strong>{syncEntityLabel(item.localPayload, item.entityId)}</strong><small>{item.entityType} · 本机与云端都修改过</small></div>
-                        <div><button onClick={() => void resolveSyncConflict(item.id, "remote")}>用云端</button><button onClick={() => void resolveSyncConflict(item.id, "local")}>用本机</button><button onClick={() => void resolveSyncConflict(item.id, "copy")}>复制本机</button></div>
+                        <div><Button variant="secondary" type="button" onClick={() => void resolveSyncConflict(item.id, "remote")}>用云端</Button><Button variant="secondary" type="button" onClick={() => void resolveSyncConflict(item.id, "local")}>用本机</Button><Button variant="secondary" type="button" onClick={() => void resolveSyncConflict(item.id, "copy")}>复制本机</Button></div>
                       </article>
                     ))}
                     {syncErrors.map((item) => (
                       <article key={`${item.entityType}:${item.entityId}`} className="sync-center-item error">
                         <div><strong>{item.entityId}</strong><small>{item.error}</small></div>
-                        <button onClick={async () => { await runtime?.syncRepository.retryError(item.entityType, item.entityId); await updatePendingCount(); }}>重试</button>
+                        <Button variant="secondary" type="button" onClick={async () => { await runtime?.syncRepository.retryError(item.entityType, item.entityId); await updatePendingCount(); }}>重试</Button>
                       </article>
                     ))}
                     {syncRecycle.slice(0, 20).map((item) => (
                       <article key={`${item.entityType}:${item.entityId}`} className="sync-center-item recycled">
                         <div><strong>{syncEntityLabel(item.payload, item.entityId)}</strong><small>保留至 {formatTime(item.purgeAfter)}</small></div>
-                        <button onClick={() => void restoreSyncRecycle(item)}>恢复</button>
+                        <Button variant="secondary" type="button" onClick={() => void restoreSyncRecycle(item)}>恢复</Button>
                       </article>
                     ))}
                     {!syncCenter.pending && !syncCenter.conflicts && !syncCenter.errors && !syncCenter.recycled && <p>当前没有待处理项目。</p>}
@@ -857,13 +878,13 @@ export function DesktopApp() {
                     onChange={(event) => setServerUrl(event.target.value)}
                   />
                 </details>
-                <button
+                <Button variant="primary"
                   className="account-submit"
                   disabled={syncing || !password}
                   type="submit"
                 >
                   {syncing ? "正在连接…" : "登录并同步"}
-                </button>
+                </Button>
               </form>
             )}
           </section>

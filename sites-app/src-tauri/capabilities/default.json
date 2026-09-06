@@ -9,6 +9,7 @@
     "autostart:allow-disable",
     "autostart:allow-enable",
     "autostart:allow-is-enabled",
+    "dialog:allow-open",
     "process:allow-restart",
     "global-shortcut:allow-is-registered",
     "global-shortcut:allow-register",

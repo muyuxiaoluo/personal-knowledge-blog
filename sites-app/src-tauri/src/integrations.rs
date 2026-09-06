@@ -27,7 +27,7 @@ fn credential(kind: &str) -> Result<keyring::Entry, String> {
         .map_err(|error| format!("无法访问系统凭据管理器：{error}"))
 }
 
-fn read_secret(kind: &str) -> Result<String, String> {
+pub(crate) fn read_secret(kind: &str) -> Result<String, String> {
     match credential(kind)?.get_password() {
         Ok(value) if !value.is_empty() => Ok(value),
         Ok(_) | Err(keyring::Error::NoEntry) => {

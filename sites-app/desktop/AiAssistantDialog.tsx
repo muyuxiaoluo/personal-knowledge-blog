@@ -1,3 +1,4 @@
+import "./styles/ai-tools.css";
 import { isTauri } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import ReactMarkdown from "react-markdown";
@@ -7,7 +8,7 @@ import type { AiConversation, AiMessage, DeepSeekModeOptions, DeepSeekPrimaryMod
 import type { SqliteAiRepository } from "../app/data/sqlite-ai-repository";
 import { BrandLogo } from "./BrandLogo";
 import { desktopApi } from "./integrationApi";
-import "./styles/ai-tools.css";
+import { Button } from "./DesktopControls";
 
 type PendingAnswer = {
   conversationId: string;
@@ -469,11 +470,11 @@ export function AiAssistantDialog({ open, repository, onClose, embedded = false,
   const assistant = (
       <section className={`ai-assistant-dialog${embedded ? " embedded" : ""}`} role={embedded ? "region" : "dialog"} aria-modal={embedded ? undefined : true} aria-label="DeepSeek AI 助手">
         <aside className="ai-history-panel">
-          <header><div><span>AI 助手</span><strong>DeepSeek</strong></div><button onClick={() => void createConversation()} disabled={busy || Boolean(pending.current)}>＋</button></header>
+          <header><div><span>AI 助手</span><strong>DeepSeek</strong></div><Button variant="secondary" size="small" iconOnly aria-label="添加" type="button" onClick={() => void createConversation()} disabled={busy || Boolean(pending.current)}>＋</Button></header>
           <div className="ai-history-list">
             {conversations.map((conversation) => <article className={selectedId === conversation.id ? "active" : ""} key={conversation.id}>
               <button className="ai-history-open" onClick={() => void selectConversation(conversation)} disabled={Boolean(pending.current)}><strong>{conversation.title}</strong><small>{formatConversationDate(conversation.updatedAt)}{conversation.restoreState === "unavailable" ? " · 仅本地" : ""}</small></button>
-              <div><button onClick={() => void togglePinned(conversation)} title={conversation.pinned ? "取消收藏" : "收藏"}>{conversation.pinned ? "★" : "☆"}</button><button onClick={() => void requestRemoveConversation(conversation)} title="删除会话">×</button></div>
+              <div><Button variant="secondary" type="button" onClick={() => void togglePinned(conversation)} title={conversation.pinned ? "取消收藏" : "收藏"}>{conversation.pinned ? "★" : "☆"}</Button><Button variant="secondary" size="small" iconOnly aria-label="关闭" type="button" onClick={() => void requestRemoveConversation(conversation)} title="删除会话">×</Button></div>
             </article>)}
           </div>
           <footer><span>普通记录保存 30 天</span><small>收藏后长期保留</small></footer>
@@ -482,7 +483,7 @@ export function AiAssistantDialog({ open, repository, onClose, embedded = false,
         <div className="ai-chat-panel">
           <header className="ai-chat-header">
             <div><strong>{selected?.title || "新对话"}</strong><span className={`ai-status ${snapshot.status}`}>{status}</span></div>
-            <nav><button onClick={() => void desktopApi.deepseek.prepare().then(setSnapshot).catch((error) => setNotice(describeError(error)))}>重新连接</button><button onClick={() => void desktopApi.deepseek.showOfficial().catch((error) => setNotice(describeError(error)))}>{snapshot.status === "login_required" ? "前往登录" : "打开官网"}</button>{!embedded && <button className="close" onClick={onClose} disabled={Boolean(pending.current)}>×</button>}</nav>
+            <nav><Button variant="secondary" type="button" onClick={() => void desktopApi.deepseek.prepare().then(setSnapshot).catch((error) => setNotice(describeError(error)))}>重新连接</Button><Button variant="secondary" type="button" onClick={() => void desktopApi.deepseek.showOfficial().catch((error) => setNotice(describeError(error)))}>{snapshot.status === "login_required" ? "前往登录" : "打开官网"}</Button>{!embedded && <Button variant="secondary" size="small" iconOnly type="button" className="close" onClick={onClose} disabled={Boolean(pending.current)}>×</Button>}</nav>
           </header>
 
           <div className="ai-message-scroll">
@@ -495,7 +496,7 @@ export function AiAssistantDialog({ open, repository, onClose, embedded = false,
           </div>
 
           {(messages.length > 0 || draftAnswer || draftReasoning) && primaryModeSelector}
-          {notice && <div className="ai-notice" role="alert"><span>{notice}</span><button onClick={() => setNotice("")}>×</button></div>}
+          {notice && <div className="ai-notice" role="alert"><span>{notice}</span><Button variant="secondary" size="small" iconOnly aria-label="关闭" type="button" onClick={() => setNotice("")}>×</Button></div>}
           <form className="ai-composer" onSubmit={send}>
             <input ref={imageInputRef} className="ai-image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => void attachImage(event.target.files?.[0])} />
             <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => {
@@ -505,11 +506,11 @@ export function AiAssistantDialog({ open, repository, onClose, embedded = false,
               <div className="ai-capability-tools" aria-label="回答能力">
                 <button type="button" className={snapshot.deepThinkingAvailable && modeOptions.deepThinking ? "active" : ""} disabled={!snapshot.ready || !snapshot.deepThinkingAvailable || modeBusy || Boolean(pending.current)} title={snapshot.deepThinkingAvailable ? "使用 DeepSeek 官网的深度思考" : "官网当前未提供或适配器尚未识别"} onClick={() => void updateModes({ deepThinking: !modeOptions.deepThinking })}>◉ 深度思考</button>
                 <button type="button" className={snapshot.smartSearchAvailable && modeOptions.smartSearch ? "active" : ""} disabled={!snapshot.ready || !snapshot.smartSearchAvailable || modeBusy || Boolean(pending.current)} title={snapshot.smartSearchAvailable ? "使用 DeepSeek 官网的智能搜索" : "官网当前未提供或适配器尚未识别"} onClick={() => void updateModes({ smartSearch: !modeOptions.smartSearch })}>◎ 智能搜索</button>
-                {snapshot.attachmentName && <span className="ai-attachment-chip"><span>{snapshot.attachmentName}</span><button type="button" aria-label="移除图片" title="移除图片" onClick={() => void removeAttachment()} disabled={modeBusy || Boolean(pending.current)}>×</button></span>}
+                {snapshot.attachmentName && <span className="ai-attachment-chip"><span>{snapshot.attachmentName}</span><Button variant="secondary" size="small" iconOnly type="button" aria-label="移除图片" title="移除图片" onClick={() => void removeAttachment()} disabled={modeBusy || Boolean(pending.current)}>×</Button></span>}
               </div>
               <div className="ai-composer-actions">
-                <button type="button" className="ai-attach-button" aria-label="添加图片" title="添加图片" disabled={!snapshot.ready || !snapshot.visionAvailable || modeBusy || Boolean(pending.current)} onClick={() => imageInputRef.current?.click()}>📎</button>
-                {pending.current ? <button type="button" className="stop" onClick={() => void stop()}>■ 停止</button> : <button className="send" disabled={!prompt.trim() || !snapshot.ready || modeBusy}>发送 ↑</button>}
+                <Button variant="secondary" size="small" iconOnly type="button" className="ai-attach-button" aria-label="添加图片" title="添加图片" disabled={!snapshot.ready || !snapshot.visionAvailable || modeBusy || Boolean(pending.current)} onClick={() => imageInputRef.current?.click()}>📎</Button>
+                {pending.current ? <Button variant="secondary" type="button" className="stop" onClick={() => void stop()}>■ 停止</Button> : <Button variant="primary" type="submit" className="send" disabled={!prompt.trim() || !snapshot.ready || modeBusy}>发送 ↑</Button>}
               </div>
             </footer>
           </form>
@@ -524,7 +525,7 @@ export function AiAssistantDialog({ open, repository, onClose, embedded = false,
       {deleteTarget.remoteRef && (() => { try { return new URL(deleteTarget.remoteRef).pathname !== "/"; } catch { return false; } })()
         ? <p>将先尝试删除 DeepSeek 官网中的对应会话；即使官网同步失败，也会删除本地记录。这个操作无法恢复。</p>
         : <p>这个记录尚未关联到官网会话，只会删除本地内容。这个操作无法恢复。</p>}
-      <div><button onClick={() => setDeleteTarget(null)} disabled={busy}>取消</button><button className="danger" onClick={() => void removeConversation(deleteTarget)} disabled={busy}>{busy ? "正在同步删除…" : "确认删除"}</button></div>
+      <div><Button variant="secondary" type="button" onClick={() => setDeleteTarget(null)} disabled={busy}>取消</Button><Button variant="danger" onClick={() => void removeConversation(deleteTarget)} disabled={busy}>{busy ? "正在同步删除…" : "确认删除"}</Button></div>
     </section>
   </div>;
 

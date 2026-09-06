@@ -1,5 +1,36 @@
 export type TaskPriority = "high" | "normal" | "low";
 
+export type TaskPlanHistory = {
+  id: string;
+  taskId: string;
+  plannedDate: string;
+  taskTitle: string;
+  currentFocus: string;
+  createdAt: string;
+};
+
+export type SituationTask = {
+  taskId: string;
+  title: string;
+  outcome: "not_started" | "partial";
+  progress: string;
+};
+
+export type DailySituation = {
+  date: string;
+  reason: string;
+  actualWork: string;
+  tasks: SituationTask[];
+  updatedAt: string;
+};
+
+export type SituationPlanChange = {
+  taskId: string;
+  expectedPlan: TaskPlan;
+  // Empty date leaves the action available to continue without a daily commitment.
+  plannedDate: string;
+};
+
 export type TaskPlan = {
   taskId: string;
   plannedDate: string;

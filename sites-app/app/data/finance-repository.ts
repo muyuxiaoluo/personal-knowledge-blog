@@ -1,0 +1,672 @@
+import type { LifeDomain } from "../domain-taxonomy";
+import {
+  FINANCE_BUDGET_ROLES,
+  FINANCE_CATEGORIES,
+  emptyFinanceBudget,
+  emptyFinanceSettings,
+  type FinanceAccount,
+  type FinanceAiReport,
+  type FinanceBudget,
+  type FinanceBudgetRole,
+  type FinanceCategory,
+  type FinanceCategoryRule,
+  type FinanceImportBatch,
+  type FinanceImportCounts,
+  type FinanceImportPreview,
+  type FinanceManualEntry,
+  type FinanceSettings,
+  type FinanceSource,
+  type FinanceTransaction,
+  type FinanceTransactionKind,
+  type FinanceValueRating,
+} from "../finance-types";
+import {
+  countFinanceImportRecords,
+  financeDuplicateFingerprint,
+  normalizeFinanceMerchant,
+  summarizeFinanceMonth,
+} from "../finance-analysis";
+import {
+  executeSqliteTransaction,
+  type SqliteDatabase,
+  type SqliteStatement,
+} from "./sqlite-article-repository";
+
+const migrations = [
+  `CREATE TABLE IF NOT EXISTS finance_accounts (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    source TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS finance_import_batches (
+    id TEXT PRIMARY KEY NOT NULL,
+    source TEXT NOT NULL,
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    file_hash TEXT NOT NULL UNIQUE,
+    parser_version TEXT NOT NULL,
+    statistics_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS finance_transactions (
+    id TEXT PRIMARY KEY NOT NULL,
+    occurred_at TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL CHECK(amount_cents >= 0),
+    kind TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    external_transaction_id TEXT NOT NULL DEFAULT '',
+    merchant TEXT NOT NULL DEFAULT '',
+    merchant_normalized TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    payment_method TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT 'other',
+    budget_role TEXT NOT NULL DEFAULT 'unknown',
+    category_confirmed INTEGER NOT NULL DEFAULT 0,
+    budget_role_confirmed INTEGER NOT NULL DEFAULT 0,
+    project_id TEXT,
+    life_domain TEXT,
+    import_batch_id TEXT,
+    related_transaction_id TEXT,
+    value_rating TEXT,
+    duplicate_fingerprint TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(account_id) REFERENCES finance_accounts(id),
+    FOREIGN KEY(import_batch_id) REFERENCES finance_import_batches(id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS finance_settings (
+    id INTEGER PRIMARY KEY NOT NULL CHECK(id = 1),
+    stable_monthly_income_cents INTEGER NOT NULL DEFAULT 0,
+    default_savings_target_cents INTEGER NOT NULL DEFAULT 0,
+    backup_notice_acknowledged INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS finance_budgets (
+    month TEXT PRIMARY KEY NOT NULL,
+    savings_target_cents INTEGER NOT NULL DEFAULT 0,
+    category_limits_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS finance_category_rules (
+    id TEXT PRIMARY KEY NOT NULL,
+    match_kind TEXT NOT NULL,
+    match_value TEXT NOT NULL,
+    category TEXT NOT NULL,
+    budget_role TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(match_kind, match_value)
+  )`,
+  `CREATE TABLE IF NOT EXISTS finance_ai_reports (
+    report_month TEXT PRIMARY KEY NOT NULL,
+    content_json TEXT NOT NULL,
+    model TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    input_fingerprint TEXT NOT NULL,
+    token_usage_json TEXT NOT NULL
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_finance_transactions_occurred_at ON finance_transactions(occurred_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_finance_transactions_batch ON finance_transactions(import_batch_id)",
+  "CREATE INDEX IF NOT EXISTS idx_finance_transactions_fingerprint ON finance_transactions(source, duplicate_fingerprint)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_finance_transactions_external_id ON finance_transactions(source, external_transaction_id) WHERE external_transaction_id <> ''",
+] as const;
+
+const defaultAccounts: Array<Pick<FinanceAccount, "id" | "name" | "source">> = [
+  { id: "finance-account-alipay", name: "支付宝", source: "alipay" },
+  { id: "finance-account-wechat", name: "微信", source: "wechat" },
+  { id: "finance-account-cash", name: "现金", source: "cash" },
+  { id: "finance-account-custom", name: "其他", source: "custom" },
+];
+
+type AccountRow = { id: string; name: string; source: FinanceSource; created_at: string };
+type SettingsRow = { stable_monthly_income_cents: number; default_savings_target_cents: number; backup_notice_acknowledged: number; updated_at: string };
+type BudgetRow = { month: string; savings_target_cents: number; category_limits_json: string; updated_at: string };
+type RuleRow = { id: string; match_kind: "merchant" | "description"; match_value: string; category: FinanceCategory; budget_role: FinanceBudgetRole; created_at: string; updated_at: string };
+type BatchRow = { id: string; source: "alipay" | "wechat"; period_start: string; period_end: string; file_hash: string; parser_version: string; statistics_json: string; created_at: string };
+type TransactionRow = {
+  id: string;
+  occurred_at: string;
+  amount_cents: number;
+  kind: FinanceTransactionKind;
+  direction: "out" | "in" | "neutral";
+  account_id: string;
+  source: FinanceSource;
+  external_transaction_id: string;
+  merchant: string;
+  merchant_normalized: string;
+  description: string;
+  payment_method: string;
+  status: string;
+  category: FinanceCategory;
+  budget_role: FinanceBudgetRole;
+  category_confirmed: number;
+  budget_role_confirmed: number;
+  project_id: string | null;
+  life_domain: LifeDomain | null;
+  import_batch_id: string | null;
+  related_transaction_id: string | null;
+  value_rating: FinanceValueRating | null;
+  duplicate_fingerprint: string;
+  created_at: string;
+  updated_at: string;
+};
+type ReportRow = { report_month: string; content_json: string; model: string; generated_at: string; input_fingerprint: string; token_usage_json: string };
+
+export class FinanceRepository {
+  private initialization: Promise<void> | null = null;
+
+  constructor(
+    private readonly database: SqliteDatabase,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
+
+  private async initialize() {
+    this.initialization ??= (async () => {
+      for (const statement of migrations) await this.database.execute(statement);
+      const createdAt = this.clock().toISOString();
+      for (const account of defaultAccounts) {
+        await this.database.execute(
+          "INSERT OR IGNORE INTO finance_accounts(id, name, source, created_at) VALUES (?, ?, ?, ?)",
+          [account.id, account.name, account.source, createdAt],
+        );
+      }
+    })().catch((error) => {
+      this.initialization = null;
+      throw error;
+    });
+    await this.initialization;
+  }
+
+  async ready() {
+    await this.initialize();
+  }
+
+  async listAccounts(): Promise<FinanceAccount[]> {
+    await this.initialize();
+    const rows = await this.database.select<AccountRow>("SELECT * FROM finance_accounts ORDER BY CASE source WHEN 'alipay' THEN 1 WHEN 'wechat' THEN 2 WHEN 'cash' THEN 3 ELSE 4 END, created_at");
+    return rows.map((row) => ({ id: row.id, name: row.name, source: row.source, createdAt: row.created_at }));
+  }
+
+  async getSettings(): Promise<FinanceSettings> {
+    await this.initialize();
+    const rows = await this.database.select<SettingsRow>("SELECT * FROM finance_settings WHERE id = 1 LIMIT 1");
+    const row = rows[0];
+    return row ? {
+      stableMonthlyIncomeCents: row.stable_monthly_income_cents,
+      defaultSavingsTargetCents: row.default_savings_target_cents,
+      backupNoticeAcknowledged: Boolean(row.backup_notice_acknowledged),
+      updatedAt: row.updated_at,
+    } : structuredClone(emptyFinanceSettings);
+  }
+
+  async saveSettings(settings: FinanceSettings): Promise<FinanceSettings> {
+    await this.initialize();
+    const normalized = normalizeSettings(settings, this.clock());
+    const statement = settingsWriteStatement(normalized);
+    await this.database.execute(statement.sql, statement.bindValues);
+    return normalized;
+  }
+
+  async getBudget(month: string): Promise<FinanceBudget> {
+    await this.initialize();
+    assertMonth(month);
+    const rows = await this.database.select<BudgetRow>("SELECT * FROM finance_budgets WHERE month = ? LIMIT 1", [month]);
+    if (!rows[0]) {
+      const settings = await this.getSettings();
+      return emptyFinanceBudget(month, settings.defaultSavingsTargetCents);
+    }
+    return rowToBudget(rows[0]);
+  }
+
+  async saveBudget(budget: FinanceBudget): Promise<FinanceBudget> {
+    await this.initialize();
+    const normalized = normalizeBudget(budget, this.clock());
+    const statement = budgetWriteStatement(normalized);
+    await this.database.execute(statement.sql, statement.bindValues);
+    return normalized;
+  }
+
+  async saveBudgetPlan(settings: FinanceSettings, budget: FinanceBudget) {
+    await this.initialize();
+    const now = this.clock();
+    const normalizedSettings = normalizeSettings(settings, now);
+    const normalizedBudget = normalizeBudget(budget, now);
+    await executeSqliteTransaction(this.database, [
+      settingsWriteStatement(normalizedSettings),
+      budgetWriteStatement(normalizedBudget),
+    ]);
+    return { settings: normalizedSettings, budget: normalizedBudget };
+  }
+
+  async listTransactions(month = "", limit = 2_000): Promise<FinanceTransaction[]> {
+    await this.initialize();
+    const safeLimit = Math.max(1, Math.min(50_000, Math.round(limit)));
+    const rows = month
+      ? (assertMonth(month), await this.database.select<TransactionRow>("SELECT * FROM finance_transactions WHERE occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at DESC LIMIT ?", [`${month}-01`, `${nextMonth(month)}-01`, safeLimit]))
+      : await this.database.select<TransactionRow>("SELECT * FROM finance_transactions ORDER BY occurred_at DESC LIMIT ?", [safeLimit]);
+    return rows.map(rowToTransaction);
+  }
+
+  async addManualTransaction(entry: FinanceManualEntry): Promise<FinanceTransaction> {
+    await this.initialize();
+    assertTimestamp(entry.occurredAt);
+    if (!entry.description.trim()) throw new Error("请填写这笔消费的说明");
+    if (!isSource(entry.source)) throw new Error("支付来源无效");
+    if (!isCategory(entry.category) || !isBudgetRole(entry.budgetRole)) throw new Error("消费分类无效");
+    const now = this.clock().toISOString();
+    const merchant = entry.description.trim();
+    const transaction: FinanceTransaction = {
+      id: makeId("finance-transaction"),
+      occurredAt: entry.occurredAt,
+      amountCents: positiveCents(entry.amountCents, "金额"),
+      kind: "expense",
+      direction: "out",
+      accountId: accountIdForSource(entry.source),
+      source: entry.source,
+      externalTransactionId: "",
+      merchant,
+      merchantNormalized: normalizeFinanceMerchant(merchant),
+      description: merchant,
+      paymentMethod: "",
+      status: "手工补记",
+      category: entry.category,
+      budgetRole: entry.budgetRole,
+      categoryConfirmed: entry.category !== "other",
+      budgetRoleConfirmed: entry.budgetRole !== "unknown",
+      projectId: entry.projectId || null,
+      lifeDomain: entry.lifeDomain || null,
+      importBatchId: null,
+      relatedTransactionId: null,
+      valueRating: entry.valueRating,
+      duplicateFingerprint: "",
+      createdAt: now,
+      updatedAt: now,
+    };
+    transaction.duplicateFingerprint = financeDuplicateFingerprint(transaction);
+    await this.database.execute(insertTransactionSql, transactionBindValues(transaction));
+    return transaction;
+  }
+
+  async listBatches(limit = 20): Promise<FinanceImportBatch[]> {
+    await this.initialize();
+    const rows = await this.database.select<BatchRow>("SELECT * FROM finance_import_batches ORDER BY created_at DESC LIMIT ?", [Math.max(1, Math.min(100, Math.round(limit)))]);
+    return rows.map(rowToBatch);
+  }
+
+  async reconcileImportPreview(preview: FinanceImportPreview): Promise<FinanceImportPreview> {
+    await this.initialize();
+    if (!/^[a-f0-9]{64}$/i.test(preview.fileHash)) throw new Error("账单文件指纹无效");
+    const imported = await this.database.select<{ total: number }>("SELECT COUNT(*) AS total FROM finance_import_batches WHERE file_hash = ?", [preview.fileHash]);
+    const existing = await this.database.select<{ external_transaction_id: string; duplicate_fingerprint: string }>(
+      "SELECT external_transaction_id, duplicate_fingerprint FROM finance_transactions WHERE source = ?",
+      [preview.source],
+    );
+    const externalIds = new Set(existing.map((row) => row.external_transaction_id).filter(Boolean));
+    const fingerprints = new Set(existing.map((row) => row.duplicate_fingerprint).filter(Boolean));
+    const rules = await this.listRules();
+    const records = preview.records.map((record) => {
+      let next = { ...record };
+      const rule = rules.find((candidate) => candidate.matchKind === "merchant"
+        ? candidate.matchValue === record.merchantNormalized
+        : candidate.matchValue === normalizeFinanceMerchant(record.description));
+      if (rule && next.decision === "candidate") {
+        next = { ...next, category: rule.category, budgetRole: rule.budgetRole, categoryConfirmed: true, budgetRoleConfirmed: true };
+      }
+      if (next.externalTransactionId && externalIds.has(next.externalTransactionId)) {
+        return { ...next, decision: "duplicate" as const, reason: "相同来源和流水号已经存在", selected: false };
+      }
+      if (!next.externalTransactionId && next.duplicateFingerprint && fingerprints.has(next.duplicateFingerprint)) {
+        return { ...next, decision: "suspected" as const, reason: "时间、金额、方向和描述与已有记录相似", selected: false };
+      }
+      return next;
+    });
+    return {
+      ...preview,
+      records,
+      counts: countFinanceImportRecords(records),
+      alreadyImported: (imported[0]?.total ?? 0) > 0,
+    };
+  }
+
+  async confirmImport(preview: FinanceImportPreview): Promise<FinanceImportBatch> {
+    await this.initialize();
+    const reconciled = await this.reconcileImportPreview(preview);
+    if (reconciled.alreadyImported) throw new Error("这个账单文件已经导入过，无需重复操作");
+    const selected = reconciled.records.filter((record) => record.selected && record.decision !== "skipped" && record.decision !== "duplicate");
+    if (!selected.length) throw new Error("当前没有选中可导入的流水");
+    const now = this.clock().toISOString();
+    const batch: FinanceImportBatch = {
+      id: makeId("finance-import"),
+      source: reconciled.source,
+      periodStart: reconciled.periodStart,
+      periodEnd: reconciled.periodEnd,
+      fileHash: reconciled.fileHash,
+      parserVersion: reconciled.parserVersion,
+      statistics: countFinanceImportRecords(selected.map((record) => ({ ...record, decision: "candidate", selected: true }))),
+      createdAt: now,
+    };
+    const statements: SqliteStatement[] = [{
+      sql: "INSERT INTO finance_import_batches(id, source, period_start, period_end, file_hash, parser_version, statistics_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      bindValues: [batch.id, batch.source, batch.periodStart, batch.periodEnd, batch.fileHash, batch.parserVersion, JSON.stringify(batch.statistics), batch.createdAt],
+    }];
+    const transactions = selected.map((record): FinanceTransaction => ({
+        id: makeId("finance-transaction"),
+        occurredAt: record.occurredAt,
+        amountCents: positiveCents(record.amountCents, "导入金额"),
+        kind: record.kind,
+        direction: record.direction,
+        accountId: accountIdForSource(record.source),
+        source: record.source,
+        externalTransactionId: record.externalTransactionId.trim(),
+        merchant: record.merchant.trim(),
+        merchantNormalized: record.merchantNormalized || normalizeFinanceMerchant(record.merchant),
+        description: record.description.trim(),
+        paymentMethod: record.paymentMethod.trim(),
+        status: record.status.trim(),
+        category: record.category,
+        budgetRole: record.budgetRole,
+        categoryConfirmed: record.categoryConfirmed,
+        budgetRoleConfirmed: record.budgetRoleConfirmed,
+        projectId: null,
+        lifeDomain: null,
+        importBatchId: batch.id,
+        relatedTransactionId: null,
+        valueRating: null,
+        duplicateFingerprint: record.duplicateFingerprint,
+        createdAt: now,
+        updatedAt: now,
+      }));
+    const existingExpenses = (await this.database.select<TransactionRow>(
+      "SELECT * FROM finance_transactions WHERE source = ? AND kind = 'expense' ORDER BY occurred_at DESC",
+      [reconciled.source],
+    )).map(rowToTransaction);
+    const candidateExpenses = [...existingExpenses, ...transactions.filter((transaction) => transaction.kind === "expense")];
+    for (const transaction of transactions) {
+      if (transaction.kind !== "refund") continue;
+      const related = candidateExpenses
+        .filter((candidate) => candidate.amountCents === transaction.amountCents
+          && candidate.merchantNormalized === transaction.merchantNormalized
+          && candidate.occurredAt <= transaction.occurredAt)
+        .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))[0];
+      transaction.relatedTransactionId = related?.id ?? null;
+    }
+    for (const transaction of transactions) {
+      statements.push({ sql: insertTransactionSql, bindValues: transactionBindValues(transaction) });
+    }
+    await executeSqliteTransaction(this.database, statements);
+    return batch;
+  }
+
+  async rollbackBatch(batchId: string) {
+    await this.initialize();
+    if (!batchId.trim()) throw new Error("导入批次无效");
+    await executeSqliteTransaction(this.database, [
+      { sql: "DELETE FROM finance_transactions WHERE import_batch_id = ?", bindValues: [batchId] },
+      { sql: "DELETE FROM finance_import_batches WHERE id = ?", bindValues: [batchId] },
+    ]);
+  }
+
+  async listRules(): Promise<FinanceCategoryRule[]> {
+    await this.initialize();
+    const rows = await this.database.select<RuleRow>("SELECT * FROM finance_category_rules ORDER BY updated_at DESC");
+    return rows.map((row) => ({
+      id: row.id,
+      matchKind: row.match_kind,
+      matchValue: row.match_value,
+      category: row.category,
+      budgetRole: row.budget_role,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  async updateClassification(
+    transactionId: string,
+    category: FinanceCategory,
+    budgetRole: FinanceBudgetRole,
+    remember: boolean,
+    context?: { projectId: string | null; lifeDomain: LifeDomain | null; valueRating: FinanceValueRating | null },
+  ) {
+    await this.initialize();
+    if (!isCategory(category) || !isBudgetRole(budgetRole) || budgetRole === "unknown") throw new Error("请选择确定的分类和预算角色");
+    const rows = await this.database.select<TransactionRow>("SELECT * FROM finance_transactions WHERE id = ? LIMIT 1", [transactionId]);
+    const transaction = rows[0] ? rowToTransaction(rows[0]) : null;
+    if (!transaction) throw new Error("没有找到这笔流水");
+    const now = this.clock().toISOString();
+    const statements: SqliteStatement[] = [{
+      sql: "UPDATE finance_transactions SET category = ?, budget_role = ?, category_confirmed = 1, budget_role_confirmed = 1, project_id = ?, life_domain = ?, value_rating = ?, updated_at = ? WHERE id = ?",
+      bindValues: [category, budgetRole, context ? context.projectId : transaction.projectId, context ? context.lifeDomain : transaction.lifeDomain, context ? context.valueRating : transaction.valueRating, now, transactionId],
+    }];
+    if (remember) {
+      const matchKind = transaction.merchantNormalized ? "merchant" : "description";
+      const matchValue = transaction.merchantNormalized || normalizeFinanceMerchant(transaction.description);
+      if (matchValue) statements.push({
+        sql: `INSERT INTO finance_category_rules(id, match_kind, match_value, category, budget_role, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(match_kind, match_value) DO UPDATE SET category = excluded.category,
+            budget_role = excluded.budget_role, updated_at = excluded.updated_at`,
+        bindValues: [makeId("finance-rule"), matchKind, matchValue, category, budgetRole, now, now],
+      });
+    }
+    await executeSqliteTransaction(this.database, statements);
+  }
+
+  async monthlySummary(month: string) {
+    await this.initialize();
+    assertMonth(month);
+    const since = `${shiftMonth(month, -8)}-01`;
+    const until = `${nextMonth(month)}-01`;
+    const rows = await this.database.select<TransactionRow>("SELECT * FROM finance_transactions WHERE occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at", [since, until]);
+    return summarizeFinanceMonth(month, rows.map(rowToTransaction), await this.getSettings());
+  }
+
+  async getReport(month: string): Promise<FinanceAiReport | null> {
+    await this.initialize();
+    assertMonth(month);
+    const rows = await this.database.select<ReportRow>("SELECT * FROM finance_ai_reports WHERE report_month = ? LIMIT 1", [month]);
+    if (!rows[0]) return null;
+    return {
+      month: rows[0].report_month,
+      content: JSON.parse(rows[0].content_json) as FinanceAiReport["content"],
+      model: rows[0].model,
+      generatedAt: rows[0].generated_at,
+      inputFingerprint: rows[0].input_fingerprint,
+      tokenUsage: JSON.parse(rows[0].token_usage_json) as FinanceAiReport["tokenUsage"],
+    };
+  }
+
+  async saveReport(report: FinanceAiReport): Promise<FinanceAiReport> {
+    await this.initialize();
+    assertMonth(report.month);
+    if (!report.inputFingerprint || !report.model || !report.content.overview) throw new Error("AI 月报内容不完整");
+    await this.database.execute(
+      `INSERT INTO finance_ai_reports(report_month, content_json, model, generated_at, input_fingerprint, token_usage_json)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(report_month) DO UPDATE SET content_json = excluded.content_json, model = excluded.model,
+         generated_at = excluded.generated_at, input_fingerprint = excluded.input_fingerprint,
+         token_usage_json = excluded.token_usage_json`,
+      [report.month, JSON.stringify(report.content), report.model, report.generatedAt, report.inputFingerprint, JSON.stringify(report.tokenUsage)],
+    );
+    return report;
+  }
+}
+
+function normalizeSettings(settings: FinanceSettings, now: Date): FinanceSettings {
+  return {
+    stableMonthlyIncomeCents: cents(settings.stableMonthlyIncomeCents, "稳定税后月收入"),
+    defaultSavingsTargetCents: cents(settings.defaultSavingsTargetCents, "默认储蓄目标"),
+    backupNoticeAcknowledged: Boolean(settings.backupNoticeAcknowledged),
+    updatedAt: now.toISOString(),
+  };
+}
+
+function settingsWriteStatement(settings: FinanceSettings): SqliteStatement {
+  return {
+    sql: `INSERT INTO finance_settings(id, stable_monthly_income_cents, default_savings_target_cents, backup_notice_acknowledged, updated_at)
+      VALUES (1, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET stable_monthly_income_cents = excluded.stable_monthly_income_cents,
+        default_savings_target_cents = excluded.default_savings_target_cents,
+        backup_notice_acknowledged = excluded.backup_notice_acknowledged, updated_at = excluded.updated_at`,
+    bindValues: [
+      settings.stableMonthlyIncomeCents,
+      settings.defaultSavingsTargetCents,
+      settings.backupNoticeAcknowledged ? 1 : 0,
+      settings.updatedAt,
+    ],
+  };
+}
+
+function normalizeBudget(budget: FinanceBudget, now: Date): FinanceBudget {
+  assertMonth(budget.month);
+  const categoryLimits = Object.fromEntries(Object.entries(budget.categoryLimits).flatMap(([category, value]) => {
+    if (!isCategory(category) || value === undefined) return [];
+    return [[category, cents(value, `${category}预算`)]];
+  })) as Partial<Record<FinanceCategory, number>>;
+  return {
+    month: budget.month,
+    savingsTargetCents: cents(budget.savingsTargetCents, "储蓄目标"),
+    categoryLimits,
+    updatedAt: now.toISOString(),
+  };
+}
+
+function budgetWriteStatement(budget: FinanceBudget): SqliteStatement {
+  return {
+    sql: `INSERT INTO finance_budgets(month, savings_target_cents, category_limits_json, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(month) DO UPDATE SET savings_target_cents = excluded.savings_target_cents,
+        category_limits_json = excluded.category_limits_json, updated_at = excluded.updated_at`,
+    bindValues: [budget.month, budget.savingsTargetCents, JSON.stringify(budget.categoryLimits), budget.updatedAt],
+  };
+}
+
+const insertTransactionSql = `INSERT INTO finance_transactions(
+  id, occurred_at, amount_cents, kind, direction, account_id, source, external_transaction_id,
+  merchant, merchant_normalized, description, payment_method, status, category, budget_role,
+  category_confirmed, budget_role_confirmed, project_id, life_domain, import_batch_id,
+  related_transaction_id, value_rating, duplicate_fingerprint, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+function transactionBindValues(transaction: FinanceTransaction) {
+  return [
+    transaction.id, transaction.occurredAt, transaction.amountCents, transaction.kind,
+    transaction.direction, transaction.accountId, transaction.source, transaction.externalTransactionId,
+    transaction.merchant, transaction.merchantNormalized, transaction.description, transaction.paymentMethod,
+    transaction.status, transaction.category, transaction.budgetRole, transaction.categoryConfirmed ? 1 : 0,
+    transaction.budgetRoleConfirmed ? 1 : 0, transaction.projectId, transaction.lifeDomain,
+    transaction.importBatchId, transaction.relatedTransactionId, transaction.valueRating,
+    transaction.duplicateFingerprint, transaction.createdAt, transaction.updatedAt,
+  ];
+}
+
+function rowToTransaction(row: TransactionRow): FinanceTransaction {
+  return {
+    id: row.id,
+    occurredAt: row.occurred_at,
+    amountCents: row.amount_cents,
+    kind: row.kind,
+    direction: row.direction,
+    accountId: row.account_id,
+    source: row.source,
+    externalTransactionId: row.external_transaction_id,
+    merchant: row.merchant,
+    merchantNormalized: row.merchant_normalized,
+    description: row.description,
+    paymentMethod: row.payment_method,
+    status: row.status,
+    category: row.category,
+    budgetRole: row.budget_role,
+    categoryConfirmed: Boolean(row.category_confirmed),
+    budgetRoleConfirmed: Boolean(row.budget_role_confirmed),
+    projectId: row.project_id,
+    lifeDomain: row.life_domain,
+    importBatchId: row.import_batch_id,
+    relatedTransactionId: row.related_transaction_id,
+    valueRating: row.value_rating,
+    duplicateFingerprint: row.duplicate_fingerprint,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToBudget(row: BudgetRow): FinanceBudget {
+  let categoryLimits: Partial<Record<FinanceCategory, number>> = {};
+  try {
+    const parsed = JSON.parse(row.category_limits_json) as Record<string, unknown>;
+    categoryLimits = Object.fromEntries(Object.entries(parsed).filter(([category, value]) => isCategory(category) && typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) as Partial<Record<FinanceCategory, number>>;
+  } catch {
+    categoryLimits = {};
+  }
+  return { month: row.month, savingsTargetCents: row.savings_target_cents, categoryLimits, updatedAt: row.updated_at };
+}
+
+function rowToBatch(row: BatchRow): FinanceImportBatch {
+  let statistics: FinanceImportCounts;
+  try {
+    statistics = JSON.parse(row.statistics_json) as FinanceImportCounts;
+  } catch {
+    statistics = countFinanceImportRecords([]);
+  }
+  return {
+    id: row.id,
+    source: row.source,
+    periodStart: row.period_start,
+    periodEnd: row.period_end,
+    fileHash: row.file_hash,
+    parserVersion: row.parser_version,
+    statistics,
+    createdAt: row.created_at,
+  };
+}
+
+function accountIdForSource(source: FinanceSource) {
+  return defaultAccounts.find((account) => account.source === source)?.id ?? "finance-account-custom";
+}
+
+function cents(value: number, field: string) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 100_000_000_000) throw new Error(`${field}金额无效`);
+  return value;
+}
+
+function positiveCents(value: number, field: string) {
+  const normalized = cents(value, field);
+  if (normalized === 0) throw new Error(`${field}必须大于 0`);
+  return normalized;
+}
+
+function assertMonth(value: string) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(value)) throw new Error("月份格式无效");
+}
+
+function assertTimestamp(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?/.test(value) || Number.isNaN(new Date(value).getTime())) throw new Error("消费时间无效");
+}
+
+function nextMonth(month: string) {
+  return shiftMonth(month, 1);
+}
+
+function shiftMonth(month: string, offset: number) {
+  const [year, monthValue] = month.split("-").map(Number);
+  const date = new Date(Date.UTC(year, monthValue - 1 + offset, 1));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function isCategory(value: string): value is FinanceCategory {
+  return FINANCE_CATEGORIES.some((entry) => entry.value === value);
+}
+
+function isBudgetRole(value: string): value is FinanceBudgetRole {
+  return FINANCE_BUDGET_ROLES.some((entry) => entry.value === value);
+}
+
+function isSource(value: string): value is FinanceSource {
+  return ["alipay", "wechat", "cash", "custom"].includes(value);
+}
+
+function makeId(prefix: string) {
+  return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+}

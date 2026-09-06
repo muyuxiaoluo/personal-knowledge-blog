@@ -6,9 +6,13 @@ export type ProjectCategory = LifeDomain;
 
 export type ProjectType = "main" | "side" | "experiment";
 
-export type MilestoneStatus = "current" | "planned" | "completed";
+export type ProjectPlanningMode = "direct" | "staged" | "adaptive";
 
-export type ProjectTaskStatus = "next" | "later" | "waiting" | "done";
+export type MilestoneStatus = "current" | "planned" | "completed" | "superseded";
+
+export type ProjectTaskStatus = "next" | "later" | "waiting" | "done" | "cancelled";
+
+export type ProjectLogKind = "general" | "continuation" | "task_progress" | "task_completed" | "plan_revision";
 
 export type ProjectTaskStep = {
   id: string;
@@ -38,6 +42,7 @@ export type Project = {
   outcome: string;
   motivation: string;
   projectType: ProjectType;
+  planningMode: ProjectPlanningMode;
   parentProjectId: string | null;
   supportsMilestoneId: string | null;
   status: ProjectStatus;
@@ -66,8 +71,9 @@ export type Milestone = {
 
 export type ProjectTask = {
   id: string;
-  projectId: string;
+  projectId: string | null;
   milestoneId: string | null;
+  direction: ProjectCategory;
   title: string;
   actionType: ActionType;
   definitionOfDone: string;
@@ -88,7 +94,9 @@ export type ProjectTask = {
 
 export type ProjectLog = {
   id: string;
-  projectId: string;
+  projectId: string | null;
+  taskId: string | null;
+  kind: ProjectLogKind;
   body: string;
   createdAt: string;
 };

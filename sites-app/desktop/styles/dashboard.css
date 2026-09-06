@@ -1,3 +1,4 @@
+@layer pages.dashboard {
 /* Morning dashboard ----------------------------------------------------- */
 .morning-overview-grid,
 .morning-information-grid {
@@ -58,8 +59,7 @@
 .morning-card-heading nav button,
 .weather-setup button,
 .morning-source-status button,
-.calendar-source button,
-.news-expand {
+.calendar-source button{
   border: 0;
   padding: 5px 6px;
   background: transparent;
@@ -454,7 +454,6 @@
 .morning-news-sheet li { display: grid; grid-template-columns: 25px minmax(0, 1fr); gap: 8px; border-bottom: 1px dashed rgba(89, 87, 70, .1); padding: 9px 0; }
 .morning-news-sheet li i { color: #b2955b; font-family: Georgia, serif; font-size: 10px; font-style: normal; font-weight: 700; }
 .morning-news-sheet li span { color: #565b6c; font-family: "Microsoft YaHei UI", sans-serif; font-size: 11px; line-height: 1.55; }
-.news-expand { display: block; margin: 8px auto 1px; }
 .morning-news-sheet blockquote { margin: 11px 0 0; border-left: 3px solid #d2b477; padding: 9px 11px; background: rgba(222, 194, 143, .1); color: #77705f; font-family: Georgia, "STSong", serif; font-size: 11px; line-height: 1.55; }
 .brief-date-warning { margin: 9px 0 0; border-radius: 7px; padding: 7px 9px; background: rgba(196, 138, 71, .09); color: #a26c37; font-size: 9px; }
 
@@ -532,7 +531,7 @@
 .ai-keyword-modal form > footer { display: flex; justify-content: flex-end; gap: 7px; padding-top: 2px; }
 .ai-keyword-modal form > footer button { min-height: 36px; border: 1px solid rgba(79, 91, 150, .17); border-radius: 9px; padding: 8px 12px; background: #fff; color: #626a87; font-size: 11px; font-weight: 750; cursor: pointer; }
 .ai-keyword-modal form > footer button:first-child { margin-right: auto; }
-.ai-keyword-modal form > footer button.primary { border-color: #6072ae; background: #6072ae; color: #fff; }
+.ai-keyword-modal form > footer .ui-button--primary { border-color: #6072ae; background: #6072ae; color: #fff; }
 
 .calendar-overview-modal { width: min(640px, calc(100vw - 44px)); }
 .calendar-overview-toolbar { display: flex; justify-content: space-between; gap: 8px; padding: 12px 16px 0; }
@@ -581,8 +580,8 @@
 .calendar-check input { width: 16px; min-height: 16px; }
 .calendar-manager-body form > footer { display: flex; justify-content: flex-end; gap: 7px; margin-top: 2px; }
 .calendar-manager-body form > footer button { border: 1px solid rgba(79, 91, 150, .17); border-radius: 9px; padding: 8px 11px; background: #fff; color: #626a87; font-size: 11px; font-weight: 750; cursor: pointer; }
-.calendar-manager-body form > footer button.primary { border-color: #6072ae; background: #6072ae; color: #fff; }
-.calendar-manager-body form > footer button.danger { margin-right: auto; border-color: rgba(166, 77, 85, .2); background: #fff7f7; color: #a14e58; }
+.calendar-manager-body form > footer .ui-button--primary { border-color: #6072ae; background: #6072ae; color: #fff; }
+.calendar-manager-body form > footer .ui-button--danger { margin-right: auto; border-color: rgba(166, 77, 85, .2); background: #fff7f7; color: #a14e58; }
 .calendar-manager-body > aside { border-left: 1px solid rgba(72, 81, 132, .1); padding: 18px 14px; background: rgba(234, 236, 245, .48); }
 .calendar-manager-body > aside > strong { color: #747b96; font-size: 10px; }
 .calendar-manager-body > aside > div { display: grid; gap: 5px; margin-top: 10px; }
@@ -646,7 +645,7 @@
 /* Today action focus loop and archive ----------------------------------- */
 .today-heading-actions { display: flex; align-items: center; gap: 8px; }
 .today-heading-actions button { min-height: 42px; border: 1px solid rgba(78, 91, 148, .18); border-radius: 11px; padding: 9px 13px; background: rgba(255, 255, 255, .76); color: #5b658f; font-size: 12px; font-weight: 750; cursor: pointer; }
-.today-heading-actions button.primary { border-color: #5f70ad; background: #5f70ad; color: #fff; }
+.today-heading-actions .ui-button--primary { border-color: #5f70ad; background: #5f70ad; color: #fff; }
 .today-heading-actions button span { margin-left: 5px; border-radius: 99px; padding: 2px 6px; background: rgba(255, 255, 255, .18); }
 .today-overdue-alert { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 14px; margin: 0 0 14px; border: 1px solid rgba(181, 76, 88, .2); border-radius: 12px; padding: 11px 15px; background: rgba(255, 244, 244, .82); color: #9c4d58; font-size: 12px; cursor: pointer; }
 .today-overdue-alert strong { color: #ad4d59; font-size: 11px; }
@@ -668,16 +667,29 @@
 .plan-today-list > article > div em.soon { background: #f1edfb; color: #705ca8; }
 .plan-today-list > article > div button { border: 1px solid #6273ae; border-radius: 9px; padding: 8px 10px; background: #6273ae; color: #fff; font-size: 11px; font-weight: 750; cursor: pointer; }
 
-.action-row { grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 14px 24px; }
+.action-row {
+  grid-template-columns: minmax(0, 1.25fr) minmax(340px, .75fr);
+  grid-template-areas:
+    "main disclosure"
+    "actions actions";
+  align-items: start;
+  gap: 16px 28px;
+}
+.action-row.has-focus-time {
+  grid-template-areas:
+    "main focus"
+    "main disclosure"
+    "actions actions";
+}
 .action-row.is-focusing { box-shadow: inset 4px 0 #6077bd; background: linear-gradient(90deg, rgba(226, 233, 251, .9), rgba(255, 255, 255, .56)); }
-.action-row > .action-row-main { display: block; grid-column: 1; }
-.action-row > .action-focus-readout { display: grid; min-width: 126px; justify-items: end; gap: 4px; grid-column: 2; align-self: start; border-radius: 12px; padding: 10px 12px; background: rgba(238, 240, 247, .8); }
+.action-row > .action-row-main { display: block; grid-area: main; }
+.action-row > .action-focus-readout { display: grid; min-width: 126px; justify-items: end; gap: 4px; grid-area: focus; align-self: start; border-radius: 12px; padding: 10px 12px; background: rgba(238, 240, 247, .8); }
 .action-row > .action-focus-readout.active { background: rgba(95, 116, 181, .12); }
 .action-focus-readout span { color: #85899c; font-size: 10px; font-weight: 750; }
 .action-focus-readout strong { color: #5367a7; font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 20px; letter-spacing: .02em; }
-.action-row > .action-disclosure { width: 100%; max-width: none; grid-column: 1 / -1; margin-top: 0; }
+.action-row > .action-disclosure { width: 100%; max-width: none; grid-area: disclosure; margin-top: 0; }
 .action-row > .action-disclosure summary { padding: 11px 14px; }
-.action-row > .action-row-actions { display: flex; width: 100%; align-items: center; justify-content: flex-end; gap: 7px; grid-column: 1 / -1; border-top: 1px solid rgba(76, 85, 136, .08); padding-top: 13px; }
+.action-row > .action-row-actions { display: flex; width: 100%; align-items: center; justify-content: flex-end; gap: 7px; grid-area: actions; border-top: 1px solid rgba(76, 85, 136, .08); padding-top: 13px; }
 .action-row-actions > button { min-height: 36px; }
 .action-row-actions > button:first-child { margin-right: auto; border-color: rgba(83, 99, 155, .2); background: rgba(239, 242, 250, .86); color: #56669c; }
 .action-row-actions > button.focus-start,
@@ -710,7 +722,7 @@
 .focus-recovery-dialog input { min-height: 43px; border: 1px solid rgba(82, 95, 150, .2); border-radius: 11px; padding: 8px 11px; background: #fff; color: #3e435e; font: inherit; }
 .focus-recovery-dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 21px; }
 .focus-recovery-dialog footer button { border: 1px solid rgba(80, 91, 145, .19); border-radius: 10px; padding: 9px 12px; background: #fff; color: #626a88; font-size: 11px; font-weight: 750; cursor: pointer; }
-.focus-recovery-dialog footer button.primary { border-color: #5f70ad; background: #5f70ad; color: #fff; }
+.focus-recovery-dialog footer .ui-button--primary { border-color: #5f70ad; background: #5f70ad; color: #fff; }
 
 .archive-page { width: min(1180px, 100%); margin: 0 auto; padding: 34px 34px 50px; }
 .archive-page .workspace-page-heading .ui-search { width: min(320px, 42vw); }
@@ -740,10 +752,26 @@
 .archive-action-list aside small { color: #7581a7; font-size: 10px; }
 .archive-action-list aside button { margin-top: 3px; border: 1px solid rgba(81, 95, 151, .17); border-radius: 9px; padding: 7px 10px; background: #fff; color: #5c6da5; font-size: 10px; font-weight: 750; cursor: pointer; }
 
+@container workspace (max-width: 900px) {
+  .action-row {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "main" "disclosure" "actions";
+  }
+  .action-row.has-focus-time {
+    grid-template-areas: "main" "focus" "disclosure" "actions";
+  }
+  .action-row > .action-focus-readout { width: 100%; justify-items: start; }
+  .action-row > .action-row-actions { flex-wrap: wrap; }
+}
+
 @media (max-width: 760px) {
   .today-heading-actions { width: 100%; flex-wrap: wrap; }
   .today-heading-actions button { flex: 1; }
-  .action-row { grid-template-columns: minmax(0, 1fr); }
+  .action-row {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "main" "disclosure" "actions";
+  }
+  .action-row.has-focus-time { grid-template-areas: "main" "focus" "disclosure" "actions"; }
   .action-row > .action-focus-readout { width: 100%; grid-column: 1; justify-items: start; }
   .action-row > .action-disclosure,
   .action-row > .action-row-actions { grid-column: 1; }
@@ -754,4 +782,6 @@
   .archive-page .workspace-page-heading .ui-search { width: 100%; }
   .global-focus-bar { top: 8px; max-width: calc(100vw - 18px); }
   .global-focus-main time { margin-left: 2px; font-size: 14px; }
+}
+
 }

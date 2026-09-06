@@ -1,3 +1,4 @@
+import { Button } from "./DesktopControls";
 import { getVersion } from "@tauri-apps/api/app";
 import { isTauri } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -45,7 +46,7 @@ async function checkWithPreferredProxy() {
 }
 
 export function AppUpdater() {
-  const [currentVersion, setCurrentVersion] = useState("0.9.0");
+  const [currentVersion, setCurrentVersion] = useState("1.0.0");
   const [phase, setPhase] = useState<UpdatePhase>("idle");
   const [available, setAvailable] = useState<AvailableUpdate | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -197,14 +198,14 @@ export function AppUpdater() {
               aria-labelledby="update-title"
               aria-live="polite"
             >
-              <button
+              <Button variant="secondary" size="small" iconOnly type="button"
                 className="update-close"
                 disabled={phase === "downloading" || phase === "installing"}
                 onClick={() => setDialogOpen(false)}
                 aria-label="关闭更新窗口"
               >
                 ×
-              </button>
+              </Button>
               <span>应用更新</span>
               <h2 id="update-title">{updateTitle(phase)}</h2>
               <p>{updateDescription(phase, currentVersion, available, errorMessage)}</p>
@@ -234,19 +235,19 @@ export function AppUpdater() {
 
               <div className="update-actions">
                 {phase === "available" && (
-                  <button className="update-primary" onClick={() => void installUpdate()}>
+                  <Button variant="primary" type="button" className="update-primary" onClick={() => void installUpdate()}>
                     下载并安装
-                  </button>
+                  </Button>
                 )}
                 {phase === "error" && (
-                  <button className="update-primary" onClick={() => void checkForUpdates(true)}>
+                  <Button variant="primary" type="button" className="update-primary" onClick={() => void checkForUpdates(true)}>
                     重新检查
-                  </button>
+                  </Button>
                 )}
                 {(phase === "latest" || phase === "idle") && (
-                  <button className="update-primary" onClick={() => setDialogOpen(false)}>
+                  <Button variant="primary" type="button" className="update-primary" onClick={() => setDialogOpen(false)}>
                     知道了
-                  </button>
+                  </Button>
                 )}
               </div>
             </section>

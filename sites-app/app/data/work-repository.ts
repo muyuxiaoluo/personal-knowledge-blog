@@ -6,9 +6,15 @@ import type {
   TaskPlan,
   WeeklyFocus,
   WeeklyReview,
+  TaskPlanHistory,
+  DailySituation,
+  SituationPlanChange,
 } from "../work-types";
 
 export interface WorkRepository {
+  listPlanHistory(date?: string): Promise<TaskPlanHistory[]>;
+  listDailySituations(): Promise<DailySituation[]>;
+  saveDailySituation(situation: DailySituation, changes?: SituationPlanChange[]): Promise<void>;
   listPlans(): Promise<TaskPlan[]>;
   savePlan(plan: TaskPlan): Promise<TaskPlan>;
   removePlan(taskId: string): Promise<void>;

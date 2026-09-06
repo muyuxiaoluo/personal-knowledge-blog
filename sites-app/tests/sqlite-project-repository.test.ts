@@ -231,6 +231,7 @@ test("persists lightweight projects with a target date and no stage route", asyn
     id: "project-teacher-exam",
     title: "教资考试冲刺",
     outcome: "完成重点复习与模拟，并按时参加考试。",
+    planningMode: "direct",
     targetDate: "2026-09-12",
     createdAt: "",
     updatedAt: "",
@@ -239,6 +240,99 @@ test("persists lightweight projects with a target date and no stage route", asyn
   const detail = await repository.get(saved.id);
   assert.equal(detail?.project.targetDate, "2026-09-12");
   assert.deepEqual(detail?.milestones, []);
+});
+
+test("creates and continues a standalone action, then moves it into and out of a project", async () => {
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(new DatabaseSync(":memory:")), {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-08-28T10:00:00.000Z"),
+  });
+  const now = "2026-08-28T10:00:00.000Z";
+  let task = await repository.saveTask({
+    id: "", projectId: null, milestoneId: null, direction: "learning", title: "给导师发消息",
+    actionType: "communicate", definitionOfDone: "导师已经收到开题时间确认消息", steps: [],
+    currentFocus: "整理一句话并发送", details: "", benefit: "", dueDate: "", status: "next",
+    waitingFor: "", resumeAction: "", context: "phone", sortOrder: 10, createdAt: now, updatedAt: now, completedAt: null,
+  });
+  assert.equal((await repository.listStandaloneTasks())[0]?.id, task.id);
+  await repository.recordTaskProgress(task.id, "已经写好消息", "核对时间后发送");
+  assert.equal((await repository.listTaskLogs(task.id))[0]?.kind, "task_progress");
+  await repository.completeTask(task.id, "导师已收到消息");
+  assert.equal((await repository.listStandaloneTasks())[0]?.status, "done");
+  await repository.updateTaskStatus(task.id, "cancelled");
+  await repository.updateTaskStatus(task.id, "later");
+
+  const project = await repository.get("project-research-direction");
+  assert.ok(project);
+  task = await repository.saveTask({ ...task, projectId: project.project.id, direction: project.project.category, status: "later", completedAt: null });
+  assert.equal((await repository.get(project.project.id))?.tasks.some((item) => item.id === task.id), true);
+  task = await repository.saveTask({ ...task, projectId: null, milestoneId: null, direction: project.project.category });
+  assert.equal(task.direction, project.project.category);
+  assert.equal((await repository.listStandaloneTasks()).some((item) => item.id === task.id), true);
+});
+
+test("switches staged work to direct without deleting history and recalculates an adaptive checkpoint", async () => {
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(new DatabaseSync(":memory:")), {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-08-13T10:00:00.000Z"),
+  });
+  const original = await repository.get("project-research-direction");
+  assert.ok(original);
+  await repository.saveWorkspace({ ...original.project, planningMode: "direct" }, original.milestones, null);
+  const direct = await repository.get(original.project.id);
+  assert.ok(direct);
+  assert.equal(direct.project.planningMode, "direct");
+  assert.equal(direct.milestones.some((milestone) => milestone.status === "superseded"), true);
+  assert.equal(direct.tasks.every((task) => task.milestoneId === null), true);
+
+  const now = "2026-08-13T10:00:00.000Z";
+  const current = {
+    id: "", projectId: direct.project.id, title: "通过开题答辩", definitionOfDone: "答辩通过并记录修改意见",
+    status: "current" as const, dueDate: "2026-08-18", sortOrder: 100, createdAt: now, updatedAt: now,
+  };
+  const future = { ...current, id: "", title: "完成论文主体", definitionOfDone: "形成可评审论文稿", status: "planned" as const, dueDate: "", sortOrder: 110 };
+  await repository.saveWorkspace({ ...direct.project, planningMode: "adaptive", targetDate: "2026-08-30", reviewDate: "" }, [...direct.milestones, current, future], null);
+  const adaptive = await repository.get(direct.project.id);
+  assert.equal(adaptive?.project.planningMode, "adaptive");
+  assert.equal(adaptive?.project.reviewDate, "2026-08-18");
+  assert.equal(adaptive?.milestones.find((milestone) => milestone.status === "planned")?.title, "完成论文主体");
+});
+
+test("applies only selected AI adjustments atomically and records the complete revision", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-08-13T10:00:00.000Z"),
+  });
+  const detail = await repository.get("project-research-direction");
+  assert.ok(detail);
+  const oldTask = detail.tasks[0];
+  const current = detail.milestones.find((milestone) => milestone.status === "current");
+  assert.ok(oldTask && current);
+  await repository.applyProjectAdjustment({
+    projectId: detail.project.id,
+    trigger: "开题提前到九月中下旬",
+    model: "deepseek-v4-pro",
+    tokenUsage: { inputTokens: 120, outputTokens: 80, totalTokens: 200 },
+    proposal: {
+      summary: "优先完成开题材料",
+      projectPatch: { outcome: null, targetDate: "2026-09-20", reviewDate: null },
+      milestoneChanges: [{ id: current.id, action: "postpone", title: "通过开题答辩", definitionOfDone: null, dueDate: "2026-09-20", selected: true }],
+      newMilestones: [],
+      taskChanges: [{ id: oldTask.id, action: "cancel", title: null, currentFocus: null, definitionOfDone: null, dueDate: null, status: "cancelled", selected: false }],
+      newTasks: [{ clientId: "new-1", milestoneId: current.id, title: "向导师确认答辩材料", currentFocus: "列出材料清单并发送", definitionOfDone: "导师确认材料清单", details: "", dueDate: "2026-08-15", selected: true }],
+      assumptions: [], risks: ["答辩日期仍可能微调"],
+    },
+  });
+  const saved = await repository.get(detail.project.id);
+  assert.equal(saved?.project.targetDate, "2026-09-20");
+  assert.notEqual(saved?.tasks.find((task) => task.id === oldTask.id)?.status, "cancelled");
+  assert.equal(saved?.tasks.some((task) => task.title === "向导师确认答辩材料"), true);
+  assert.deepEqual(saved?.tasks.filter((task) => task.status === "next").map((task) => task.title), ["向导师确认答辩材料"]);
+  const revision = saved?.logs.find((log) => log.kind === "plan_revision");
+  assert.ok(revision?.body.includes("deepseek-v4-pro"));
+  assert.ok(revision?.body.includes("开题提前到九月中下旬"));
+  database.close();
 });
 
 test("completes the current stage, advances the route, and keeps unfinished actions", async () => {
@@ -511,7 +605,7 @@ test("project workspace removes deleted stages and detaches their actions", asyn
   assert.equal(detail.tasks[0].milestoneId, currentStage.id);
 
   await repository.saveWorkspace(
-    detail.project,
+    { ...detail.project, planningMode: "direct" },
     detail.milestones.filter((milestone) => milestone.id !== currentStage.id),
     null,
   );
@@ -538,6 +632,56 @@ test("adds proposal storage to an existing version 3 project database", async ()
   assert.ok(projectColumns.some((column) => String(column.name) === "parent_project_id"));
   assert.ok(projectColumns.some((column) => String(column.name) === "supports_milestone_id"));
   assert.ok(projectColumns.some((column) => String(column.name) === "target_date"));
+  database.close();
+});
+
+test("rebuilds legacy action and log tables so project ids become nullable without losing rows", async () => {
+  const database = new DatabaseSync(":memory:");
+  const first = new SqliteProjectRepository(new NodeSqliteAdapter(database), { seedProjects: initialProjectSeeds });
+  await first.ready();
+  database.exec("PRAGMA foreign_keys = OFF; DROP TABLE project_logs; DROP TABLE project_tasks;");
+  database.exec(`CREATE TABLE project_tasks (
+    id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id), milestone_id TEXT,
+    title TEXT NOT NULL, action_type TEXT NOT NULL DEFAULT 'organize', definition_of_done TEXT NOT NULL DEFAULT '',
+    steps_json TEXT NOT NULL DEFAULT '[]', current_focus TEXT NOT NULL DEFAULT '', details TEXT NOT NULL DEFAULT '',
+    benefit TEXT NOT NULL DEFAULT '', due_date TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
+    waiting_for TEXT NOT NULL DEFAULT '', resume_action TEXT NOT NULL DEFAULT '', context TEXT NOT NULL DEFAULT 'anywhere',
+    sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT,
+    deleted_at TEXT, deleted_plan_json TEXT NOT NULL DEFAULT ''
+  );
+  CREATE TABLE project_logs (
+    id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id), body TEXT NOT NULL, created_at TEXT NOT NULL
+  );
+  CREATE TABLE task_plans (
+    task_id TEXT PRIMARY KEY NOT NULL, planned_date TEXT NOT NULL, priority TEXT NOT NULL,
+    estimate_minutes INTEGER NOT NULL, sort_order INTEGER NOT NULL, updated_at TEXT NOT NULL
+  );
+  CREATE TABLE focus_sessions (
+    id TEXT PRIMARY KEY NOT NULL, task_id TEXT, project_id TEXT, label TEXT NOT NULL,
+    started_at TEXT NOT NULL, ended_at TEXT, duration_seconds INTEGER NOT NULL
+  );`);
+  database.prepare(`INSERT INTO project_tasks(
+    id, project_id, milestone_id, title, action_type, definition_of_done, steps_json, current_focus, details,
+    benefit, due_date, status, waiting_for, resume_action, context, sort_order, created_at, updated_at, completed_at, deleted_at, deleted_plan_json
+  ) VALUES (?, ?, NULL, ?, 'organize', '', '[]', ?, '', '', '', 'later', '', '', 'anywhere', 10, ?, ?, NULL, NULL, '')`)
+    .run("legacy-task", "project-research-direction", "旧行动", "继续旧行动", "2026-08-01T00:00:00.000Z", "2026-08-01T00:00:00.000Z");
+  database.prepare("INSERT INTO project_logs(id, project_id, body, created_at) VALUES (?, ?, ?, ?)")
+    .run("legacy-log", "project-research-direction", "旧记录", "2026-08-01T00:00:00.000Z");
+  database.prepare("INSERT INTO task_plans VALUES (?, ?, ?, ?, ?, ?)")
+    .run("legacy-task", "2026-08-15", "high", 45, 1, "2026-08-01T00:00:00.000Z");
+  database.prepare("INSERT INTO focus_sessions VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run("legacy-focus", "legacy-task", "project-research-direction", "旧行动", "2026-08-01T08:00:00.000Z", "2026-08-01T08:30:00.000Z", 1800);
+
+  const migrated = new SqliteProjectRepository(new NodeSqliteAdapter(database));
+  await migrated.ready();
+  const taskProjectColumn = database.prepare("PRAGMA table_info(project_tasks)").all().find((column) => String(column.name) === "project_id");
+  const logProjectColumn = database.prepare("PRAGMA table_info(project_logs)").all().find((column) => String(column.name) === "project_id");
+  assert.equal(Number(taskProjectColumn?.notnull), 0);
+  assert.equal(Number(logProjectColumn?.notnull), 0);
+  assert.equal(database.prepare("SELECT title, direction FROM project_tasks WHERE id = 'legacy-task'").get()?.title, "旧行动");
+  assert.equal(database.prepare("SELECT kind FROM project_logs WHERE id = 'legacy-log'").get()?.kind, "general");
+  assert.equal(database.prepare("SELECT planned_date FROM task_plans WHERE task_id = 'legacy-task'").get()?.planned_date, "2026-08-15");
+  assert.equal(database.prepare("SELECT duration_seconds FROM focus_sessions WHERE task_id = 'legacy-task'").get()?.duration_seconds, 1800);
   database.close();
 });
 

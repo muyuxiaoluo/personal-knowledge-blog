@@ -2,6 +2,8 @@ export type WorkbenchIconName =
   | "brand"
   | "home"
   | "today"
+  | "health"
+  | "wealth"
   | "projects"
   | "notes"
   | "explore"
@@ -29,6 +31,8 @@ export function WorkbenchIcon({ name, className = "" }: { name: WorkbenchIconNam
       {name === "brand" && <><path d="M4 5.5c2.8-.9 5.3-.5 8 1.2v12c-2.7-1.7-5.2-2.1-8-1.2z" /><path d="M20 5.5c-2.8-.9-5.3-.5-8 1.2" /><path d="M16.8 2.8v4.4M14.6 5h4.4" /></>}
       {name === "home" && <><path d="m3.5 10 8.5-7 8.5 7" /><path d="M5.5 9v11h13V9" /><path d="M9.5 20v-6h5v6" /></>}
       {name === "today" && <><rect x="3" y="4.5" width="18" height="16" rx="2.5" /><path d="M7 2.5v4M17 2.5v4M3 9h18" /><path d="m8 14 2.2 2.2L16 11.5" /></>}
+      {name === "health" && <><path d="M12 20.2S4 15.6 4 9.5A4.5 4.5 0 0 1 12 6.7a4.5 4.5 0 0 1 8 2.8c0 6.1-8 10.7-8 10.7Z" /><path d="M8 12h2.2l1.1-2.4 1.7 5 1.2-2.6H16" /></>}
+      {name === "wealth" && <><rect x="3" y="6" width="18" height="14" rx="3" /><path d="M3 10h18M7 6V4h10v2" /><path d="M15 14h3M16.5 12.5v3" /></>}
       {name === "projects" && <><circle cx="5" cy="18" r="2" /><circle cx="12" cy="6" r="2" /><circle cx="19" cy="15" r="2" /><path d="m6.4 16.6 4.2-8.8M13.7 7.4l3.7 6.2M7 18h10" /></>}
       {name === "notes" && <><path d="M6 3h9l4 4v14H6z" /><path d="M15 3v5h4M9 12h7M9 16h7" /></>}
       {name === "explore" && <><circle cx="12" cy="12" r="9" /><path d="m15.7 8.3-2.2 5.2-5.2 2.2 2.2-5.2z" /></>}

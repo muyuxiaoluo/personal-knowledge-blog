@@ -6,6 +6,7 @@ import {
   useId,
   useRef,
   useState,
+  type ButtonHTMLAttributes,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -14,6 +15,37 @@ export type SelectOption = { value: string; label: string; disabled?: boolean };
 
 const SELECT_MENU_GAP = 6;
 const SELECT_MENU_VIEWPORT_MARGIN = 12;
+
+export type ButtonVariant = "primary" | "secondary" | "quiet" | "ghost" | "danger";
+export type ButtonSize = "small" | "medium" | "large";
+
+export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  iconOnly?: boolean;
+  wrap?: boolean;
+};
+
+/** 通用操作按钮。页面只选择语义变体，不再重复声明边框、圆角、间距与交互状态。 */
+export function Button({
+  variant = "secondary",
+  size = "medium",
+  iconOnly = false,
+  wrap = false,
+  className = "",
+  type = "button",
+  ...props
+}: ButtonProps) {
+  return <button
+    {...props}
+    type={type}
+    className={`ui-button ui-button--${variant} ui-button--${size}${iconOnly ? " ui-button--icon" : ""}${wrap ? " ui-button--wrap" : ""}${className ? ` ${className}` : ""}`}
+  />;
+}
+
+export function IconButton({ "aria-label": label, ...props }: ButtonProps & { "aria-label": string }) {
+  return <Button {...props} aria-label={label} iconOnly />;
+}
 
 /** 计算下拉菜单的固定定位：下方空间不足时向上展开，并把高度限制在展开侧的可用空间内，避免选项被视口裁切 */
 function getMenuPosition(rect: DOMRect): { left: number; top?: number; bottom?: number; minWidth: number; maxHeight: number } {
@@ -78,7 +110,7 @@ export function SelectMenu({ value, options, onChange, label, disabled = false, 
 
   const rect = open ? triggerRef.current?.getBoundingClientRect() : null;
   const menuPosition = rect ? getMenuPosition(rect) : null;
-  return <div className={`ui-select ${className}`}>
+  return <div className={`ui-select${open ? " open" : ""}${className ? ` ${className}` : ""}`}>
     <button
       ref={triggerRef}
       type="button"
@@ -197,7 +229,7 @@ export function ConfirmDialogProvider({ children }: { children: ReactNode }) {
         </header>
         {request.subject && <div className="ui-confirm-subject"><span>即将删除</span><strong>{request.subject}</strong></div>}
         <div className="ui-confirm-description" id="ui-confirm-description"><span aria-hidden="true">{request.descriptionIcon ?? "i"}</span><div>{request.description}</div></div>
-        <footer><button type="button" onClick={() => finish(false)}>{request.cancelLabel ?? "取消"}</button><button type="button" className={request.tone === "danger" ? "danger" : "primary"} onClick={() => finish(true)}>{request.confirmLabel ?? "确认"}</button></footer>
+        <footer><Button onClick={() => finish(false)}>{request.cancelLabel ?? "取消"}</Button><Button variant={request.tone === "danger" ? "danger" : "primary"} onClick={() => finish(true)}>{request.confirmLabel ?? "确认"}</Button></footer>
       </div>
     </div>, document.body,
   )}</ConfirmContext.Provider>;

@@ -2,6 +2,13 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { DeepSeekModeOptions, DeepSeekSnapshot } from "../app/ai-types";
 import type {
+  DeepSeekModel,
+  DeepSeekStructuredResponse,
+  NextActionProposal,
+  ProjectCreationProposal,
+  ProjectReplanProposal,
+} from "../app/ai-api-types";
+import type {
   GitHubRepositorySnapshot,
   ModelBalance,
   SecretKind,
@@ -16,13 +23,35 @@ import type {
   WeatherSnapshot,
 } from "../app/dashboard-types";
 import type { QuickLink } from "../app/workspace-preferences";
+import type {
+  FinanceAiApiResponse,
+  FinanceImportPreview,
+  FinanceImportSource,
+  FinanceInsightSnapshot,
+} from "../app/finance-types";
+import type { HealthAiAdviceContent } from "../app/health-types";
 
 function requireTauri() {
   if (!isTauri()) throw new Error("该功能需要在真实桌面应用中使用");
 }
 
 export const desktopApi = {
+  finance: {
+    previewImport: (path: string, source: FinanceImportSource) => {
+      requireTauri();
+      return invoke<FinanceImportPreview>("finance_preview_import", { path, source });
+    },
+    generateMonthlyReport: (snapshot: FinanceInsightSnapshot, model: string) => {
+      requireTauri();
+      return invoke<FinanceAiApiResponse>("finance_generate_monthly_report", { snapshot, model });
+    },
+  },
   deepseek: {
+    apiModels: () => { requireTauri(); return invoke<DeepSeekModel[]>("deepseek_api_list_models"); },
+    createProjectPlan: (request: { model: string; input: unknown; allowedMilestoneIds?: string[]; allowedTaskIds?: string[] }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<ProjectCreationProposal>>("deepseek_api_project_create", { request }); },
+    replanProject: (request: { model: string; input: unknown; allowedMilestoneIds: string[]; allowedTaskIds: string[] }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<ProjectReplanProposal>>("deepseek_api_project_replan", { request }); },
+    suggestNextAction: (request: { model: string; input: unknown; allowedMilestoneIds: string[]; allowedTaskIds: string[] }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<NextActionProposal>>("deepseek_api_next_action", { request }); },
+    healthAdvice: (request: { model: string; input: unknown }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<HealthAiAdviceContent>>("deepseek_api_health_advice", { request }); },
     prepare: () => { requireTauri(); return invoke<DeepSeekSnapshot>("deepseek_prepare"); },
     status: () => { requireTauri(); return invoke<DeepSeekSnapshot>("deepseek_get_status"); },
     configureModes: (options: DeepSeekModeOptions) => { requireTauri(); return invoke<DeepSeekSnapshot>("deepseek_configure_modes", options); },
