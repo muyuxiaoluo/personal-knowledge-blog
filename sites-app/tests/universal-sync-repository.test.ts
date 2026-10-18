@@ -10,6 +10,8 @@ import {
 } from "../app/data/sqlite-article-repository";
 import { UniversalSyncRepository } from "../app/data/universal-sync-repository";
 import { SqliteProjectRepository } from "../app/data/sqlite-project-repository";
+import { SqliteWorkRepository } from "../app/data/sqlite-work-repository";
+import { initialProjectSeeds } from "../app/data/project-seeds";
 import type { Article } from "../app/types";
 
 class NodeSqliteAdapter implements SqliteDatabase {
@@ -49,6 +51,43 @@ const seed: Article = {
   next: "",
   body: "正文",
 };
+
+test("focus history corrections and deletions enter the sync outbox", async () => {
+  const database = new DatabaseSync(":memory:");
+  const adapter = new NodeSqliteAdapter(database);
+  await new SqliteArticleRepository(adapter, { seedArticles: [] }).ready();
+  let now = new Date("2026-08-30T08:00:00Z");
+  const work = new SqliteWorkRepository(adapter, () => now);
+  await work.ready();
+  const sync = new UniversalSyncRepository(adapter);
+  await sync.initialize();
+  const session = await work.startSession({ label: "修正同步" });
+  now = new Date("2026-08-30T10:00:00Z");
+  await work.stopSession(session.id);
+  await work.updateSession({ id: session.id, startedAt: session.startedAt, endedAt: "2026-08-30T08:30:00Z" });
+  let pending = (await sync.listPending()).find((item) => item.id === session.id);
+  assert.equal(pending?.entityType, "focus_session");
+  assert.equal(pending?.payload.duration_seconds, 1800);
+  await work.deleteSession(session.id);
+  pending = (await sync.listPending()).find((item) => item.id === session.id);
+  assert.equal(pending?.operation, "delete");
+  database.close();
+});
+
+test("failed uploads retain their payload and can be returned to the queue", async () => {
+  const database = new DatabaseSync(":memory:");
+  const adapter = new NodeSqliteAdapter(database);
+  await new SqliteArticleRepository(adapter, { seedArticles: [seed] }).ready();
+  const sync = new UniversalSyncRepository(adapter);
+  const item = (await sync.listPending())[0];
+  await sync.markError(item.changeId, "附件连接失败");
+  assert.equal((await sync.getStatus()).errors, 1);
+  assert.equal((await sync.listPending()).length, 0);
+  await sync.retryError(item.entityType, item.id);
+  assert.deepEqual((await sync.listPending())[0], item);
+  assert.equal((await sync.getStatus()).errors, 0);
+  database.close();
+});
 
 test("captures domain mutations into one durable v3 outbox", async () => {
   const database = new DatabaseSync(":memory:");
@@ -126,7 +165,7 @@ test("round-trips standalone tasks and structured logs with null project ids", a
   const task = await sourceProjects.saveTask({
     id: "standalone-sync", projectId: null, milestoneId: null, direction: "learning", title: "给导师发消息",
     actionType: "communicate", definitionOfDone: "导师收到消息", steps: [], currentFocus: "写完并发送",
-    details: "", benefit: "", dueDate: "", status: "next", waitingFor: "", resumeAction: "", context: "phone",
+    details: "", benefit: "", dueDate: "2026-09-30", estimatedDays: 3, autoSchedulePaused: true, status: "next", waitingFor: "", resumeAction: "", context: "phone",
     sortOrder: 10, createdAt: now, updatedAt: now, completedAt: null,
   });
   const log = await sourceProjects.addLog(null, "独立行动接续点", task.id, "continuation");
@@ -135,6 +174,8 @@ test("round-trips standalone tasks and structured logs with null project ids", a
   const logChange = pending.find((item) => item.entityType === "log" && item.id === log.id);
   assert.equal(taskChange?.payload.project_id, null);
   assert.equal(taskChange?.payload.direction, "learning");
+  assert.equal(taskChange?.payload.estimated_days, 3);
+  assert.equal(taskChange?.payload.auto_schedule_paused, 1);
   assert.equal(logChange?.payload.project_id, null);
   assert.equal(logChange?.payload.task_id, task.id);
   assert.equal(logChange?.payload.kind, "continuation");
@@ -153,6 +194,44 @@ test("round-trips standalone tasks and structured logs with null project ids", a
     })),
   });
   assert.equal((await targetProjects.listStandaloneTasks())[0]?.id, task.id);
+  assert.equal((await targetProjects.listStandaloneTasks())[0]?.estimatedDays, 3);
+  assert.equal((await targetProjects.listStandaloneTasks())[0]?.autoSchedulePaused, true);
   assert.equal((await targetProjects.listTaskLogs(task.id))[0]?.kind, "continuation");
+  sourceDatabase.close(); targetDatabase.close();
+});
+
+test("round-trips structured project accumulations", async () => {
+  const sourceDatabase = new DatabaseSync(":memory:");
+  const sourceAdapter = new NodeSqliteAdapter(sourceDatabase);
+  const sourceProjects = new SqliteProjectRepository(sourceAdapter, { seedProjects: initialProjectSeeds });
+  await sourceProjects.ready();
+  const sourceSync = new UniversalSyncRepository(sourceAdapter);
+  await sourceSync.initialize();
+  const saved = await sourceProjects.saveAccumulation({
+    id: "shared-accumulation",
+    projectId: "project-life-workbench-v01",
+    milestoneId: null,
+    title: "分支需要隔离",
+    content: "已经用两个并行任务线验证上下文。下一行动只读取当前分支和共享成果。",
+    reference: "notes/branch-context",
+    createdAt: "2026-09-22T08:00:00.000Z",
+    updatedAt: "2026-09-22T08:00:00.000Z",
+  });
+  const change = (await sourceSync.listPending()).find((item) => item.entityType === "accumulation" && item.id === saved.id);
+  assert.equal(change?.payload.kind, "other");
+  assert.equal(change?.payload.milestone_id, null);
+
+  const targetDatabase = new DatabaseSync(":memory:");
+  const targetAdapter = new NodeSqliteAdapter(targetDatabase);
+  const targetProjects = new SqliteProjectRepository(targetAdapter, { seedProjects: initialProjectSeeds });
+  await targetProjects.ready();
+  const targetSync = new UniversalSyncRepository(targetAdapter);
+  await targetSync.initialize();
+  await targetSync.commit({
+    protocolVersion: 3, cursor: "3", hasMore: false, accepted: [], conflicts: [], failed: [],
+    changes: [{ entityType: "accumulation", id: change!.id, operation: "upsert", payload: change!.payload, changeId: "remote-accumulation", version: 1, deletedAt: null, updatedAt: "2026-09-22T08:00:00.000Z" }],
+  });
+  assert.equal((await targetProjects.get("project-life-workbench-v01"))?.accumulations[0]?.title, "分支需要隔离");
+  assert.match((await targetProjects.get("project-life-workbench-v01"))?.accumulations[0]?.content ?? "", /共享成果/);
   sourceDatabase.close(); targetDatabase.close();
 });

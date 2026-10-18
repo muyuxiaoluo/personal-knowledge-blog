@@ -79,6 +79,23 @@ test("stores integer cents, settings, budgets and manual expenses locally", asyn
   database.close();
 });
 
+test("calendar loads the full month beyond the transaction list limit", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new FinanceRepository(new NodeSqliteAdapter(database));
+  const records = Array.from({ length: 2001 }, (_, index) => importRecord({
+    rowNumber: index + 2, externalTransactionId: `calendar-${index}`, duplicateFingerprint: `calendar-${index}`,
+  }));
+  records.push(importRecord({ externalTransactionId: "refund", duplicateFingerprint: "refund", kind: "refund", direction: "in" }));
+  records.push(importRecord({ externalTransactionId: "next-month", duplicateFingerprint: "next-month", occurredAt: "2026-09-01T00:00:00" }));
+  await repository.confirmImport(preview(records));
+  assert.equal((await repository.listTransactions("2026-08")).length, 2000);
+  const expenses = await repository.listCalendarExpenses("2026-08");
+  assert.equal(expenses.length, 2001);
+  assert.ok(expenses.every((entry) => entry.kind === "expense" && entry.occurredAt.startsWith("2026-08")));
+  assert.equal((await repository.listCalendarExpenses("2026-09")).length, 1);
+  database.close();
+});
+
 test("rolls back settings when the matching monthly budget cannot be saved", async () => {
   const database = new DatabaseSync(":memory:");
   const repository = new FinanceRepository(new NodeSqliteAdapter(database), () => new Date("2026-08-31T02:00:00Z"));

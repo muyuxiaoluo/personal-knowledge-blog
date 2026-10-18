@@ -16,8 +16,30 @@
 .situation-summary, .situation-week { padding: 20px; border-radius: 16px; margin: 16px 0; }
 .situation-summary { background: var(--workspace-surface-strong); border: 1px solid var(--workspace-border); }
 .situation-summary p, .situation-week p, .ai-start-reason { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }
-.situation-week > button { width: 100%; text-align: left; display: grid; gap: 8px; border-bottom: 1px solid var(--workspace-border); padding: 16px 0; }
-.situation-recent { max-width: 100%; text-align: left; padding: 12px 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.situation-week > button {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 8px;
+  border: 1px solid var(--workspace-border);
+  border-radius: 12px;
+  padding: 16px;
+  background: var(--workspace-surface-strong);
+  color: inherit;
+  text-align: left;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.situation-week > button + button { margin-top: 12px; }
+.situation-week > button:hover { background: var(--workspace-surface-soft); }
+.situation-week > button > span,
+.situation-week > button > small { color: var(--text-supporting); }
+.situation-week > button > p { margin: 0; }
+.situation-recent { display: flex; align-items: center; gap: 12px; min-width: 0; margin-bottom: 12px; padding: 8px 12px; border-radius: 10px; background: var(--workspace-surface-strong); font-size: 12px; }
+.situation-recent > span { flex: 0 0 auto; color: var(--workspace-muted); }
+.situation-recent > p { flex: 1; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.situation-recent > button { flex: 0 0 auto; }
 .continuation-list { margin-bottom: 24px; }
 .continuation-list > header > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
 .activity-cell.has-situation { outline: 1px solid var(--workspace-accent, #776bc1); outline-offset: -1px; }

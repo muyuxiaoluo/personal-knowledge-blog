@@ -1,10 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "desktop",
+  "platforms": ["windows", "macOS", "linux"],
   "description": "个人工作台桌面端的最小本地权限",
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "companion-secrets:default",
     "core:window:allow-set-title",
     "autostart:allow-disable",
     "autostart:allow-enable",
@@ -14,6 +16,7 @@
     "global-shortcut:allow-is-registered",
     "global-shortcut:allow-register",
     "opener:default",
+    "notification:default",
     "sql:default",
     "sql:allow-execute",
     "updater:default"

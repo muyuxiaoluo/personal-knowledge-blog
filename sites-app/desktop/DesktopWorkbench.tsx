@@ -1,4 +1,4 @@
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   disable as disableAutostart,
@@ -32,6 +32,7 @@ import { inferNoteCategory, NOTE_CATEGORY_LABELS, NOTE_CATEGORY_OPTIONS, type No
 import { toggleMarkdownHeading } from "../app/markdown-heading";
 import type { ProjectRepository } from "../app/data/project-repository";
 import type { WorkRepository } from "../app/data/work-repository";
+import type { WorkspacePreferencesRepository } from "../app/data/workspace-preferences-repository";
 import type { SqliteAiRepository } from "../app/data/sqlite-ai-repository";
 import type { IntegrationRepository } from "../app/data/integration-repository";
 import type { DashboardRepository } from "../app/data/dashboard-repository";
@@ -55,6 +56,7 @@ import {
   sourceForCapturedResult,
 } from "../app/entertainment-capture";
 import { workspaceTitle, type QuickLink } from "../app/workspace-preferences";
+import type { HealthReminderPreferences } from "../app/reminder-preferences";
 import type { DailySituation, SituationPlanChange, TaskPlanHistory, FocusSession, TaskPlan, WeeklyFocus, WeeklyReview } from "../app/work-types";
 import { DailySituationDialog } from "./DailySituationDialog";
 import { isContinuablePlan } from "../app/action-planning";
@@ -79,6 +81,7 @@ import { formatFocusDuration } from "./focus-format";
 import { DESKTOP_THEMES, ThemeArtwork, ThemeSticker, type ThemeId } from "./DesktopThemes";
 import { DESKTOP_FONT_PRESETS, type FontPresetId } from "./DesktopTypography";
 import { desktopApi } from "./integrationApi";
+import { ObserverIndicator } from "./WorkObserverIndicator";
 
 const ProjectWorkspace = lazy(async () => ({ default: (await import("./ProjectWorkspace")).ProjectWorkspace }));
 const AiAssistantDialog = lazy(async () => ({ default: (await import("./AiAssistantDialog")).AiAssistantDialog }));
@@ -88,6 +91,8 @@ const HomeDashboard = lazy(async () => ({ default: (await import("./WorkPages"))
 const HealthPage = lazy(async () => ({ default: (await import("./HealthPage")).HealthPage }));
 const WealthPage = lazy(async () => ({ default: (await import("./WealthPage")).WealthPage }));
 const TasksPage = lazy(async () => ({ default: (await import("./WorkPages")).TasksPage }));
+const WorkObserverPage = lazy(async () => ({ default: (await import("./WorkObserverPage")).WorkObserverPage }));
+const FocusTools = lazy(async () => ({ default: (await import("./FocusTools")).FocusTools }));
 const ExplorePage = lazy(async () => ({ default: (await import("./WorkPages")).ExplorePage }));
 const InboxPage = lazy(async () => ({ default: (await import("./WorkPages")).InboxPage }));
 const ReviewPage = lazy(async () => ({ default: (await import("./WorkPages")).ReviewPage }));
@@ -96,7 +101,7 @@ const ArchivePage = lazy(async () => ({ default: (await import("./WorkPages")).A
 const NotesStyles = lazy(async () => { await import("./styles/notes-final.css"); return { default: () => null }; });
 const SettingsStyles = lazy(async () => { await import("./styles/avatar-settings.css"); return { default: () => null }; });
 
-export type DeskSection = "home" | "tasks" | "health" | "wealth" | "projects" | "notes" | "explore" | "inbox" | "review" | "archive" | "ai" | "tools" | "settings";
+export type DeskSection = "home" | "tasks" | "health" | "wealth" | "projects" | "notes" | "explore" | "inbox" | "review" | "archive" | "ai" | "tools" | "settings" | "observer";
 type UndoOffer = { message: string; run: () => Promise<void> };
 type ArticleOrganizationPatch = {
   category?: NoteCategory;
@@ -121,6 +126,7 @@ type DesktopWorkbenchProps = {
   attachmentRepository: AttachmentRepository;
   projectRepository: ProjectRepository;
   workRepository: WorkRepository;
+  preferencesRepository: WorkspacePreferencesRepository;
   aiRepository: SqliteAiRepository;
   integrationRepository: IntegrationRepository;
   dashboardRepository: DashboardRepository;
@@ -129,6 +135,7 @@ type DesktopWorkbenchProps = {
   displayName: string;
   avatarDataUrl: string;
   quickLinks: QuickLink[];
+  healthReminder: HealthReminderPreferences;
   dataRevision: number;
   onRepositoryChange?: () => void;
   onEditingStateChange?: (editing: boolean) => void;
@@ -143,6 +150,8 @@ type DesktopWorkbenchProps = {
   onSaveDisplayName: (name: string) => Promise<void>;
   onSaveAvatarDataUrl: (dataUrl: string) => Promise<void>;
   onSaveQuickLinks: (links: QuickLink[]) => Promise<void>;
+  onSaveHealthReminder: (preferences: HealthReminderPreferences) => Promise<void>;
+  onTestHealthReminder: () => Promise<void>;
   startupActiveFocusId: string | null;
 };
 
@@ -163,6 +172,7 @@ const sections: Array<{
   { id: "review", label: "回顾", icon: "review", group: "knowledge" },
   { id: "archive", label: "归档", icon: "archive", group: "knowledge" },
   { id: "ai", label: "AI 助手", icon: "ai", group: "tools" },
+  { id: "observer", label: "工作记录", icon: "review", group: "tools" },
   { id: "tools", label: "工具中心", icon: "tools", group: "tools" },
 ];
 
@@ -204,6 +214,7 @@ export function DesktopWorkbench({
   attachmentRepository,
   projectRepository,
   workRepository,
+  preferencesRepository,
   aiRepository,
   integrationRepository,
   dashboardRepository,
@@ -212,6 +223,7 @@ export function DesktopWorkbench({
   displayName,
   avatarDataUrl,
   quickLinks,
+  healthReminder,
   dataRevision,
   onRepositoryChange,
   onEditingStateChange,
@@ -226,6 +238,8 @@ export function DesktopWorkbench({
   onSaveDisplayName,
   onSaveAvatarDataUrl,
   onSaveQuickLinks,
+  onSaveHealthReminder,
+  onTestHealthReminder,
   startupActiveFocusId,
 }: DesktopWorkbenchProps) {
   const confirm = useConfirmDialog();
@@ -239,6 +253,8 @@ export function DesktopWorkbench({
   const [situationDate, setSituationDate] = useState<string | null>(null);
   const [activeSession, setActiveSession] = useState<FocusSession | null>(null);
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
+  const [focusEditorSession, setFocusEditorSession] = useState<FocusSession | null>(null);
+  const [focusHistoryOpen, setFocusHistoryOpen] = useState(false);
   const [weeklyFocus, setWeeklyFocus] = useState<WeeklyFocus | null>(null);
   const [weeklyReview, setWeeklyReview] = useState<WeeklyReview | null>(null);
   const [previousWeeklyReview, setPreviousWeeklyReview] = useState<WeeklyReview | null>(null);
@@ -255,7 +271,7 @@ export function DesktopWorkbench({
   const [batchIds, setBatchIds] = useState<Set<string>>(new Set());
   const [requestedProjectId, setRequestedProjectId] = useState<string | null>(null);
   const [requestedTaskId, setRequestedTaskId] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedArticle, setSelectedArticle] = useState<StoredArticle | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -265,6 +281,8 @@ export function DesktopWorkbench({
   const [appending, setAppending] = useState(false);
   const [draft, setDraft] = useState<Article>({ ...emptyDraft });
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
+  const [expenseCaptureRequested, setExpenseCaptureRequested] = useState(false);
+  const [healthReminderPrompt, setHealthReminderPrompt] = useState("");
   const [aiResponsePending, setAiResponsePending] = useState(false);
   const [quickText, setQuickText] = useState("");
   const [message, setMessage] = useState("");
@@ -289,6 +307,39 @@ export function DesktopWorkbench({
     return () => {
       window.clearInterval(timer);
       window.removeEventListener("focus", refreshDate);
+    };
+  }, []);
+
+  useEffect(() => {
+    const openHealth = () => setSection("health");
+    const openExpense = () => {
+      setSection("wealth");
+      setExpenseCaptureRequested(true);
+    };
+    let unlistenHealth: UnlistenFn | undefined;
+    let unlistenExpense: UnlistenFn | undefined;
+    let unlistenReminder: UnlistenFn | undefined;
+    let cancelled = false;
+    const showPendingHealthReminder = async (fallback = "") => {
+      const pending = await invoke<{ body: string } | null>("take_pending_health_reminder").catch(() => null);
+      const body = pending?.body || fallback;
+      if (!cancelled && body) setHealthReminderPrompt(body);
+    };
+    window.addEventListener("mind-garden:quick-expense", openExpense);
+    void listen("open-health-record", openHealth).then((dispose) => { unlistenHealth = dispose; });
+    void listen("open-expense-capture", openExpense).then((dispose) => { unlistenExpense = dispose; });
+    void listen<{ body: string }>("health-reminder-due", ({ payload }) => {
+      void showPendingHealthReminder(payload.body);
+    }).then((dispose) => {
+      unlistenReminder = dispose;
+      void showPendingHealthReminder();
+    });
+    return () => {
+      cancelled = true;
+      window.removeEventListener("mind-garden:quick-expense", openExpense);
+      unlistenHealth?.();
+      unlistenExpense?.();
+      unlistenReminder?.();
     };
   }, []);
 
@@ -443,10 +494,25 @@ export function DesktopWorkbench({
 
   useEffect(() => {
     if (!dataRevision) return;
+    void Promise.all([refreshProjects(), refreshWork()]).catch((error) => {
+      showMessage(error instanceof Error ? error.message : "同步后无法刷新行动");
+    });
     void refreshArticles().catch((error) => {
       showMessage(error instanceof Error ? error.message : "同步后无法刷新笔记列表");
     });
-  }, [dataRevision, refreshArticles, showMessage]);
+    const selectedArticleId = selectedArticle?.id;
+    if (!selectedArticleId) return;
+    let active = true;
+    void repository.get(selectedArticleId)
+      .then((article) => {
+        if (!active) return;
+        setSelectedArticle((current) => current?.id === selectedArticleId ? article : current);
+      })
+      .catch((error) => {
+        if (active) showMessage(error instanceof Error ? error.message : "同步后无法刷新当前笔记");
+      });
+    return () => { active = false; };
+  }, [dataRevision, refreshArticles, refreshProjects, refreshWork, repository, selectedArticle?.id, showMessage]);
 
   useEffect(() => {
     const openCapture = () => setQuickCaptureOpen(true);
@@ -465,7 +531,7 @@ export function DesktopWorkbench({
       if (event.key === "Escape") {
         if (document.querySelector(".update-backdrop, .account-backdrop")) return;
         if (quickCaptureOpen) closeQuickCapture();
-        else if (selectedId || editing) requestCloseDocument();
+        else if (selectedArticle || editing) requestCloseDocument();
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && editing) {
@@ -523,10 +589,12 @@ export function DesktopWorkbench({
     return [...projectTasks, ...independentTasks];
   }, [plans, projectDetails, standaloneTasks, today]);
 
-  const selected = useMemo(
-    () => articles.find((article) => article.id === selectedId) ?? null,
-    [articles, selectedId],
-  );
+  useEffect(() => {
+    if (loading) return;
+    void workRepository.autoScheduleDueTasks(today).then((count) => {
+      if (count > 0) return refreshWork();
+    }).catch((error) => showMessage(error instanceof Error ? error.message : "无法自动安排今日行动"));
+  }, [loading, today, workspaceTasks, workRepository, refreshWork, showMessage]);
 
   const inboxCount = useMemo(() => articles.filter(isThoughtInboxArticle).length, [articles]);
   const noteArticles = useMemo(() => {
@@ -563,6 +631,7 @@ export function DesktopWorkbench({
     review: null,
     archive: projects.filter((project) => project.status === "completed").length + workspaceTasks.filter((task) => task.status === "done" || task.status === "cancelled").length,
     ai: null,
+    observer: null,
     tools: null,
     settings: null,
   };
@@ -583,7 +652,7 @@ export function DesktopWorkbench({
       setProjectEditing(false);
     }
     setSection(next);
-    setSelectedId(null);
+    setSelectedArticle(null);
     setOrganizeId(null);
     setEditing(false);
     setQuery("");
@@ -604,8 +673,7 @@ export function DesktopWorkbench({
     try {
       const hydrated = await hydrateArticle(article);
       setOrganizeId(null);
-      setArticles((current) => current.map((item) => item.id === hydrated.id ? hydrated : item));
-      setSelectedId(hydrated.id);
+      setSelectedArticle(hydrated);
       setDraft(toEditableArticle(hydrated));
       setDraftDirty(false);
       setEditing(false);
@@ -624,27 +692,34 @@ export function DesktopWorkbench({
 
   function startNewArticle() {
     setOrganizeId(null);
-    setSelectedId(null);
+    setSelectedArticle(null);
     setDraft({ ...emptyDraft, tags: [], source: ["自写"], created: today });
     setDraftDirty(false);
     setEditing(true);
     setAppending(false);
   }
 
-  function startEditing(article: StoredArticle, append = false) {
-    const next = toEditableArticle(article);
-    if (append) next.body = `${next.body.trim()}\n\n## ${today} · 追加想法\n\n`;
-    setDraft(next);
-    setDraftDirty(false);
-    setEditing(true);
-    setAppending(append);
+  async function startEditing(article: StoredArticle, append = false) {
+    try {
+      const hydrated = await repository.get(article.id);
+      if (!hydrated) throw new Error("这篇笔记已经不存在");
+      const next = toEditableArticle(hydrated);
+      if (append) next.body = `${next.body.trim()}\n\n## ${today} · 追加想法\n\n`;
+      setSelectedArticle(hydrated);
+      setDraft(next);
+      setDraftDirty(false);
+      setEditing(true);
+      setAppending(append);
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "无法读取笔记正文");
+    }
   }
 
   function closeDocument() {
     setDraftDirty(false);
     setEditing(false);
     setAppending(false);
-    setSelectedId(null);
+    setSelectedArticle(null);
     setDraft({ ...emptyDraft });
   }
 
@@ -666,9 +741,8 @@ export function DesktopWorkbench({
     try {
       const saved = await repository.save(article);
       await attachmentRepository.replaceArticleReferences(saved.id, saved.body);
+      setSelectedArticle((current) => selectAfterSave || current?.id === saved.id ? saved : current);
       await refreshArticles();
-      setArticles((current) => current.map((item) => item.id === saved.id ? saved : item));
-      if (selectAfterSave) setSelectedId(saved.id);
       onRepositoryChange?.();
       showMessage(success);
       return saved;
@@ -867,18 +941,22 @@ export function DesktopWorkbench({
   }
 
   async function planToday(task: WorkspaceTask) {
+    if (task.autoSchedulePaused) await workRepository.resumeAutoSchedule(task.id);
     await workRepository.savePlan({
       taskId: task.id,
       plannedDate: today,
+      source: "manual",
+      skipAutoDate: "",
       priority: task.plan?.priority || "normal",
       estimateMinutes: task.plan?.estimateMinutes || 0,
       sortOrder: task.plan?.sortOrder || workspaceTasks.filter((item) => item.plan?.plannedDate === today).length,
       updatedAt: "",
     });
-    await refreshWork();
+    await Promise.all([refreshProjects(), refreshWork()]);
     offerUndo("已安排到今天", async () => {
       await workRepository.removePlan(task.id);
-      await refreshWork();
+      if (task.autoSchedulePaused) await workRepository.pauseAutoSchedule(task.id, today);
+      await Promise.all([refreshProjects(), refreshWork()]);
     });
   }
 
@@ -886,23 +964,33 @@ export function DesktopWorkbench({
     const previous = task.plan;
     if (!previous) return;
     const moveToPending = previous.plannedDate === today;
-    if (moveToPending) await workRepository.savePlan({ ...previous, plannedDate: "" });
+    const pauseAutomatic = moveToPending && Boolean(task.dueDate && task.estimatedDays);
+    if (pauseAutomatic) await workRepository.pauseAutoSchedule(task.id, today);
+    else if (moveToPending) await workRepository.savePlan({ ...previous, plannedDate: "" });
     else await workRepository.removePlan(task.id);
-    await refreshWork();
+    await Promise.all([refreshProjects(), refreshWork()]);
     offerUndo(moveToPending ? "已移入待继续，有空再做" : "已暂时收起，可从已有行动找回", async () => {
+      if (pauseAutomatic) await workRepository.resumeAutoSchedule(task.id);
       await workRepository.savePlan(previous);
-      await refreshWork();
+      await Promise.all([refreshProjects(), refreshWork()]);
     });
   }
 
-  async function startFocus(task: WorkspaceTask) {
+  async function resumeAutoSchedule(task: WorkspaceTask) {
+    await workRepository.resumeAutoSchedule(task.id);
+    await refreshProjects();
+  }
+
+  async function startFocus(task: Pick<ProjectTask, "id" | "projectId" | "title">) {
     try {
       const session = await workRepository.startSession({ taskId: task.id, projectId: task.projectId, label: task.title });
       setActiveSession(session);
       setFocusSessions((current) => [session, ...current.filter((item) => item.id !== session.id)]);
       showMessage("已经开始记录这次投入。 ");
+      return true;
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "无法开始专注");
+      return false;
     }
   }
 
@@ -968,6 +1056,7 @@ export function DesktopWorkbench({
       await workRepository.savePlan({
         taskId: task.id,
         plannedDate: "",
+        skipAutoDate: today,
         priority: task.plan?.priority || "normal",
         estimateMinutes: task.plan?.estimateMinutes || 0,
         sortOrder: task.plan?.sortOrder || 0,
@@ -1031,7 +1120,8 @@ export function DesktopWorkbench({
       details: input.details,
       benefit: "",
       dueDate: input.dueDate,
-      status: "later",
+      estimatedDays: input.estimatedDays || 0,
+      status: input.status || "later",
       waitingFor: "",
       resumeAction: "",
       context: "anywhere",
@@ -1056,6 +1146,23 @@ export function DesktopWorkbench({
 
   async function addTask(input: NewActionInput) {
     return Boolean(await createTask(input));
+  }
+
+  async function quickStart(title: string) {
+    const saved = await createTask({
+      projectId: null,
+      milestoneId: null,
+      direction: "uncategorized",
+      title,
+      definitionOfDone: `完成“${title}”眼前这一小步`,
+      steps: [],
+      currentFocus: title,
+      details: "",
+      dueDate: "",
+      plannedToday: true,
+      keepAvailable: true,
+    });
+    return saved ? startFocus(saved) : false;
   }
 
   async function saveWeeklyFocus(primaryOutcome: string, secondaryOutcome: string) {
@@ -1242,7 +1349,7 @@ export function DesktopWorkbench({
     await persist({ ...article, branch: archived ? "已归档" : "收藏中" }, archived ? "收藏已经归档。" : "收藏已经恢复。", false);
   }
 
-  const documentMode = Boolean(selected || editing);
+  const documentMode = Boolean(selectedArticle || editing);
   const rootClass = [
     "desktop-workbench",
     "workbench-v2",
@@ -1259,7 +1366,9 @@ export function DesktopWorkbench({
     onCloseToday: closeToday,
     onPlanToday: planToday,
     onRemoveFromToday: removeFromToday,
+    onResumeAutoSchedule: resumeAutoSchedule,
     onStartFocus: startFocus,
+    onQuickStart: quickStart,
     onStopFocus: stopFocus,
     activeSession,
     focusSessions,
@@ -1282,7 +1391,9 @@ export function DesktopWorkbench({
 
       <ThemeArtwork themeId={themeId} section={section} documentMode={documentMode} />
 
-      {activeSession && <GlobalFocusBar session={activeSession} task={workspaceTasks.find((task) => task.id === activeSession.taskId) ?? null} onShow={() => activeSession.taskId ? openTask(activeSession.taskId) : switchSection("tasks")} onPause={() => void stopFocus()} />}
+      {activeSession && <GlobalFocusBar session={activeSession} task={workspaceTasks.find((task) => task.id === activeSession.taskId) ?? null} onShow={() => activeSession.taskId ? openTask(activeSession.taskId) : switchSection("tasks")} onPause={() => void stopFocus()} onCorrect={() => setFocusEditorSession(activeSession)} />}
+      <Suspense fallback={null}><FocusTools activeSession={activeSession} repository={workRepository} preferencesRepository={preferencesRepository} editorSession={focusEditorSession} onEdit={setFocusEditorSession} historyOpen={focusHistoryOpen} onCloseHistory={() => setFocusHistoryOpen(false)} onChanged={refreshWork} onMessage={showMessage} /></Suspense>
+      <ObserverIndicator onOpen={() => void switchSection("observer")} />
 
       <Suspense fallback={<section className="workspace-page-loading"><span>个人工作台</span><strong>正在打开这一页…</strong></section>}>
       {(documentMode || section === "notes") && <NotesStyles />}
@@ -1302,15 +1413,15 @@ export function DesktopWorkbench({
               onCancel={requestCloseDocument}
               onSave={() => void saveDraft()}
             />
-          ) : selected ? (
+          ) : selectedArticle ? (
             <ArticleReader
-              article={selected}
+              article={selectedArticle}
               attachmentRepository={attachmentRepository}
               saving={saving}
               onBack={closeDocument}
-              onEdit={() => startEditing(selected)}
-              onAppend={() => startEditing(selected, true)}
-              onRemove={() => void removeArticle(selected)}
+              onEdit={() => void startEditing(selectedArticle)}
+              onAppend={() => void startEditing(selectedArticle, true)}
+              onRemove={() => void removeArticle(selectedArticle)}
             />
           ) : null}
         </section>
@@ -1355,17 +1466,18 @@ export function DesktopWorkbench({
         /></>
       ) : (
         <section className="workspace-main-stage">
-          {section === "home" && <HomeDashboard dailySituations={dailySituations} onSupplementDay={setSituationDate} today={today} tasks={workspaceTasks} articles={articles} weeklyFocus={weeklyFocus} integrationRepository={integrationRepository} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} calendarEvents={calendarEvents} restDays={restDays} healthProfile={healthProfile} healthToday={healthToday} healthMeals={healthMealsToday} onOpenHealth={() => switchSection("health")} onOpenTools={() => switchSection("tools")} onSaveWeeklyFocus={saveWeeklyFocus} onSaveDashboardPreferences={saveDashboardPreferences} onSaveCalendarEvent={saveCalendarEvent} onDeleteCalendarEvent={deleteCalendarEvent} onSetRestDay={setRestDay} onSaveSource={saveExternalSource} onNotice={showMessage} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTask={openTask} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
-          {section === "tasks" && <TasksPage onSupplementDay={setSituationDate} dailySituations={dailySituations} today={today} tasks={workspaceTasks} projects={projects} projectDetails={projectDetails} initialTaskId={requestedTaskId} onTaskOpened={() => setRequestedTaskId(null)} onAddTask={addTask} onRemoveTask={removeTask} onOpenProject={openProject} {...taskActions} />}
+          {section === "home" && <HomeDashboard dailySituations={dailySituations} onSupplementDay={setSituationDate} today={today} tasks={workspaceTasks} articles={articles} articleRepository={repository} weeklyFocus={weeklyFocus} integrationRepository={integrationRepository} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} calendarEvents={calendarEvents} restDays={restDays} healthProfile={healthProfile} healthToday={healthToday} healthMeals={healthMealsToday} onOpenHealth={() => switchSection("health")} onOpenTools={() => switchSection("tools")} onSaveWeeklyFocus={saveWeeklyFocus} onSaveDashboardPreferences={saveDashboardPreferences} onSaveCalendarEvent={saveCalendarEvent} onDeleteCalendarEvent={deleteCalendarEvent} onSetRestDay={setRestDay} onSaveSource={saveExternalSource} onNotice={showMessage} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTask={openTask} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
+          {section === "tasks" && <TasksPage onOpenFocusHistory={() => setFocusHistoryOpen(true)} onSupplementDay={setSituationDate} dailySituations={dailySituations} today={today} tasks={workspaceTasks} projects={projects} projectDetails={projectDetails} initialTaskId={requestedTaskId} onTaskOpened={() => setRequestedTaskId(null)} onAddTask={addTask} onRemoveTask={removeTask} onOpenProject={openProject} {...taskActions} />}
+          {section === "observer" && <WorkObserverPage tasks={workspaceTasks} activeSession={activeSession} onOpenTask={openTask} />}
           {section === "health" && <HealthPage repository={healthRepository} today={today} onChanged={() => void refreshHealth()} onNotice={showMessage} onOpenAiSettings={() => switchSection("settings")} />}
-          {section === "wealth" && <WealthPage repository={financeRepository} projects={projects} today={today} onNotice={showMessage} />}
+          {section === "wealth" && <WealthPage repository={financeRepository} projects={projects} today={today} onNotice={showMessage} quickCaptureRequested={expenseCaptureRequested} onQuickCaptureOpened={() => setExpenseCaptureRequested(false)} />}
           {section === "explore" && <ExplorePage articles={articles} projects={projects} projectDetails={projectDetails} onSaveLink={saveExternalLink} onArchive={archiveSource} onDelete={removeArticle} onOpenArticle={openArticle} onOpenProject={openProject} onOrganize={organizeSource} />}
           {section === "inbox" && <InboxPage articles={articles} projects={projects} onOpenArticle={openArticle} onNewCapture={() => setQuickCaptureOpen(true)} onMoveArticle={moveInboxArticle} onConvertToAction={convertInboxToAction} onConvertToProposal={convertInboxToProposal} onDelete={removeArticle} />}
           {section === "review" && <ReviewPage dailySituations={dailySituations} onSupplementDay={setSituationDate} projects={projects} projectDetails={projectDetails} articles={articles} tasks={workspaceTasks} weeklyFocus={weeklyFocus} weeklyReview={weeklyReview} previousWeeklyReview={previousWeeklyReview} onSaveWeeklyReview={saveWeeklyReview} onOpenTask={openTask} />}
           {section === "archive" && <ArchivePage projects={projects} tasks={workspaceTasks} focusSessions={focusSessions} onOpenProject={openProject} onOpenTask={openTask} onRestoreTask={restoreTask} />}
           {section === "ai" && <AiAssistantDialog open repository={aiRepository} embedded onPendingChange={setAiResponsePending} />}
           {section === "tools" && <ToolCenterPage repository={integrationRepository} quickLinks={quickLinks} onSaveQuickLinks={onSaveQuickLinks} onOpenAi={() => switchSection("ai")} onOpenAiSettings={() => switchSection("settings")} />}
-          {section === "settings" && <><SettingsStyles /><SettingsPage displayName={displayName} avatarDataUrl={avatarDataUrl} themeId={themeId} fontPresetId={fontPresetId} backingUp={backingUp} dashboardPreferences={dashboardPreferences} onSaveDashboardPreferences={saveDashboardPreferences} onSaveDisplayName={onSaveDisplayName} onSaveAvatarDataUrl={onSaveAvatarDataUrl} onThemeChange={onThemeChange} onFontPresetChange={onFontPresetChange} onCreateBackup={onCreateBackup} onRestoreBackup={onRestoreBackup} /></>}
+          {section === "settings" && <><SettingsStyles /><SettingsPage displayName={displayName} avatarDataUrl={avatarDataUrl} themeId={themeId} fontPresetId={fontPresetId} backingUp={backingUp} dashboardPreferences={dashboardPreferences} healthReminder={healthReminder} onSaveDashboardPreferences={saveDashboardPreferences} onSaveHealthReminder={onSaveHealthReminder} onTestHealthReminder={onTestHealthReminder} onSaveDisplayName={onSaveDisplayName} onSaveAvatarDataUrl={onSaveAvatarDataUrl} onThemeChange={onThemeChange} onFontPresetChange={onFontPresetChange} onCreateBackup={onCreateBackup} onRestoreBackup={onRestoreBackup} /></>}
         </section>
       )}
       </Suspense>
@@ -1383,6 +1495,17 @@ export function DesktopWorkbench({
             }} placeholder="一句念头、一段感受，或突然想写下的东西……" />
             <footer><span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 保存</span><Button variant="primary" disabled={saving || !quickText.trim()} type="submit">{saving ? "正在保存…" : "放进待整理"}</Button></footer>
           </form>
+        </div>
+      )}
+
+      {healthReminderPrompt && (
+        <div className="capture-backdrop" role="presentation">
+          <section className="capture-dialog health-reminder-dialog" role="alertdialog" aria-modal="true" aria-labelledby="health-reminder-title">
+            <header><span>每日健康提醒</span></header>
+            <h2 id="health-reminder-title">今晚还差一点记录</h2>
+            <p>{healthReminderPrompt}</p>
+            <footer><Button variant="secondary" type="button" onClick={() => setHealthReminderPrompt("")}>稍后再说</Button><Button variant="primary" type="button" onClick={() => { setHealthReminderPrompt(""); setSection("health"); }}>现在记录</Button></footer>
+          </section>
         </div>
       )}
 
@@ -1438,11 +1561,12 @@ function WorkbenchSidebar({
   );
 }
 
-function GlobalFocusBar({ session, task, onShow, onPause }: {
+function GlobalFocusBar({ session, task, onShow, onPause, onCorrect }: {
   session: FocusSession;
   task: WorkspaceTask | null;
   onShow: () => void;
   onPause: () => void;
+  onCorrect: () => void;
 }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -1451,7 +1575,7 @@ function GlobalFocusBar({ session, task, onShow, onPause }: {
     return () => window.clearInterval(timer);
   }, [session.id]);
   const elapsed = Math.max(0, Math.floor((now - new Date(session.startedAt).getTime()) / 1_000));
-  return <aside className="global-focus-bar" aria-live="polite"><button className="global-focus-main" onClick={onShow}><i /><span><small>正在投入{task?.projectTitle ? ` · ${task.projectTitle}` : ""}</small><strong>{task ? task.title : session.label}</strong></span><time>{formatFocusDuration(elapsed, true)}</time></button><Button variant="secondary" type="button" className="global-focus-pause" onClick={onPause}>Ⅱ 暂停</Button></aside>;
+  return <aside className="global-focus-bar" aria-live="polite"><button className="global-focus-main" onClick={onShow}><i /><span><small>正在投入{task?.projectTitle ? ` · ${task.projectTitle}` : ""}</small><strong>{task ? task.title : session.label}</strong></span><time>{formatFocusDuration(elapsed, true)}</time></button><Button variant="secondary" type="button" className="global-focus-pause" onClick={onPause}>Ⅱ 暂停</Button><Button variant="secondary" type="button" className="global-focus-pause" onClick={onCorrect}>刚才已结束</Button></aside>;
 }
 
 const avatarImageTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -1612,14 +1736,17 @@ function AvatarCropDialog({ source, busy, message, onCancel, onConfirm }: {
   );
 }
 
-function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backingUp, dashboardPreferences, onSaveDashboardPreferences, onSaveDisplayName, onSaveAvatarDataUrl, onThemeChange, onFontPresetChange, onCreateBackup, onRestoreBackup }: {
+function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backingUp, dashboardPreferences, healthReminder, onSaveDashboardPreferences, onSaveHealthReminder, onTestHealthReminder, onSaveDisplayName, onSaveAvatarDataUrl, onThemeChange, onFontPresetChange, onCreateBackup, onRestoreBackup }: {
   displayName: string;
   avatarDataUrl: string;
   themeId: ThemeId;
   fontPresetId: FontPresetId;
   backingUp: boolean;
   dashboardPreferences: DashboardPreferences;
+  healthReminder: HealthReminderPreferences;
   onSaveDashboardPreferences: (preferences: DashboardPreferences) => Promise<void>;
+  onSaveHealthReminder: (preferences: HealthReminderPreferences) => Promise<void>;
+  onTestHealthReminder: () => Promise<void>;
   onThemeChange: (themeId: ThemeId) => void;
   onFontPresetChange: (fontPresetId: FontPresetId) => void;
   onCreateBackup: () => void;
@@ -1639,8 +1766,12 @@ function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backi
   const [autostartOn, setAutostartOn] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(false);
   const [autostartMessage, setAutostartMessage] = useState("");
+  const [reminderTime, setReminderTime] = useState(healthReminder.time);
+  const [reminderBusy, setReminderBusy] = useState(false);
+  const [reminderMessage, setReminderMessage] = useState("");
 
   useEffect(() => setNameDraft(displayName), [displayName]);
+  useEffect(() => setReminderTime(healthReminder.time), [healthReminder.time]);
 
   async function saveName(event: FormEvent) {
     event.preventDefault();
@@ -1786,6 +1917,34 @@ function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backi
     }
   }
 
+  async function saveHealthReminder(next: HealthReminderPreferences, successMessage: string) {
+    if (reminderBusy) return;
+    setReminderBusy(true);
+    setReminderMessage("");
+    try {
+      await onSaveHealthReminder(next);
+      setReminderMessage(successMessage);
+    } catch (error) {
+      setReminderMessage(error instanceof Error ? error.message : "提醒设置未保存，请稍后重试。");
+    } finally {
+      setReminderBusy(false);
+    }
+  }
+
+  async function testHealthReminder() {
+    if (reminderBusy) return;
+    setReminderBusy(true);
+    setReminderMessage("");
+    try {
+      await onTestHealthReminder();
+      setReminderMessage("测试提醒已显示；若系统通知已授权，也会同步发送。");
+    } catch (error) {
+      setReminderMessage(error instanceof Error ? error.message : "测试提醒发送失败，请稍后重试。");
+    } finally {
+      setReminderBusy(false);
+    }
+  }
+
   function saveProxySettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const error = validateUpdateProxyPort(updateProxyPort);
@@ -1897,6 +2056,39 @@ function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backi
             </div>
           </div>
           <p className="settings-toggle-message" id="settings-autostart-message" role="status">{autostartMessage}</p>
+        </section>
+        <section className="workspace-card settings-section settings-reminder-section">
+          <header><span>提醒</span><h2>少漏记一点</h2><p>到点后先检查当天记录；睡眠和活动都已填写时不会打扰你。</p></header>
+          <div className="settings-toggle-row">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={healthReminder.enabled}
+              disabled={reminderBusy}
+              className={healthReminder.enabled ? "settings-switch on" : "settings-switch"}
+              onClick={() => void saveHealthReminder(
+                { enabled: !healthReminder.enabled, time: reminderTime },
+                healthReminder.enabled ? "每日健康提醒已关闭。" : `每日 ${reminderTime} 提醒已开启。`,
+              )}
+              aria-describedby="settings-reminder-message"
+            >
+              <i />
+            </button>
+            <div>
+              <strong>{reminderBusy ? "正在保存…" : healthReminder.enabled ? `每天 ${healthReminder.time}` : "已关闭"}</strong>
+              <small>应用需在运行或系统托盘中；建议同时开启上方的开机自启动。</small>
+            </div>
+          </div>
+          <div className="settings-reminder-actions">
+            <label htmlFor="settings-health-reminder-time"><span>提醒时间</span><input id="settings-health-reminder-time" type="time" value={reminderTime} onChange={(event) => { setReminderTime(event.target.value); setReminderMessage(""); }} /></label>
+            <Button variant="secondary" type="button" disabled={reminderBusy || !reminderTime} onClick={() => void saveHealthReminder({ ...healthReminder, time: reminderTime }, "提醒时间已保存。")}>保存时间</Button>
+            <Button variant="quiet" type="button" disabled={reminderBusy} onClick={() => void testHealthReminder()}>发送测试提醒</Button>
+          </div>
+          <div className="settings-expense-capture-note">
+            <strong>消费发生后，按 Ctrl + Shift + M</strong>
+            <p>会直接打开“补记一笔消费”；托盘菜单也有同样入口。应用不会读取短信或支付通知，因此不会申请高敏感权限，也不会误判转账、退款。</p>
+          </div>
+          <p className="settings-toggle-message" id="settings-reminder-message" role="status">{reminderMessage}</p>
         </section>
         <AiModelSettingsSection />
         <DashboardSettingsSection preferences={dashboardPreferences} onSave={onSaveDashboardPreferences} />
@@ -2058,6 +2250,12 @@ function NotesWorkspace({ articles, projects, counts, loading, query, view, batc
   onBatchOrganize: (patch: { category?: NoteCategory; addTag?: string; removeTag?: string }) => void;
 }) {
   const [helpOpen, setHelpOpen] = useState(false);
+  const helpDialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = helpDialog.current;
+    if (helpOpen) dialog?.showModal();
+    else dialog?.close();
+  }, [helpOpen]);
   const [batchTag, setBatchTag] = useState("");
   const selectedVisibleCount = articles.filter((article) => batchIds.has(article.id)).length;
   return (
@@ -2065,7 +2263,7 @@ function NotesWorkspace({ articles, projects, counts, loading, query, view, batc
       <section className="notes-filter-pane">
         <header><div><span>个人笔记</span><Button variant="ghost" size="small" iconOnly type="button" className="notes-help-toggle" aria-label="查看笔记分类说明" aria-expanded={helpOpen} onClick={() => setHelpOpen((value) => !value)}>?</Button></div><h1>笔记</h1><p>按以后重读它的原因，选择一个主分类。</p></header>
         <nav>{noteCategoryViews.map((item) => <button className={view === item.id ? "active" : ""} key={item.id} onClick={() => onView(item.id)}><span>{item.label}</span><small>{counts[item.id] ?? 0}</small></button>)}</nav>
-        {helpOpen && <aside className="notes-help-popover" role="dialog" aria-label="笔记分类说明"><header><strong>怎样整理笔记</strong><Button variant="secondary" size="small" iconOnly type="button" aria-label="关闭说明" onClick={() => setHelpOpen(false)}>×</Button></header><p>每篇笔记只选一个主分类；家庭、沟通、写作等具体主题用自由标签表达。</p><dl><div><dt>主分类</dt><dd>思考感悟、经历记录、学习整理、经验复盘或随手记。</dd></div><div><dt>自由标签</dt><dd>完全可选，只添加以后真的可能搜索的关键词。</dd></div><div><dt>内容边界</dt><dd>要完成的事情放进今日行动；尚未消化的外部资料放进探索库。</dd></div></dl></aside>}
+        <dialog ref={helpDialog} className="notes-help-popover" aria-label="笔记分类说明" onClose={() => setHelpOpen(false)} onClick={event => { if (event.target === event.currentTarget) setHelpOpen(false); }}><header><strong>怎样整理笔记</strong><Button variant="ghost" size="small" iconOnly type="button" aria-label="关闭说明" onClick={() => setHelpOpen(false)}>×</Button></header><p>每篇笔记选一个主分类，具体主题用标签补充。</p><dl><div><dt>主分类</dt><dd>按重读的目的选择：思考感悟、经历记录、学习整理、经验复盘或随手记。</dd></div><div><dt>自由标签</dt><dd>可选，添加以后可能搜索的关键词，如家庭、沟通、写作。</dd></div><div><dt>放在哪里</dt><dd>要做的事放进今日行动；待消化的外部资料放进探索库。</dd></div></dl></dialog>
       </section>
       <section className={`notes-list-stage${organizingArticle ? " has-organizer" : ""}`}>
         <div className="notes-list-content">

@@ -16,9 +16,10 @@ export type HealthProfile = {
 
 export type HealthDailyLog = {
   date: string;
+  sleepMinutes: number | null;
   sleepStart: string;
   sleepEnd: string;
-  awakeMinutes: number;
+  awakeMinutes: number | null;
   sleepQuality: number | null;
   energyLevel: number | null;
   steps: number | null;
@@ -80,9 +81,10 @@ export const emptyHealthProfile: HealthProfile = {
 export function emptyHealthDailyLog(date: string): HealthDailyLog {
   return {
     date,
+    sleepMinutes: null,
     sleepStart: "",
     sleepEnd: "",
-    awakeMinutes: 0,
+    awakeMinutes: null,
     sleepQuality: null,
     energyLevel: null,
     steps: null,

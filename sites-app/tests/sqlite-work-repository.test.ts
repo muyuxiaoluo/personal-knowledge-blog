@@ -121,3 +121,25 @@ test("persists weekly focus, weekly calibration, and legacy daily closeout", asy
   assert.equal(closeouts.length, 1);
   assert.equal(closeouts[0]?.tomorrow, "连续使用验证");
 });
+
+test("repairs completed focus records, recalculates duration and guards active records", async () => {
+  let now = new Date("2026-08-11T01:00:00Z");
+  const repository = new SqliteWorkRepository(new NodeSqliteAdapter(), () => now);
+  const session = await repository.startSession({ taskId: "repair-task", label: "实际投入" });
+  now = new Date("2026-08-11T04:00:00Z");
+  await assert.rejects(() => repository.updateSession({ id: session.id, startedAt: session.startedAt, endedAt: "2026-08-11T02:00:00Z" }), /请先暂停/);
+  await assert.rejects(() => repository.deleteSession(session.id), /仍在投入中/);
+  assert.equal((await repository.getActiveSession())?.id, session.id);
+  await repository.stopSession(session.id);
+  const repaired = await repository.updateSession({ id: session.id, startedAt: "2026-08-11T01:10:00Z", endedAt: "2026-08-11T01:40:00Z" });
+  assert.equal(repaired.durationSeconds, 1800);
+  assert.equal(repaired.taskId, "repair-task");
+  assert.equal((await repository.listSessions())[0].durationSeconds, 1800);
+  for (const endedAt of ["2026-08-11T01:09:00Z", "2026-08-11T01:10:00Z", "2026-08-11T04:01:00Z", "invalid"]) {
+    await assert.rejects(() => repository.updateSession({ id: session.id, startedAt: repaired.startedAt, endedAt }), /结束时间必须/);
+  }
+  assert.equal((await repository.listSessions())[0].durationSeconds, 1800);
+  await repository.deleteSession(session.id);
+  assert.deepEqual(await repository.listSessions(), []);
+  await assert.rejects(() => repository.updateSession({ id: session.id, startedAt: repaired.startedAt, endedAt: repaired.endedAt! }), /没有找到/);
+});

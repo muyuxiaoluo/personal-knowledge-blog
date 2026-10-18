@@ -1,4 +1,6 @@
 import "./styles/wealth.css";
+import { WealthCalendar } from "./WealthCalendar";
+import { FinanceClassificationGuide, FinanceGoalSummary, FinanceReportContent } from "./WealthReport";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { LIFE_DOMAIN_OPTIONS, type LifeDomain } from "../app/domain-taxonomy";
@@ -35,7 +37,7 @@ import { Button, SelectMenu } from "./DesktopControls";
 import { desktopApi, openInternalUrl } from "./integrationApi";
 import { ThemeSticker } from "./DesktopThemes";
 
-type WealthView = "overview" | "transactions" | "budget" | "report";
+type WealthView = "overview" | "calendar" | "transactions" | "budget" | "report";
 
 const transactionKindLabels: Record<FinanceTransaction["kind"], string> = {
   expense: "支出",
@@ -50,13 +52,12 @@ const sourceLabels: Record<FinanceSource, string> = {
   alipay: "支付宝",
   wechat: "微信",
   cash: "现金",
-  custom: "其他",
+  custom: "银行卡 / 其他",
 };
 
 const financeSourceOptions = Object.entries(sourceLabels).map(([value, label]) => ({ value, label }));
 const financeCategoryOptions = FINANCE_CATEGORIES.map(({ value, label }) => ({ value, label }));
 const financeBudgetRoleOptions = FINANCE_BUDGET_ROLES.map(({ value, label }) => ({ value, label }));
-const financeKnownBudgetRoleOptions = financeBudgetRoleOptions.filter((entry) => entry.value !== "unknown");
 const financeLifeDomainOptions = [{ value: "", label: "不指定" }, ...LIFE_DOMAIN_OPTIONS.map(({ value, label }) => ({ value, label }))];
 const financeValueRatingOptions = [
   { value: "", label: "暂不评价" },
@@ -72,17 +73,20 @@ function financeProjectOptions(projects: ProjectSummary[]) {
   }))];
 }
 
-export function WealthPage({ repository, projects, today, onNotice }: {
+export function WealthPage({ repository, projects, today, onNotice, quickCaptureRequested = false, onQuickCaptureOpened }: {
   repository: FinanceRepository;
   projects: ProjectSummary[];
   today: string;
   onNotice: (message: string) => void;
+  quickCaptureRequested?: boolean;
+  onQuickCaptureOpened?: () => void;
 }) {
   const [view, setView] = useState<WealthView>("overview");
   const [month, setMonth] = useState(today.slice(0, 7));
   const [settings, setSettings] = useState<FinanceSettings>(() => structuredClone(emptyFinanceSettings));
   const [budget, setBudget] = useState<FinanceBudget>(() => emptyFinanceBudget(today.slice(0, 7)));
   const [transactions, setTransactions] = useState<FinanceTransaction[]>([]);
+  const [calendarExpenses, setCalendarExpenses] = useState<FinanceTransaction[]>([]);
   const [batches, setBatches] = useState<FinanceImportBatch[]>([]);
   const [summary, setSummary] = useState<FinanceMonthlySummary | null>(null);
   const [report, setReport] = useState<FinanceAiReport | null>(null);
@@ -108,11 +112,17 @@ export function WealthPage({ repository, projects, today, onNotice }: {
   const reportRequestRef = useRef(0);
   monthRef.current = month;
 
+  useEffect(() => {
+    if (!quickCaptureRequested) return;
+    setManualOpen(true);
+    onQuickCaptureOpened?.();
+  }, [onQuickCaptureOpened, quickCaptureRequested]);
+
   const refresh = useCallback(async () => {
     const requestedMonth = month;
     setLoading(true);
     try {
-      const [nextSettings, nextBudget, nextTransactions, nextBatches, nextSummary, nextReport, keyAvailable] = await Promise.all([
+      const [nextSettings, nextBudget, nextTransactions, nextBatches, nextSummary, nextReport, keyAvailable, nextCalendarExpenses] = await Promise.all([
         repository.getSettings(),
         repository.getBudget(requestedMonth),
         repository.listTransactions(requestedMonth),
@@ -120,11 +130,13 @@ export function WealthPage({ repository, projects, today, onNotice }: {
         repository.monthlySummary(requestedMonth),
         repository.getReport(requestedMonth),
         desktopApi.secrets.status("deepseek_api_key").catch(() => false),
+        repository.listCalendarExpenses(requestedMonth),
       ]);
       if (monthRef.current !== requestedMonth) return;
       setSettings(nextSettings);
       setBudget(nextBudget);
       setTransactions(nextTransactions);
+      setCalendarExpenses(nextCalendarExpenses);
       setBatches(nextBatches);
       setSummary(nextSummary);
       setReport(nextReport);
@@ -306,20 +318,21 @@ export function WealthPage({ repository, projects, today, onNotice }: {
       <nav className="wealth-tabs" aria-label="财富视图">
         {([[
           "overview", "总览",
-        ], ["transactions", "流水"], ["budget", "预算"], ["report", "AI 月报"]] as Array<[WealthView, string]>).map(([id, label]) => (
+        ], ["calendar", "消费日历"], ["transactions", "流水"], ["budget", "预算"], ["report", "AI 月报"]] as Array<[WealthView, string]>).map(([id, label]) => (
           <button className={view === id ? "active" : ""} key={id} onClick={() => setView(id)}>{label}</button>
         ))}
       </nav>
 
       {loading && !summary ? <div className="wealth-loading">正在整理本地账目…</div> : null}
+      {!loading && view === "calendar" && <WealthCalendar key={month} month={month} today={today} transactions={calendarExpenses} />}
       {!loading && summary && view === "overview" && (
         <OverviewView summary={summary} budget={budget} transactions={transactions} batches={batches} onImport={setImportSource} onRollback={rollbackBatch} />
       )}
       {!loading && view === "transactions" && (
-        <TransactionsView transactions={transactions} onClassify={(transaction) => setClassification({
+        <TransactionsView transactions={transactions} onImport={setImportSource} onManual={() => setManualOpen(true)} onClassify={(transaction) => setClassification({
           transaction,
           category: transaction.category,
-          budgetRole: transaction.budgetRole === "unknown" ? "variable-essential" : transaction.budgetRole,
+          budgetRole: transaction.budgetRole,
           remember: false,
           projectId: transaction.projectId ?? "",
           lifeDomain: transaction.lifeDomain ?? "",
@@ -331,7 +344,6 @@ export function WealthPage({ repository, projects, today, onNotice }: {
       )}
       {!loading && summary && view === "report" && snapshot && (
         <ReportView
-          summary={summary}
           report={report}
           reportStale={reportStale}
           snapshot={snapshot}
@@ -363,13 +375,14 @@ export function WealthPage({ repository, projects, today, onNotice }: {
           <p className="wealth-muted">只有你确认过的必要性才会进入正式统计。AI 建议不会替你修改。</p>
           <div className="wealth-form-grid">
             <label><span>用途分类</span><SelectMenu label="用途分类" value={classification.category} onChange={(value) => setClassification({ ...classification, category: value as FinanceCategory })} options={financeCategoryOptions} /></label>
-            <label><span>预算角色</span><SelectMenu label="预算角色" value={classification.budgetRole} onChange={(value) => setClassification({ ...classification, budgetRole: value as FinanceBudgetRole })} options={financeKnownBudgetRoleOptions} /></label>
+            <label><span>消费性质</span><SelectMenu label="消费性质" value={classification.budgetRole} onChange={(value) => setClassification({ ...classification, budgetRole: value as FinanceBudgetRole })} options={financeBudgetRoleOptions} /></label>
             <label><span>关联项目</span><SelectMenu label="关联项目" value={classification.projectId} onChange={(value) => setClassification({ ...classification, projectId: value })} options={financeProjectOptions(projects)} /></label>
             <label><span>生活领域</span><SelectMenu label="生活领域" value={classification.lifeDomain} onChange={(value) => setClassification({ ...classification, lifeDomain: value as LifeDomain | "" })} options={financeLifeDomainOptions} /></label>
             <label><span>是否值得</span><SelectMenu label="是否值得" value={classification.valueRating} onChange={(value) => setClassification({ ...classification, valueRating: value as FinanceValueRating | "" })} options={financeValueRatingOptions} /></label>
           </div>
-          <label className="wealth-check"><input type="checkbox" checked={classification.remember} onChange={(event) => setClassification({ ...classification, remember: event.target.checked })} /><span>以后遇到相同商户或描述时沿用此分类</span></label>
-          <footer><Button variant="secondary" type="button" onClick={() => setClassification(null)}>取消</Button><Button variant="primary" onClick={() => void saveClassification()}>确认分类</Button></footer>
+          <FinanceClassificationGuide role={classification.budgetRole} />
+          <label className="wealth-check"><input type="checkbox" checked={classification.remember} onChange={(event) => setClassification({ ...classification, remember: event.target.checked })} /><span>相同商户或描述通常用途一致时，才记住此分类</span></label>
+          <footer><Button variant="secondary" type="button" onClick={() => setClassification(null)}>暂不调整</Button><Button variant="primary" disabled={classification.budgetRole === "unknown"} onClick={() => void saveClassification()}>确认分类</Button></footer>
         </section></div>
       )}
     </section>
@@ -394,7 +407,7 @@ function OverviewView({ summary, budget, transactions, batches, onImport, onRoll
     </section>
     {!transactions.length ? <section className="wealth-empty-import"><div><span>从已有账单开始</span><h2>先导入大头，再补记零碎消费</h2><p>无需连接支付账户。请从官方应用导出并自行解压，确认预览后才会写入。</p></div><div className="wealth-import-cards"><ImportCard source="alipay" onClick={onImport} /><ImportCard source="wechat" onClick={onImport} /></div></section> : null}
     <div className="wealth-two-column">
-      <section className="wealth-panel"><header><div><span>规划结余</span><h2>三种可执行情景</h2></div></header><div className="wealth-scenarios"><Scenario label="保持现状" value={summary.scenarios.baselineCents} /><Scenario label="温和优化" value={summary.scenarios.moderateCents} /><Scenario label="积极储蓄" value={summary.scenarios.aggressiveCents} /></div><p className="wealth-muted">积极方案只使用已确认的机会，不削减固定必要与成长投入。{summary.sampleInsufficient ? " 弹性必要支出样本不足，暂用本月数据。" : " 弹性必要支出采用最近三个月中位数。"}</p></section>
+      <section className="wealth-panel"><header><div><span>规划结余</span><h2>结余参考</h2></div></header><div className="wealth-scenarios"><Scenario label="按当前支出结构" value={summary.scenarios.baselineCents} />{summary.scenarios.aggressiveCents > summary.scenarios.baselineCents ? <Scenario label="不再重复后悔的自由消费" value={summary.scenarios.aggressiveCents} /> : null}</div><p className="wealth-muted">按规划月收入与当前支出结构估算，未记录的开支仍需预留。节省情景只假设不再重复已标记后悔的自由消费，不是承诺；替代方式的差价尚未确定，不预先计入。{summary.sampleInsufficient ? " 弹性必要支出样本不足，暂用本月数据。" : " 弹性必要支出采用最近三个月中位数。"}</p></section>
       <section className="wealth-panel"><header><div><span>预算进度</span><h2>{budgetTotal ? `${money(summary.ordinaryExpenseCents)} / ${money(budgetTotal)}` : "尚未设置分类预算"}</h2></div></header><CategoryBars summary={summary} budget={budget} /></section>
     </div>
     <div className="wealth-two-column">
@@ -404,8 +417,13 @@ function OverviewView({ summary, budget, transactions, batches, onImport, onRoll
   </div>;
 }
 
-function TransactionsView({ transactions, onClassify }: { transactions: FinanceTransaction[]; onClassify: (transaction: FinanceTransaction) => void }) {
-  return <div className="wealth-content"><section className="wealth-panel wealth-table-panel"><header><div><span>标准化流水</span><h2>{transactions.length ? `${transactions.length} 笔` : "这个月还没有流水"}</h2></div></header>{transactions.length ? <div className="wealth-table-wrap"><table><thead><tr><th>时间</th><th>说明</th><th>类型</th><th>分类</th><th>预算角色</th><th>金额</th><th /></tr></thead><tbody>{transactions.map((transaction) => <tr key={transaction.id}><td>{formatDateTime(transaction.occurredAt)}</td><td><strong>{transaction.merchant || transaction.description || "未命名流水"}</strong><small>{sourceLabels[transaction.source]}{transaction.projectId ? " · 已关联项目" : ""}</small></td><td>{transactionKindLabels[transaction.kind]}</td><td>{FINANCE_CATEGORY_LABELS[transaction.category]}</td><td><span className={transaction.budgetRoleConfirmed ? "confirmed-role" : "pending-role"}>{transaction.budgetRoleConfirmed ? FINANCE_BUDGET_ROLE_LABELS[transaction.budgetRole] : "待确认"}</span></td><td className={`money-cell ${transaction.direction === "in" ? "income" : ""}`}>{transaction.direction === "in" ? "+" : transaction.direction === "out" ? "−" : ""}{money(transaction.amountCents)}</td><td>{transaction.kind === "expense" ? <Button variant="secondary" type="button" onClick={() => onClassify(transaction)}>{transaction.budgetRoleConfirmed ? "调整" : "确认"}</Button> : null}</td></tr>)}</tbody></table></div> : <p className="wealth-muted">从支付宝、微信导入，或补记一笔现金消费。</p>}</section></div>;
+function TransactionsView({ transactions, onImport, onManual, onClassify }: {
+  transactions: FinanceTransaction[];
+  onImport: (source: FinanceImportSource) => void;
+  onManual: () => void;
+  onClassify: (transaction: FinanceTransaction) => void;
+}) {
+  return <div className="wealth-content"><section className="wealth-panel wealth-table-panel"><header><div><span>标准化流水</span><h2>{transactions.length ? `${transactions.length} 笔` : "这个月还没有流水"}</h2></div></header>{transactions.length ? <div className="wealth-table-wrap"><table><thead><tr><th>时间</th><th>说明</th><th>类型</th><th>分类</th><th>消费性质</th><th>金额</th><th /></tr></thead><tbody>{transactions.map((transaction) => <tr key={transaction.id}><td>{formatDateTime(transaction.occurredAt)}</td><td><strong>{transaction.merchant || transaction.description || "未命名流水"}</strong><small>{sourceLabels[transaction.source]}{transaction.projectId ? " · 已关联项目" : ""}</small></td><td>{transactionKindLabels[transaction.kind]}</td><td>{FINANCE_CATEGORY_LABELS[transaction.category]}</td><td><span className={transaction.budgetRoleConfirmed ? "confirmed-role" : "pending-role"}>{transaction.budgetRoleConfirmed ? FINANCE_BUDGET_ROLE_LABELS[transaction.budgetRole] : "待确认"}</span></td><td className={`money-cell ${transaction.direction === "in" ? "income" : ""}`}>{transaction.direction === "in" ? "+" : transaction.direction === "out" ? "−" : ""}{money(transaction.amountCents)}</td><td>{transaction.kind === "expense" ? <Button variant="secondary" type="button" onClick={() => onClassify(transaction)}>{transaction.budgetRoleConfirmed ? "调整" : "确认"}</Button> : null}</td></tr>)}</tbody></table></div> : <div className="wealth-table-empty"><p className="wealth-muted">可以导入支付宝或微信账单；银行卡等低频消费直接补记即可。</p><div><Button variant="secondary" type="button" onClick={() => onImport("alipay")}>导入支付宝</Button><Button variant="secondary" type="button" onClick={() => onImport("wechat")}>导入微信</Button><Button variant="primary" type="button" onClick={onManual}>补记银行卡 / 其他</Button></div></div>}</section></div>;
 }
 
 function BudgetView({ repository, month, settings, budget, summary, onSaved, onNotice }: {
@@ -417,17 +435,37 @@ function BudgetView({ repository, month, settings, budget, summary, onSaved, onN
   onSaved: () => Promise<void>;
   onNotice: (message: string) => void;
 }) {
+  const configuredCategories = FINANCE_CATEGORIES
+    .filter((entry) => (budget.categoryLimits[entry.value] ?? 0) > 0)
+    .map((entry) => entry.value);
   const [income, setIncome] = useState(() => yuanInput(settings.stableMonthlyIncomeCents));
   const [defaultTarget, setDefaultTarget] = useState(() => yuanInput(settings.defaultSavingsTargetCents));
   const [monthTarget, setMonthTarget] = useState(() => yuanInput(budget.savingsTargetCents));
   const [limits, setLimits] = useState<Record<FinanceCategory, string>>(() => Object.fromEntries(FINANCE_CATEGORIES.map((entry) => [entry.value, yuanInput(budget.categoryLimits[entry.value] ?? 0)])) as Record<FinanceCategory, string>);
+  const [selectedCategories, setSelectedCategories] = useState<FinanceCategory[]>(configuredCategories);
+  const [categoryLimitsOpen, setCategoryLimitsOpen] = useState(configuredCategories.length > 0);
   const [saving, setSaving] = useState(false);
   useEffect(() => {
+    const nextConfiguredCategories = FINANCE_CATEGORIES
+      .filter((entry) => (budget.categoryLimits[entry.value] ?? 0) > 0)
+      .map((entry) => entry.value);
     setIncome(yuanInput(settings.stableMonthlyIncomeCents));
     setDefaultTarget(yuanInput(settings.defaultSavingsTargetCents));
     setMonthTarget(yuanInput(budget.savingsTargetCents));
     setLimits(Object.fromEntries(FINANCE_CATEGORIES.map((entry) => [entry.value, yuanInput(budget.categoryLimits[entry.value] ?? 0)])) as Record<FinanceCategory, string>);
+    setSelectedCategories(nextConfiguredCategories);
+    setCategoryLimitsOpen(nextConfiguredCategories.length > 0);
   }, [budget, settings]);
+  const availableCategoryOptions = [
+    { value: "", label: "添加一个分类…" },
+    ...FINANCE_CATEGORIES.filter((entry) => !selectedCategories.includes(entry.value)),
+  ];
+
+  function addCategory(value: string) {
+    if (!value || selectedCategories.includes(value as FinanceCategory)) return;
+    setSelectedCategories([...selectedCategories, value as FinanceCategory]);
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     setSaving(true);
@@ -440,7 +478,10 @@ function BudgetView({ repository, month, settings, budget, summary, onSaved, onN
       }, {
         month,
         savingsTargetCents: monthTargetCents,
-        categoryLimits: Object.fromEntries(Object.entries(limits).map(([category, value]) => [category, parseYuan(value)])),
+        categoryLimits: Object.fromEntries(selectedCategories.flatMap((category) => {
+          const value = parseYuan(limits[category]);
+          return value > 0 ? [[category, value]] : [];
+        })),
         updatedAt: "",
       });
       if (saved.settings.defaultSavingsTargetCents !== monthTargetCents) onNotice("本月目标与默认目标不同，已分别保存");
@@ -451,11 +492,22 @@ function BudgetView({ repository, month, settings, budget, summary, onSaved, onN
       setSaving(false);
     }
   }
-  return <div className="wealth-content"><form className="wealth-panel wealth-budget-form" onSubmit={submit}><header><div><span>收入与储蓄</span><h2>规划基线由你设定</h2></div><Button variant="primary" type="submit" disabled={saving}>{saving ? "保存中…" : "保存预算"}</Button></header><p className="wealth-muted">导入识别到的工资和奖金只显示为实际收入，不会改动这里的稳定税后月收入。</p><div className="wealth-form-grid three"><MoneyInput label="稳定税后月收入" value={income} onChange={setIncome} /><MoneyInput label="默认每月储蓄目标" value={defaultTarget} onChange={setDefaultTarget} /><MoneyInput label={`${month} 储蓄目标`} value={monthTarget} onChange={setMonthTarget} /></div><div className="wealth-budget-categories"><h3>分类额度</h3>{FINANCE_CATEGORIES.map((entry) => <label key={entry.value}><span><strong>{entry.label}</strong><small>已花 {money(summary.categoryTotals[entry.value])}</small></span><span className="yuan-input"><i>¥</i><input inputMode="decimal" value={limits[entry.value]} onChange={(event) => setLimits({ ...limits, [entry.value]: event.target.value })} /></span></label>)}</div></form></div>;
+  return <div className="wealth-content"><form className="wealth-panel wealth-budget-form" onSubmit={submit}>
+    <header><div><span>收入与储蓄</span><h2>先管住总目标</h2></div><Button variant="primary" type="submit" disabled={saving}>{saving ? "保存中…" : "保存预算"}</Button></header>
+    <p className="wealth-muted">平时只需要维护收入与储蓄目标；分类额度完全可选，不必给每一种消费设限制。</p>
+    <div className="wealth-form-grid three"><MoneyInput label="稳定税后月收入" value={income} onChange={setIncome} /><MoneyInput label="默认每月储蓄目标" value={defaultTarget} onChange={setDefaultTarget} /><MoneyInput label={`${month} 储蓄目标`} value={monthTarget} onChange={setMonthTarget} /></div>
+    <section className="wealth-budget-optional">
+      <div><strong>分类提醒（可选）</strong><span>{selectedCategories.length ? `已设置 ${selectedCategories.length} 类` : "目前不限制具体类别"}</span></div>
+      <Button variant="secondary" size="small" type="button" aria-expanded={categoryLimitsOpen} onClick={() => setCategoryLimitsOpen((open) => !open)}>{categoryLimitsOpen ? "收起" : "按需设置"}</Button>
+      {categoryLimitsOpen ? <div className="wealth-budget-category-editor">
+        {availableCategoryOptions.length > 1 ? <SelectMenu label="添加分类额度" value="" onChange={addCategory} options={availableCategoryOptions} /> : null}
+        {selectedCategories.length ? <div className="wealth-budget-category-list">{selectedCategories.map((category) => <div className="wealth-budget-category-row" key={category}><span><strong>{FINANCE_CATEGORY_LABELS[category]}</strong><small>本月已花 {money(summary.categoryTotals[category])}</small></span><span className="wealth-budget-limit-actions"><span className="yuan-input"><i>¥</i><input aria-label={`${FINANCE_CATEGORY_LABELS[category]}额度`} inputMode="decimal" value={limits[category]} onChange={(event) => setLimits({ ...limits, [category]: event.target.value })} /></span><Button variant="ghost" size="small" type="button" aria-label={`移除${FINANCE_CATEGORY_LABELS[category]}额度`} onClick={() => setSelectedCategories(selectedCategories.filter((entry) => entry !== category))}>移除</Button></span></div>)}</div> : <p className="wealth-muted">只有你主动添加的类别，才会显示额度提醒。</p>}
+      </div> : null}
+    </section>
+  </form></div>;
 }
 
-function ReportView({ summary, report, reportStale, snapshot, hasDeepSeekKey, showSendPreview, generating, onShowPreview, onHidePreview, onGenerate }: {
-  summary: FinanceMonthlySummary;
+function ReportView({ report, reportStale, snapshot, hasDeepSeekKey, showSendPreview, generating, onShowPreview, onHidePreview, onGenerate }: {
   report: FinanceAiReport | null;
   reportStale: boolean;
   snapshot: ReturnType<typeof buildFinanceInsightSnapshot>;
@@ -467,13 +519,14 @@ function ReportView({ summary, report, reportStale, snapshot, hasDeepSeekKey, sh
   onGenerate: () => void;
 }) {
   return <div className="wealth-content">
-    <section className="wealth-panel wealth-report-intro">
-      <header><div><span>先本地计算，再让 AI 解读</span><h2>{report ? `${report.month} 月报` : "尚未生成 AI 月报"}</h2></div>{hasDeepSeekKey ? <Button variant="primary" onClick={onShowPreview}>{report ? "重新生成" : "生成月报"}</Button> : null}</header>
-      <div className="wealth-scenarios"><Scenario label="规划基准结余" value={summary.scenarios.baselineCents} /><Scenario label="温和优化" value={summary.scenarios.moderateCents} /><Scenario label="积极储蓄" value={summary.scenarios.aggressiveCents} /></div>
-      {!hasDeepSeekKey ? <p className="wealth-key-empty">尚未配置 DeepSeek API Key。本地统计和三种情景仍可正常使用；配置后才会显示 AI 解读按钮。</p> : null}
-      {reportStale ? <p className="wealth-report-stale" role="status">这份月报生成后，流水、分类或预算已经变化。下方内容仍保留供参考，建议重新生成。</p> : null}
-      <p className="wealth-muted">报告只会在你点击确认后生成。失败时不会自动重试，也不会覆盖已有报告。</p>
+    <section className="wealth-ai-launcher">
+      <div><i aria-hidden="true">✦</i><span><strong>{report ? `${report.month} AI 月报` : "AI 月报"}</strong><small>{report ? "已有报告保存在本机" : hasDeepSeekKey ? "按需生成，不会自动运行" : "配置 DeepSeek 后可用"}</small></span></div>
+      <div className="wealth-ai-launcher-actions">
+        <details className="wealth-ai-about"><summary>查看说明</summary><p>AI 只接收匿名汇总，用来解释支出结构、节约机会与代价，并给出最多三项行动；不会修改流水、分类或预算。</p></details>
+        {hasDeepSeekKey ? <Button variant="primary" size="small" onClick={onShowPreview}>{report ? "重新生成" : "生成月报"}</Button> : null}
+      </div>
     </section>
+    {reportStale ? <p className="wealth-report-stale" role="status">账目、预算或分析方式已更新，建议重新生成月报；旧报告仍保存在本机。</p> : null}
     {showSendPreview ? <div className="wealth-modal-backdrop">
       <section className="wealth-dialog compact wealth-send-preview" role="dialog" aria-modal="true" aria-label="AI 月报发送前确认">
         <header><div><span>发送前确认</span><h2>只发送匿名汇总</h2></div><Button variant="secondary" size="small" iconOnly type="button" aria-label="关闭发送预览" onClick={onHidePreview}>×</Button></header>
@@ -482,12 +535,9 @@ function ReportView({ summary, report, reportStale, snapshot, hasDeepSeekKey, sh
         <footer><Button variant="secondary" type="button" onClick={onHidePreview}>取消</Button><Button variant="primary" disabled={generating} onClick={onGenerate}>{generating ? "DeepSeek 正在生成…" : "确认发送并生成"}</Button></footer>
       </section>
     </div> : null}
-    {report ? <AiReportContent report={report} /> : <section className="wealth-panel"><h2>AI 会补充什么</h2><p className="wealth-muted">它会解释必要支出结构、值得保留的消费、可节约机会与代价，并把下月行动压缩到最多三项。所有建议金额都会再次由本地证据校验。</p></section>}
+    <FinanceGoalSummary snapshot={snapshot} />
+    {report ? <FinanceReportContent report={report} /> : <section className="wealth-panel"><h3>保住日常生活，再减少不值得的消费</h3><p className="wealth-muted">生成月报后，可查看应保留的开支、适合尝试的替代方式与最多三项行动。</p></section>}
   </div>;
-}
-
-function AiReportContent({ report }: { report: FinanceAiReport }) {
-  return <section className="wealth-ai-report"><article className="wealth-panel"><span>本月概览</span><h2>{report.content.overview}</h2><p>{report.content.essentialStructure}</p></article><div className="wealth-two-column"><article className="wealth-panel"><h3>值得保留</h3>{report.content.worthwhileSpending.length ? <ul>{report.content.worthwhileSpending.map((item) => <li key={item}>{item}</li>)}</ul> : <p className="wealth-muted">本月没有足够证据。</p>}</article><article className="wealth-panel"><h3>仍待确认</h3>{report.content.pendingConfirmations.length ? <ul>{report.content.pendingConfirmations.map((item) => <li key={item}>{item}</li>)}</ul> : <p className="wealth-muted">没有额外待确认项。</p>}</article></div><section className="wealth-opportunity-grid">{report.content.opportunities.map((item) => <article key={`${item.title}-${item.evidenceIds.join("-")}`}><span>{item.confidence === "high" ? "高置信" : item.confidence === "medium" ? "中等置信" : "低置信"}</span><h3>{item.title}</h3><b>{money(item.minimumSavingCents)} ～ {money(item.maximumSavingCents)}</b><p>{item.reason}</p><small>行动：{item.action}</small>{item.tradeoff ? <small>代价：{item.tradeoff}</small> : null}</article>)}</section><section className="wealth-panel"><h3>下月只做这几件事</h3><ol>{report.content.nextActions.map((item) => <li key={item}>{item}</li>)}</ol>{report.content.questions.length ? <><h3>还需要你判断</h3><ul>{report.content.questions.map((item) => <li key={item}>{item}</li>)}</ul></> : null}<footer className="wealth-report-meta">{report.model} · {new Date(report.generatedAt).toLocaleString("zh-CN")} · {report.tokenUsage.totalTokens.toLocaleString("zh-CN")} tokens</footer></section></section>;
 }
 
 function ImportDialog({ source, preview, busy, onSwitchSource, onChoose, onToggle, onConfirm, onClose }: {
@@ -515,7 +565,7 @@ function ManualEntryDialog({ repository, projects, today, onClose, onSaved, onNo
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
   const [occurredAt, setOccurredAt] = useState(() => `${today}T${new Date().toTimeString().slice(0, 5)}`);
-  const [source, setSource] = useState<FinanceSource>("cash");
+  const [source, setSource] = useState<FinanceSource>("custom");
   const [category, setCategory] = useState<FinanceCategory>("other");
   const [budgetRole, setBudgetRole] = useState<FinanceBudgetRole>("unknown");
   const [projectId, setProjectId] = useState("");
@@ -544,7 +594,23 @@ function ManualEntryDialog({ repository, projects, today, onClose, onSaved, onNo
       setSaving(false);
     }
   }
-  return <div className="wealth-modal-backdrop"><form className="wealth-dialog compact" onSubmit={submit}><header><div><span>快速补记</span><h2>留下一笔零碎消费</h2></div><Button variant="secondary" size="small" iconOnly aria-label="关闭" type="button" onClick={onClose}>×</Button></header><div className="wealth-form-grid"><MoneyInput label="金额" value={amount} onChange={setAmount} required /><label><span>发生时间</span><input type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} required /></label><label className="wide"><span>说明</span><input autoFocus value={description} onChange={(event) => setDescription(event.target.value)} placeholder="例如：早餐、打印资料" required /></label><label><span>支付来源</span><SelectMenu label="支付来源" value={source} onChange={(value) => setSource(value as FinanceSource)} options={financeSourceOptions} /></label><label><span>用途分类</span><SelectMenu label="用途分类" value={category} onChange={(value) => setCategory(value as FinanceCategory)} options={financeCategoryOptions} /></label><label><span>预算角色</span><SelectMenu label="预算角色" value={budgetRole} onChange={(value) => setBudgetRole(value as FinanceBudgetRole)} options={financeBudgetRoleOptions} /></label><label><span>关联项目</span><SelectMenu label="关联项目" value={projectId} onChange={setProjectId} options={financeProjectOptions(projects)} /></label><label><span>生活领域</span><SelectMenu label="生活领域" value={lifeDomain} onChange={(value) => setLifeDomain(value as LifeDomain | "")} options={financeLifeDomainOptions} /></label><label><span>是否值得</span><SelectMenu label="是否值得" value={valueRating} onChange={(value) => setValueRating(value as FinanceValueRating | "")} options={financeValueRatingOptions} /></label></div><footer><Button variant="secondary" type="button" onClick={onClose}>取消</Button><Button variant="primary" type="submit" disabled={saving}>{saving ? "保存中…" : "保存消费"}</Button></footer></form></div>;
+  return <div className="wealth-modal-backdrop"><form className="wealth-dialog compact" onSubmit={submit}>
+    <header><div><span>快速补记</span><h2>留下一笔零碎消费</h2></div><Button variant="secondary" size="small" iconOnly aria-label="关闭" type="button" onClick={onClose}>×</Button></header>
+    <div className="wealth-form-grid">
+      <MoneyInput label="金额" value={amount} onChange={setAmount} required />
+      <label><span>发生时间</span><input type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} required /></label>
+      <label className="wide"><span>说明</span><input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="例如：早餐、银行卡购物" required /></label>
+      <label className="wide"><span>支付来源</span><SelectMenu label="支付来源" value={source} onChange={(value) => setSource(value as FinanceSource)} options={financeSourceOptions} /></label>
+    </div>
+    <details className="wealth-manual-advanced"><summary>补充分类等信息（可选）</summary><div className="wealth-form-grid">
+      <label><span>用途分类</span><SelectMenu label="用途分类" value={category} onChange={(value) => setCategory(value as FinanceCategory)} options={financeCategoryOptions} /></label>
+      <label><span>消费性质</span><SelectMenu label="消费性质" value={budgetRole} onChange={(value) => setBudgetRole(value as FinanceBudgetRole)} options={financeBudgetRoleOptions} /></label>
+      <label><span>关联项目</span><SelectMenu label="关联项目" value={projectId} onChange={setProjectId} options={financeProjectOptions(projects)} /></label>
+      <label><span>生活领域</span><SelectMenu label="生活领域" value={lifeDomain} onChange={(value) => setLifeDomain(value as LifeDomain | "")} options={financeLifeDomainOptions} /></label>
+      <label><span>是否值得</span><SelectMenu label="是否值得" value={valueRating} onChange={(value) => setValueRating(value as FinanceValueRating | "")} options={financeValueRatingOptions} /></label>
+    </div><FinanceClassificationGuide role={budgetRole} /></details>
+    <footer><Button variant="secondary" type="button" onClick={onClose}>取消</Button><Button variant="primary" type="submit" disabled={saving}>{saving ? "保存中…" : "保存消费"}</Button></footer>
+  </form></div>;
 }
 
 function MoneyCard({ label, value, note, positive = false }: { label: string; value: number; note: string; positive?: boolean }) { return <article className="wealth-money-card"><span>{label}</span><strong className={positive ? "positive" : ""}>{money(value)}</strong><small>{note}</small></article>; }

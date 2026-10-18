@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "com.muyuxiaoluo.workbench",
+  "productName": "个人工作台",
+  "build": { "beforeDevCommand": "npm run mobile:dev", "beforeBuildCommand": "npm run mobile:build", "frontendDist": "../mobile-dist" },
+  "app": {
+    "windows": [{ "label": "main", "title": "个人工作台", "useHttpsScheme": true }],
+    "security": { "capabilities": ["mobile"], "csp": { "connect-src": "'self' ipc: http://ipc.localhost https:", "img-src": "'self' data:", "default-src": "'self'", "script-src": "'self'" } }
+  },
+  "bundle": { "targets": "all", "createUpdaterArtifacts": false, "android": { "minSdkVersion": 28 } },
+  "plugins": { "updater": null }
+}

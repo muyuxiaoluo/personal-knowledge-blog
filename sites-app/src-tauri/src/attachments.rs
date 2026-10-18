@@ -357,6 +357,23 @@ fn validate_access_token(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn attachment_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|error| format!("无法准备附件同步：{error}"))
+}
+
+fn attachment_request_error(action: &str, error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        return format!("{action}超时，请检查网络或系统代理后重试。");
+    }
+    if error.is_connect() {
+        return format!("{action}无法连接同步服务器，请检查网络、系统代理或安全证书后重试。");
+    }
+    format!("{action}中断，请检查网络或系统代理后重试。")
+}
+
 #[tauri::command]
 pub async fn attachment_upload_blob(
     app: tauri::AppHandle,
@@ -379,16 +396,13 @@ pub async fn attachment_upload_blob(
     if metadata.len() > variant.max_bytes() as u64 {
         return Err("待上传附件超过大小限制。".into());
     }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|error| format!("无法准备附件同步：{error}"))?;
+    let client = attachment_http_client()?;
     let exists = client
         .head(endpoint.clone())
         .bearer_auth(&access_token)
         .send()
         .await
-        .map_err(|error| format!("无法检查云端附件：{error}"))?;
+        .map_err(|error| attachment_request_error("检查云端附件", error))?;
     if exists.status().is_success() {
         return Ok(false);
     }
@@ -406,7 +420,7 @@ pub async fn attachment_upload_blob(
         .body(reqwest::Body::wrap_stream(ReaderStream::new(file)))
         .send()
         .await
-        .map_err(|error| format!("附件上传中断，本地文件未受影响：{error}"))?;
+        .map_err(|error| attachment_request_error("附件上传", error))?;
     if !response.status().is_success() {
         return Err(format!("附件上传失败：HTTP {}", response.status()));
     }
@@ -431,16 +445,13 @@ pub async fn attachment_download_blob(
         return Ok(false);
     }
     let endpoint = blob_endpoint(&server_url, &normalized_hash)?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|error| format!("无法准备附件下载：{error}"))?;
+    let client = attachment_http_client()?;
     let mut response = client
         .get(endpoint)
         .bearer_auth(&access_token)
         .send()
         .await
-        .map_err(|error| format!("附件下载中断：{error}"))?;
+        .map_err(|error| attachment_request_error("附件下载", error))?;
     if !response.status().is_success() {
         return Err(format!("附件下载失败：HTTP {}", response.status()));
     }

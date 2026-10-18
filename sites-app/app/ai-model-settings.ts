@@ -5,10 +5,10 @@ const MODELS_KEY = "mind-garden:deepseek-api-models:v1";
 const MODEL_CACHE_TTL = 24 * 60 * 60 * 1000;
 
 export const DEFAULT_DEEPSEEK_MODEL_SETTINGS: DeepSeekModelSettings = {
-  defaultModel: "deepseek-v4-flash",
+  defaultModel: "deepseek-flash",
   overrides: {
-    projectCreate: "deepseek-v4-pro",
-    projectReplan: "deepseek-v4-pro",
+    projectCreate: "",
+    projectReplan: "",
     nextAction: "",
     financeReport: "",
     healthAdvice: "",
@@ -18,11 +18,15 @@ export const DEFAULT_DEEPSEEK_MODEL_SETTINGS: DeepSeekModelSettings = {
 export function loadDeepSeekModelSettings(): DeepSeekModelSettings {
   try {
     const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") as Partial<DeepSeekModelSettings>;
+    const overrides: Partial<DeepSeekModelSettings["overrides"]> = parsed.overrides ?? {};
     return {
       defaultModel: normalizedModel(parsed.defaultModel) || DEFAULT_DEEPSEEK_MODEL_SETTINGS.defaultModel,
       overrides: {
-        ...DEFAULT_DEEPSEEK_MODEL_SETTINGS.overrides,
-        ...(parsed.overrides ?? {}),
+        projectCreate: normalizedModel(overrides.projectCreate),
+        projectReplan: normalizedModel(overrides.projectReplan),
+        nextAction: normalizedModel(overrides.nextAction),
+        financeReport: normalizedModel(overrides.financeReport),
+        healthAdvice: normalizedModel(overrides.healthAdvice),
       },
     };
   } catch {
@@ -83,5 +87,10 @@ export function cacheDeepSeekModels(models: DeepSeekModel[]) {
 }
 
 function normalizedModel(value: unknown) {
-  return typeof value === "string" && /^[a-zA-Z0-9._-]{1,100}$/.test(value.trim()) ? value.trim() : "";
+  if (typeof value !== "string" || !/^[a-zA-Z0-9._-]{1,100}$/.test(value.trim())) return "";
+  const model = value.trim();
+  if (["deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4-pro"].includes(model)) {
+    return "deepseek-flash";
+  }
+  return model;
 }

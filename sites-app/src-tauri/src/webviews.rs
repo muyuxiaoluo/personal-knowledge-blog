@@ -69,6 +69,67 @@ const ENTERTAINMENT_INITIALIZATION_SCRIPT: &str = r#"
     }
     return nativeOpen(url, target, features);
   };
+
+  const installNavigation = () => {
+    if (!document.documentElement || document.getElementById('__personal-entertainment-navigation')) return;
+    const host = document.createElement('div');
+    host.id = '__personal-entertainment-navigation';
+    host.style.cssText = 'position:fixed;left:12px;top:12px;z-index:2147483647;pointer-events:none';
+    const shadow = host.attachShadow({ mode: 'closed' });
+    const style = document.createElement('style');
+    style.textContent = `
+      :host { all: initial; }
+      nav { display:flex;align-items:center;gap:2px;padding:4px;border:1px solid rgba(31,38,55,.16);border-radius:13px;background:rgba(255,255,255,.9);box-shadow:0 8px 28px rgba(21,27,43,.18);backdrop-filter:blur(16px);pointer-events:auto;opacity:.76;transition:opacity .16s ease,transform .16s ease; }
+      nav:hover,nav:focus-within { opacity:1;transform:translateY(1px); }
+      button { all:unset;display:grid;width:32px;height:32px;place-items:center;border-radius:9px;color:#313748;font:600 19px/1 system-ui,-apple-system,"Segoe UI",sans-serif;cursor:pointer;box-sizing:border-box; }
+      button:hover { background:#edf1f8;color:#315fca; }
+      button:focus-visible { outline:2px solid #4f78db;outline-offset:1px; }
+      button:disabled { color:#aeb3bf;cursor:default; }
+      button:disabled:hover { background:transparent;color:#aeb3bf; }
+      .reload { font-size:16px; }
+    `;
+    const nav = document.createElement('nav');
+    nav.setAttribute('aria-label', '页面导航');
+    const makeButton = (label, symbol, className, action) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.setAttribute('aria-label', label);
+      button.title = label;
+      button.textContent = symbol;
+      if (className) button.className = className;
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        action();
+      });
+      nav.appendChild(button);
+      return button;
+    };
+    const back = makeButton('返回上一页（Alt+左方向键）', '←', 'back', () => history.back());
+    const forward = makeButton('前进（Alt+右方向键）', '→', 'forward', () => history.forward());
+    makeButton('刷新页面（Ctrl+R）', '↻', 'reload', () => location.reload());
+    shadow.append(style, nav);
+    document.documentElement.appendChild(host);
+
+    const update = () => {
+      const navigationApi = window.navigation;
+      const index = Number(navigationApi?.currentEntry?.index);
+      const entries = navigationApi?.entries?.() || [];
+      back.disabled = Number.isFinite(index) ? index <= 0 : history.length <= 1;
+      forward.disabled = Number.isFinite(index) ? index >= entries.length - 1 : false;
+    };
+    window.navigation?.addEventListener?.('currententrychange', update);
+    window.addEventListener('pageshow', update);
+    window.addEventListener('popstate', update);
+    window.addEventListener('hashchange', update);
+    update();
+
+    new MutationObserver(() => {
+      if (!document.documentElement.contains(host)) document.documentElement.appendChild(host);
+    }).observe(document.documentElement, { childList: true });
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', installNavigation, { once: true });
+  else installNavigation();
 })();
 "#;
 
@@ -305,11 +366,17 @@ fn build_entertainment_menu(app: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, 
         None::<&str>,
     )
     .map_err(|error| error.to_string())?;
-    let back = MenuItem::with_id(app, "entertainment-back", "← 后退", true, None::<&str>)
+    let back = MenuItem::with_id(app, "entertainment-back", "← 后退", true, Some("Alt+Left"))
         .map_err(|error| error.to_string())?;
-    let forward = MenuItem::with_id(app, "entertainment-forward", "前进 →", true, None::<&str>)
-        .map_err(|error| error.to_string())?;
-    let reload = MenuItem::with_id(app, "entertainment-reload", "刷新", true, None::<&str>)
+    let forward = MenuItem::with_id(
+        app,
+        "entertainment-forward",
+        "前进 →",
+        true,
+        Some("Alt+Right"),
+    )
+    .map_err(|error| error.to_string())?;
+    let reload = MenuItem::with_id(app, "entertainment-reload", "刷新", true, Some("Ctrl+R"))
         .map_err(|error| error.to_string())?;
     let home = MenuItem::with_id(
         app,
@@ -1179,6 +1246,15 @@ mod tests {
         assert!(ENTERTAINMENT_INITIALIZATION_SCRIPT.contains("anchor.target = '_self'"));
         assert!(ENTERTAINMENT_INITIALIZATION_SCRIPT.contains("form.target = '_self'"));
         assert!(ENTERTAINMENT_INITIALIZATION_SCRIPT.contains("location.assign"));
+    }
+
+    #[test]
+    fn entertainment_navigation_script_installs_isolated_visible_controls() {
+        assert!(ENTERTAINMENT_INITIALIZATION_SCRIPT.contains("__personal-entertainment-navigation"));
+        assert!(ENTERTAINMENT_INITIALIZATION_SCRIPT.contains("attachShadow({ mode: 'closed' })"));
+        assert!(ENTERTAINMENT_INITIALIZATION_SCRIPT.contains("history.back()"));
+        assert!(ENTERTAINMENT_INITIALIZATION_SCRIPT.contains("history.forward()"));
+        assert!(ENTERTAINMENT_INITIALIZATION_SCRIPT.contains("currententrychange"));
     }
 
     #[test]

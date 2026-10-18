@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { WorkspacePreferencesRepository } from "../app/data/workspace-preferences-repository";
+import { FOCUS_REMINDER_KEY } from "../app/focus-reminder";
 import type { SqliteDatabase, SqliteExecuteResult, SqliteValue } from "../app/data/sqlite-article-repository";
 import { addDefaultAiLinks, addDefaultEntertainmentLinks, normalizeAvatarDataUrl, normalizeDisplayName, normalizeQuickLinks, readLegacyQuickLinks, workspaceTitle } from "../app/workspace-preferences";
 
@@ -16,6 +17,20 @@ class NodeSqliteAdapter implements SqliteDatabase {
   }
 }
 
+test("focus reminders default to 45 minutes and persist disabling or interval changes", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new WorkspacePreferencesRepository(new NodeSqliteAdapter(database));
+  assert.equal(await repository.getFocusReminderMinutes(), 45);
+  await repository.saveFocusReminderMinutes(0);
+  assert.equal(await repository.getFocusReminderMinutes(), 0);
+  await repository.saveFocusReminderMinutes(90);
+  assert.equal(await repository.getFocusReminderMinutes(), 90);
+  database.prepare("UPDATE app_meta SET value = ? WHERE key = ?").run("garbage", FOCUS_REMINDER_KEY);
+  assert.equal(await repository.getFocusReminderMinutes(), 45);
+  assert.equal(await repository.saveFocusReminderMinutes(-1), 45);
+  database.close();
+});
+
 test("stores workspace identity and quick links in app metadata", async () => {
   const database = new DatabaseSync(":memory:");
   const repository = new WorkspacePreferencesRepository(new NodeSqliteAdapter(database));
@@ -28,6 +43,15 @@ test("stores workspace identity and quick links in app metadata", async () => {
     avatarDataUrl: "data:image/png;base64,YXZhdGFy",
     quickLinks: [{ id: "docs", title: "文档", url: "https://example.com", category: "general", area: "web", openMode: "external", allowInsecureHttp: false, pinned: true, order: 0 }],
   });
+  database.close();
+});
+
+test("stores device health reminder preferences with safe defaults", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new WorkspacePreferencesRepository(new NodeSqliteAdapter(database));
+  assert.deepEqual(await repository.getHealthReminder(), { enabled: false, time: "22:00" });
+  assert.deepEqual(await repository.saveHealthReminder({ enabled: true, time: "21:45" }), { enabled: true, time: "21:45" });
+  assert.deepEqual(await repository.getHealthReminder(), { enabled: true, time: "21:45" });
   database.close();
 });
 

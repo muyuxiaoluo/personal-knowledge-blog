@@ -29,9 +29,11 @@ type ProfileRow = {
 
 type DailyRow = {
   log_date: string;
+  sleep_minutes: number | null;
   sleep_start: string;
   sleep_end: string;
   awake_minutes: number;
+  awake_minutes_known: number;
   sleep_quality: number | null;
   energy_level: number | null;
   steps: number | null;
@@ -70,9 +72,11 @@ const migrations = [
   )`,
   `CREATE TABLE IF NOT EXISTS health_daily_logs (
     log_date TEXT PRIMARY KEY NOT NULL,
+    sleep_minutes INTEGER,
     sleep_start TEXT NOT NULL DEFAULT '',
     sleep_end TEXT NOT NULL DEFAULT '',
     awake_minutes INTEGER NOT NULL DEFAULT 0,
+    awake_minutes_known INTEGER NOT NULL DEFAULT 0,
     sleep_quality INTEGER,
     energy_level INTEGER,
     steps INTEGER,
@@ -100,7 +104,7 @@ const migrations = [
   "CREATE INDEX IF NOT EXISTS idx_health_meals_date ON health_meals(meal_date DESC)",
 ] as const;
 
-/** Health data is deliberately local-only in v1; it is covered by whole-database backups but not sync v3. */
+/** Health data stays outside sync v3. Opt-in private v4 journaling is installed separately. */
 export class HealthRepository {
   private initialization: Promise<void> | null = null;
 
@@ -112,6 +116,12 @@ export class HealthRepository {
   private async initialize() {
     this.initialization ??= (async () => {
       for (const statement of migrations) await this.database.execute(statement);
+      const dailyColumns = new Set((await this.database.select<{ name: string }>("PRAGMA table_info(health_daily_logs)")).map((column) => column.name));
+      if (!dailyColumns.has("sleep_minutes")) await this.database.execute("ALTER TABLE health_daily_logs ADD COLUMN sleep_minutes INTEGER");
+      if (!dailyColumns.has("awake_minutes_known")) {
+        await this.database.execute("ALTER TABLE health_daily_logs ADD COLUMN awake_minutes_known INTEGER NOT NULL DEFAULT 0");
+        await this.database.execute("UPDATE health_daily_logs SET awake_minutes_known = 1 WHERE awake_minutes > 0");
+      }
     })().catch((error) => {
       this.initialization = null;
       throw error;
@@ -256,19 +266,23 @@ export async function saveHealthDay(
 function dailyWriteStatement(log: HealthDailyLog): SqliteStatement {
   return {
     sql: `INSERT INTO health_daily_logs(
-      log_date, sleep_start, sleep_end, awake_minutes, sleep_quality, energy_level,
-      steps, weight_kg, activity_minutes, activity_note, note, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(log_date) DO UPDATE SET sleep_start = excluded.sleep_start,
+      log_date, sleep_minutes, sleep_start, sleep_end, awake_minutes, awake_minutes_known,
+      sleep_quality, energy_level, steps, weight_kg, activity_minutes, activity_note, note,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(log_date) DO UPDATE SET sleep_minutes = excluded.sleep_minutes,
+      sleep_start = excluded.sleep_start,
       sleep_end = excluded.sleep_end, awake_minutes = excluded.awake_minutes,
+      awake_minutes_known = excluded.awake_minutes_known,
       sleep_quality = excluded.sleep_quality, energy_level = excluded.energy_level,
       steps = excluded.steps, weight_kg = excluded.weight_kg,
       activity_minutes = excluded.activity_minutes, activity_note = excluded.activity_note,
       note = excluded.note, updated_at = excluded.updated_at`,
     bindValues: [
-      log.date, log.sleepStart, log.sleepEnd, log.awakeMinutes, log.sleepQuality,
-      log.energyLevel, log.steps, log.weightKg, log.activityMinutes, log.activityNote,
-      log.note, log.createdAt, log.updatedAt,
+      log.date, log.sleepMinutes, log.sleepStart, log.sleepEnd, log.awakeMinutes ?? 0,
+      log.awakeMinutes === null ? 0 : 1, log.sleepQuality, log.energyLevel, log.steps,
+      log.weightKg, log.activityMinutes, log.activityNote, log.note, log.createdAt,
+      log.updatedAt,
     ],
   };
 }
@@ -331,7 +345,8 @@ function normalizeDaily(log: HealthDailyLog, now: Date): HealthDailyLog {
   const timestamp = now.toISOString();
   return {
     ...log,
-    awakeMinutes: nullableNumber(log.awakeMinutes, "夜间清醒时间", 0, 720, true) ?? 0,
+    sleepMinutes: nullableNumber(log.sleepMinutes, "实际睡眠时长", 1, 1_440, true),
+    awakeMinutes: nullableNumber(log.awakeMinutes, "夜间清醒时间", 0, 720, true),
     sleepQuality: nullableNumber(log.sleepQuality, "睡眠感受", 1, 5, true),
     energyLevel: nullableNumber(log.energyLevel, "精神状态", 1, 5, true),
     steps: nullableNumber(log.steps, "步数", 0, 200_000, true),
@@ -387,9 +402,10 @@ function rowToProfile(row: ProfileRow): HealthProfile {
 function rowToDaily(row: DailyRow): HealthDailyLog {
   return {
     date: row.log_date,
+    sleepMinutes: row.sleep_minutes,
     sleepStart: row.sleep_start,
     sleepEnd: row.sleep_end,
-    awakeMinutes: row.awake_minutes,
+    awakeMinutes: row.awake_minutes_known ? row.awake_minutes : null,
     sleepQuality: row.sleep_quality,
     energyLevel: row.energy_level,
     steps: row.steps,

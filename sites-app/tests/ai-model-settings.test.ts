@@ -23,22 +23,33 @@ test("uses the agreed DeepSeek defaults and feature overrides", () => {
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: new MemoryStorage() });
   const settings = loadDeepSeekModelSettings();
   assert.deepEqual(settings, DEFAULT_DEEPSEEK_MODEL_SETTINGS);
-  assert.equal(resolveDeepSeekModel("projectCreate", settings), "deepseek-v4-pro");
-  assert.equal(resolveDeepSeekModel("projectReplan", settings), "deepseek-v4-pro");
-  assert.equal(resolveDeepSeekModel("nextAction", settings), "deepseek-v4-flash");
-  assert.equal(resolveDeepSeekModel("financeReport", settings), "deepseek-v4-flash");
-  assert.equal(resolveDeepSeekModel("healthAdvice", settings), "deepseek-v4-flash");
+  assert.equal(resolveDeepSeekModel("projectCreate", settings), "deepseek-flash");
+  assert.equal(resolveDeepSeekModel("projectReplan", settings), "deepseek-flash");
+  assert.equal(resolveDeepSeekModel("nextAction", settings), "deepseek-flash");
+  assert.equal(resolveDeepSeekModel("financeReport", settings), "deepseek-flash");
+  assert.equal(resolveDeepSeekModel("healthAdvice", settings), "deepseek-flash");
 });
 
 test("prefers an explicit feature model and keeps preferences device-local", () => {
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: new MemoryStorage() });
   const saved = saveDeepSeekModelSettings({
-    defaultModel: "deepseek-v4-flash",
-    overrides: { projectCreate: "deepseek-v4-pro", projectReplan: "deepseek-v4-pro", nextAction: "deepseek-v4-pro", financeReport: "", healthAdvice: "" },
+    defaultModel: "deepseek-flash",
+    overrides: { projectCreate: "", projectReplan: "", nextAction: "deepseek-custom", financeReport: "", healthAdvice: "" },
   });
-  assert.equal(resolveDeepSeekModel("nextAction", saved), "deepseek-v4-pro");
-  assert.equal(resolveDeepSeekModel("financeReport", saved), "deepseek-v4-flash");
-  assert.equal(resolveDeepSeekModel("healthAdvice", saved), "deepseek-v4-flash");
+  assert.equal(resolveDeepSeekModel("nextAction", saved), "deepseek-custom");
+  assert.equal(resolveDeepSeekModel("financeReport", saved), "deepseek-flash");
+  assert.equal(resolveDeepSeekModel("healthAdvice", saved), "deepseek-flash");
+});
+
+test("migrates retired V4 web-era aliases to the unified model", () => {
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: new MemoryStorage() });
+  const saved = saveDeepSeekModelSettings({
+    defaultModel: "deepseek-v4-flash",
+    overrides: { projectCreate: "deepseek-v4-pro", projectReplan: "deepseek-v4-flash-vision-exp", nextAction: "", financeReport: "", healthAdvice: "" },
+  });
+  assert.equal(saved.defaultModel, "deepseek-flash");
+  assert.equal(saved.overrides.projectCreate, "deepseek-flash");
+  assert.equal(saved.overrides.projectReplan, "deepseek-flash");
 });
 
 test("resolves an available model through one shared cache path", async () => {
@@ -46,11 +57,11 @@ test("resolves an available model through one shared cache path", async () => {
   let fetches = 0;
   const fetchModels = async () => {
     fetches += 1;
-    return [{ id: "deepseek-v4-flash", object: "model", ownedBy: "deepseek" }];
+    return [{ id: "deepseek-flash", object: "model", ownedBy: "deepseek" }];
   };
 
-  assert.equal(await resolveAvailableDeepSeekModel("financeReport", fetchModels), "deepseek-v4-flash");
-  assert.equal(await resolveAvailableDeepSeekModel("healthAdvice", fetchModels), "deepseek-v4-flash");
+  assert.equal(await resolveAvailableDeepSeekModel("financeReport", fetchModels), "deepseek-flash");
+  assert.equal(await resolveAvailableDeepSeekModel("healthAdvice", fetchModels), "deepseek-flash");
   assert.equal(fetches, 1);
 
   cacheDeepSeekModels([{ id: "another-model", object: "model", ownedBy: "deepseek" }]);

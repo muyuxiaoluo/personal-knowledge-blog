@@ -1,4 +1,5 @@
 import type { StoredArticle } from "../types";
+import { errorMessage } from "./error-message";
 import type {
   ArticleChange,
   SyncCapableArticleRepository,
@@ -35,6 +36,8 @@ export type SyncResult = {
   limited?: boolean;
   attachmentUploads?: number;
   attachmentDownloads?: number;
+  failed?: number;
+  deferredDownloads?: number;
 };
 
 type SyncResponse = {
@@ -109,6 +112,15 @@ export class CloudSyncClient {
       method: "POST",
       body: JSON.stringify({ refreshToken }),
     });
+  }
+
+  async changePassword(accessToken: string, currentPassword: string, newPassword: string) {
+    const response = await this.request("/v1/auth/change-password", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+    if (!isRecord(response) || response.changed !== true) throw invalidResponse("服务器未确认密码修改结果，请重新登录确认。");
   }
 
   async sync(accessToken: string): Promise<SyncResult> {
@@ -200,20 +212,30 @@ export class CloudSyncClient {
     let conflicts = 0;
     let attachmentUploads = 0;
     let attachmentDownloads = 0;
+    let failed = 0;
+    let deferredDownloads = 0;
 
     for (let page = 1; page <= this.maxPages; page += 1) {
-      const outgoing = await repository.listPending();
+      let outgoing = await repository.listPending();
       if (this.attachmentRepository) {
+        const blocked = new Set<string>();
         for (const item of outgoing) {
           if (item.entityType !== "attachment" || item.operation !== "upsert") continue;
-          const manifest = attachmentManifestFromSyncPayload(item.id, item.payload);
-          if (!manifest) throw invalidResponse(`附件 ${item.id} 的清单不完整。`);
-          attachmentUploads += await this.attachmentRepository.uploadForSync(
-            this.baseUrl,
-            accessToken,
-            manifest,
-          );
+          try {
+            const manifest = attachmentManifestFromSyncPayload(item.id, item.payload);
+            if (!manifest) throw invalidResponse(`附件 ${item.id} 的清单不完整。`);
+            attachmentUploads += await this.attachmentRepository.uploadForSync(this.baseUrl, accessToken, manifest);
+          } catch (error) {
+            const message = errorMessage(error, "附件上传未完成，请重试。");
+            if (/HTTP 401\b/.test(message) || error instanceof CloudSyncError && error.code === "unauthorized") {
+              throw new CloudSyncError("登录已失效，请重新登录。", "unauthorized");
+            }
+            await repository.markError(item.changeId, message);
+            blocked.add(item.changeId);
+            failed++;
+          }
         }
+        outgoing = outgoing.filter(item => !blocked.has(item.changeId));
       }
       const response = await this.request("/v3/sync", {
         method: "POST",
@@ -233,14 +255,19 @@ export class CloudSyncClient {
           if (item.entityType !== "attachment" || item.operation !== "upsert") continue;
           const manifest = attachmentManifestFromSyncPayload(item.id, item.payload);
           if (!manifest) throw invalidResponse(`云端附件 ${item.id} 的清单不完整。`);
-          if (await this.attachmentRepository.downloadForSync(
-            this.baseUrl,
-            accessToken,
-            manifest,
-          )) attachmentDownloads += 1;
+          try {
+            if (await this.attachmentRepository.downloadForSync(this.baseUrl, accessToken, manifest)) attachmentDownloads += 1;
+          } catch (error) {
+            if (/HTTP 401\b/.test(errorMessage(error, "")) || error instanceof CloudSyncError && error.code === "unauthorized") {
+              throw new CloudSyncError("登录已失效，请重新登录。", "unauthorized");
+            }
+            // Keep the manifest so the remote loader can retry when the note is opened.
+            deferredDownloads++;
+          }
         }
       }
       await repository.commit(result);
+      failed += result.failed.length;
       uploaded += result.accepted.length;
       downloaded += result.changes.length;
       conflicts += result.conflicts.length;
@@ -256,6 +283,8 @@ export class CloudSyncClient {
           limited: false,
           attachmentUploads,
           attachmentDownloads,
+          failed,
+          deferredDownloads,
         };
       }
       if (page === this.maxPages) {
@@ -298,7 +327,10 @@ export class CloudSyncClient {
       }
 
       if (response.status === 401) {
-        throw new CloudSyncError("登录已失效，请重新登录。", "unauthorized");
+        throw new CloudSyncError(
+          path === "/v1/auth/login" ? "账户或密码不正确，请检查服务器地址与同步账户。" : "登录已失效，请重新登录。",
+          "unauthorized",
+        );
       }
       if (!response.ok) {
         const message =
@@ -357,8 +389,8 @@ function parseV3SyncResponse(value: unknown): UniversalSyncResponse {
 }
 
 const v3EntityTypes = new Set<SyncEntityType>([
-  "article", "attachment", "project", "milestone", "task", "log", "proposal",
-  "task_plan", "focus_session", "weekly_focus", "weekly_review", "daily_closeout",
+  "article", "attachment", "project", "milestone", "task", "log", "proposal", "accumulation",
+  "task_plan", "task_plan_history", "daily_situation", "focus_session", "weekly_focus", "weekly_review", "daily_closeout",
   "calendar_event", "rest_day", "preference",
 ]);
 

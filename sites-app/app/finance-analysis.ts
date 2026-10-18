@@ -92,7 +92,7 @@ export function summarizeFinanceMonth(
   }, {} as Record<FinanceBudgetRole, number>);
   for (const transaction of expenses) {
     categoryTotals[transaction.category] += transaction.amountCents;
-    budgetRoleTotals[transaction.budgetRole] += transaction.amountCents;
+    budgetRoleTotals[transaction.budgetRoleConfirmed ? transaction.budgetRole : "unknown"] += transaction.amountCents;
   }
   const forecastExpenseCents = Math.max(0, ordinaryExpenseCents - currentVariableEssentialCents + variableEssentialBaselineCents);
   const recurringCandidates = findRecurringCandidates(transactions);
@@ -159,6 +159,7 @@ export function buildFinanceInsightSnapshot(
     }];
   });
   return {
+    analysisVersion: 2,
     month: summary.month,
     incomeBaselineCents: summary.stableIncomeCents,
     actualIncomeCents: summary.actualIncomeCents,
@@ -193,8 +194,8 @@ export function buildFinanceInsightSnapshot(
       return amountCents ? [{ evidenceId: `K-${stableShortHash(entry.value)}`, category: entry.value, amountCents }] : [];
     }),
     pendingConfirmation: {
-      count: currentExpenses.filter((transaction) => !transaction.budgetRoleConfirmed).length,
-      amountCents: sum(currentExpenses.filter((transaction) => !transaction.budgetRoleConfirmed).map((transaction) => transaction.amountCents)),
+      count: currentExpenses.filter((transaction) => !transaction.budgetRoleConfirmed || transaction.budgetRole === "unknown").length,
+      amountCents: sum(currentExpenses.filter((transaction) => !transaction.budgetRoleConfirmed || transaction.budgetRole === "unknown").map((transaction) => transaction.amountCents)),
     },
     anonymousProjects,
     evidence: summary.savingCandidates.map((candidate) => ({
@@ -211,12 +212,16 @@ export function buildFinanceInsightSnapshot(
 export function validateFinanceAiReportContent(value: unknown, snapshot: FinanceInsightSnapshot): FinanceAiReportContent {
   if (!isObject(value)) throw new Error("AI 返回的月报不是有效对象");
   const opportunitiesValue = readArray(value.opportunities, "节约机会");
+  if (opportunitiesValue.length > 3) throw new Error("AI 月报建议过多，请重新生成最多三项重点建议");
   const caps = new Map<string, number>();
-  snapshot.savingCandidates.forEach((candidate) => caps.set(candidate.evidenceId, candidate.transactionTotalCents));
+  snapshot.savingCandidates.forEach((candidate) => caps.set(candidate.evidenceId, candidate.maximumSavingCents));
+  const usedEvidence = new Set<string>();
   const opportunities = opportunitiesValue.map((entry, index) => {
     if (!isObject(entry)) throw new Error(`第 ${index + 1} 条节约机会格式无效`);
     const evidenceIds = readStringArray(entry.evidenceIds, "证据编号");
     if (!evidenceIds.length || evidenceIds.some((id) => !caps.has(id))) throw new Error(`第 ${index + 1} 条节约机会引用了未知证据`);
+    if (evidenceIds.some((id) => usedEvidence.has(id))) throw new Error("AI 对同一证据重复计算了节省金额");
+    evidenceIds.forEach((id) => usedEvidence.add(id));
     const minimumSavingCents = readNonNegativeInteger(entry.minimumSavingCents, "节省下限");
     const maximumSavingCents = readNonNegativeInteger(entry.maximumSavingCents, "节省上限");
     const available = sum([...new Set(evidenceIds)].map((id) => caps.get(id) ?? 0));
@@ -239,7 +244,8 @@ export function validateFinanceAiReportContent(value: unknown, snapshot: Finance
   const totalOpportunityMax = sum(opportunities.map((opportunity) => opportunity.maximumSavingCents));
   const totalEvidenceCap = sum([...new Set(opportunities.flatMap((opportunity) => opportunity.evidenceIds))].map((id) => caps.get(id) ?? 0));
   if (totalOpportunityMax > totalEvidenceCap) throw new Error("AI 对同一证据重复计算了节省金额");
-  return {
+  const content: FinanceAiReportContent = {
+    presentationVersion: 2,
     overview: readString(value.overview, "本月概览"),
     essentialStructure: readString(value.essentialStructure, "必要支出结构"),
     pendingConfirmations: readStringArray(value.pendingConfirmations, "待确认项"),
@@ -251,8 +257,18 @@ export function validateFinanceAiReportContent(value: unknown, snapshot: Finance
       aggressiveCents: snapshot.localScenarios.aggressiveCents,
     },
     nextActions: readStringArray(value.nextActions, "下月行动").slice(0, 3),
-    questions: readStringArray(value.questions, "待回答问题"),
+    questions: readStringArray(value.questions, "待回答问题").slice(0, 2),
   };
+  assertFinanceReportLanguage(content);
+  return content;
+}
+
+export function assertFinanceReportLanguage(content: FinanceAiReportContent) {
+  const prose = [content.overview, content.essentialStructure, ...content.pendingConfirmations,
+    ...content.worthwhileSpending, ...content.nextActions, ...content.questions,
+    ...content.opportunities.flatMap((item) => [item.title, item.reason, item.action, item.tradeoff])].join("\n");
+  const internalTerms = /\b(?:[a-z]+[A-Z][a-zA-Z]*|fixed-essential|variable-essential|growth|quality|optional|unknown|housing|food|transport|daily|health|learning|digital|relationships|entertainment|travel|fees|other|true|false)\b|\b[SKRAP]-[A-Z0-9]{3,}\b|\d[\d,，]*(?:\.\d+)?\s*分(?!钟)/;
+  if (internalTerms.test(prose)) throw new Error("AI 月报仍含内部字段或未换算的金额，请重新生成；已有报告已保留");
 }
 
 export async function fingerprintFinanceSnapshot(snapshot: FinanceInsightSnapshot) {
@@ -296,27 +312,32 @@ function findRecurringCandidates(transactions: FinanceTransaction[]): FinanceRec
 function findSavingCandidates(expenses: FinanceTransaction[]): FinanceSavingCandidate[] {
   const eligible = expenses.filter((transaction) => (
     transaction.budgetRoleConfirmed
+    && transaction.budgetRole !== "unknown"
     && transaction.budgetRole !== "fixed-essential"
     && transaction.budgetRole !== "growth"
-    && (transaction.budgetRole === "optional" || transaction.valueRating === "regret")
+    && transaction.valueRating !== "worthwhile"
+    && (transaction.budgetRole === "optional" || transaction.budgetRole === "variable-essential" || transaction.valueRating === "regret")
   ));
   const groups = new Map<string, FinanceTransaction[]>();
   for (const transaction of eligible) {
-    const key = `${transaction.category}:${transaction.budgetRole}`;
+    const key = `${transaction.category}:${transaction.budgetRole}:${transaction.valueRating ?? "unrated"}`;
     const group = groups.get(key) ?? [];
     group.push(transaction);
     groups.set(key, group);
   }
   return [...groups.entries()].map(([key, entries]) => {
     const transactionTotalCents = sum(entries.map((entry) => entry.amountCents));
-    const high = entries.every((entry) => entry.valueRating === "regret") || entries.every((entry) => entry.budgetRole === "optional" && entry.valueRating === "regret");
+    const high = entries.every((entry) => entry.budgetRole === "optional" && entry.valueRating === "regret");
     return {
       evidenceId: `S-${stableShortHash(key)}`,
       category: entries[0].category,
       budgetRole: entries[0].budgetRole,
+      valueRating: entries[0].valueRating,
       transactionTotalCents,
-      minimumSavingCents: Math.round(transactionTotalCents * (high ? 0.5 : 0.1)),
-      maximumSavingCents: Math.round(transactionTotalCents * (high ? 1 : 0.3)),
+      // Only explicitly regretted discretionary purchases have a known avoidable ceiling.
+      // Necessary needs still cost money when replaced; their alternative cost is unknown.
+      minimumSavingCents: 0,
+      maximumSavingCents: high ? transactionTotalCents : 0,
       confidence: high ? "high" as const : "medium" as const,
     };
   }).sort((left, right) => right.maximumSavingCents - left.maximumSavingCents);

@@ -578,7 +578,7 @@ kbd {
 }
 
 .capture-dialog > header span,
-.account-dialog > span,
+.account-dialog-heading > span,
 .update-dialog > span {
   color: var(--accent);
   font-size: 11px;
@@ -601,7 +601,7 @@ kbd {
 }
 
 .capture-dialog h2,
-.account-dialog h2,
+.account-dialog-heading h2,
 .update-dialog h2 {
   margin: 10px 0 6px;
   color: var(--ink);
@@ -611,7 +611,7 @@ kbd {
 }
 
 .capture-dialog > p,
-.account-dialog > p,
+.account-dialog-heading > p,
 .update-dialog > p {
   margin: 0 0 19px;
   color: #77827c;
@@ -673,15 +673,79 @@ kbd {
 }
 
 .account-dialog {
-  width: min(450px, 100%);
+  width: min(620px, 100%);
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-radius: 18px;
+  background: #fbfaf7;
 }
+
+.account-dialog-heading {
+  padding: 28px 32px 20px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(145deg, rgba(223, 232, 225, .72), rgba(251, 249, 243, .35));
+}
+
+.account-dialog-heading h2 { margin-top: 7px; }
+.account-dialog-heading > p { max-width: 500px; margin-bottom: 0; }
+.account-dialog > form,
+.account-current,
+.account-dialog > .account-private { margin-inline: 32px; }
+.account-dialog > form { padding-block: 24px 30px; }
+
+.account-profile {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  border: 1px solid rgba(41, 77, 66, .1);
+  border-radius: 12px;
+  padding: 13px 14px;
+  background: rgba(255, 255, 255, .72);
+}
+
+.account-profile > i {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--moss);
+  color: white;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.account-profile > div { display: grid; min-width: 0; gap: 2px; }
+.account-profile small { overflow: hidden; margin: 0; text-overflow: ellipsis; white-space: nowrap; }
+.account-logout { justify-self: start; }
+
+@media (max-width: 680px) {
+  .account-backdrop { padding: 12px; }
+  .account-dialog { max-height: calc(100dvh - 24px); }
+  .account-dialog-heading { padding: 24px 20px 18px; }
+  .account-dialog > form,
+  .account-current,
+  .account-dialog > .account-private { margin-inline: 20px; }
+}
+
+.account-dialog .private-sync-panel { border-block: 1px solid var(--line); padding-block: 14px; margin-block: 16px; }
+.account-dialog .private-sync-panel p { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.account-dialog .private-sync-panel label { margin-block: 12px; }
+.account-dialog .private-action { min-height: 40px; padding: 8px 12px; margin: 4px; border: 1px solid var(--line); border-radius: 8px; color: var(--moss); background: var(--cream); }
+.account-dialog .private-sync-panel output { display: block; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
 
 .account-dialog form,
 .account-dialog label,
 .account-current {
   display: grid;
+  min-width: 0;
   gap: 7px;
 }
+
+.account-current { padding-block: 22px 8px; gap: 12px; }
 
 .account-dialog form {
   gap: 13px;
@@ -719,8 +783,13 @@ kbd {
   margin-bottom: 8px;
   color: #78847e;
 }
+.account-current > small { overflow-wrap: anywhere; }
+.account-password, .account-private { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 12px; }
+.account-password form { margin-top: 12px; }
+.account-password p { font-size: 13px; line-height: 1.6; margin: 0; }
 
 .sync-center {
+  min-width: 0;
   margin-top: 8px;
   border: 1px solid var(--line);
   border-radius: 9px;
@@ -746,20 +815,31 @@ kbd {
 .sync-center-body {
   display: grid;
   max-height: 310px;
-  overflow: auto;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   gap: 8px;
   border-top: 1px solid var(--line);
   padding: 10px 12px 12px;
 }
 
 .sync-center-body p { margin: 0; }
-.sync-center-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-radius: 7px; padding: 8px; background: white; }
+.sync-center-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; border: 1px solid rgba(41, 77, 66, .08); border-radius: 10px; padding: 10px 11px; background: white; }
 .sync-center-item > div { display: grid; min-width: 0; gap: 2px; }
 .sync-center-item > div:last-child { display: flex; flex-wrap: wrap; justify-content: flex-end; }
 .sync-center-item strong { overflow: hidden; color: var(--ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.sync-center-item small { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 .sync-center-item button { border: 1px solid var(--line); border-radius: 6px; padding: 5px 7px; background: var(--cream); color: var(--moss); font-size: 10px; cursor: pointer; }
 .sync-center-item.error { border-left: 3px solid #bd6c5d; }
 .sync-center-item.recycled { border-left: 3px solid #9a8552; }
+.sync-error-detail { min-width: 0; margin-top: 4px; }
+.account-dialog .sync-error-detail > summary { width: max-content; color: #8a6258; font-size: 10px; font-weight: 700; cursor: pointer; }
+.sync-error-detail code { display: block; min-width: 0; max-height: 88px; margin-top: 5px; overflow: auto; border-radius: 6px; padding: 7px 8px; background: #f4f1ec; color: #6f6862; font: 10px/1.55 var(--font-code); overflow-wrap: anywhere; white-space: pre-wrap; word-break: break-word; }
+
+@media (max-width: 520px) {
+  .sync-center-item { grid-template-columns: minmax(0, 1fr); }
+  .sync-center-item > button { justify-self: start; }
+}
 
 .update-dialog {
   width: min(480px, 100%);

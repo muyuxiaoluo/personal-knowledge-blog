@@ -251,6 +251,16 @@ export class FinanceRepository {
     return rows.map(rowToTransaction);
   }
 
+  async listCalendarExpenses(month: string): Promise<FinanceTransaction[]> {
+    await this.initialize();
+    assertMonth(month);
+    const rows = await this.database.select<TransactionRow>(
+      "SELECT * FROM finance_transactions WHERE occurred_at >= ? AND occurred_at < ? AND kind = 'expense' ORDER BY occurred_at DESC",
+      [`${month}-01`, `${nextMonth(month)}-01`],
+    );
+    return rows.map(rowToTransaction);
+  }
+
   async addManualTransaction(entry: FinanceManualEntry): Promise<FinanceTransaction> {
     await this.initialize();
     assertTimestamp(entry.occurredAt);
@@ -295,6 +305,30 @@ export class FinanceRepository {
     await this.initialize();
     const rows = await this.database.select<BatchRow>("SELECT * FROM finance_import_batches ORDER BY created_at DESC LIMIT ?", [Math.max(1, Math.min(100, Math.round(limit)))]);
     return rows.map(rowToBatch);
+  }
+
+  async listManualTransactions(limit = 100): Promise<FinanceTransaction[]> {
+    await this.initialize();
+    return (await this.database.select<TransactionRow>("SELECT * FROM finance_transactions WHERE import_batch_id IS NULL ORDER BY occurred_at DESC LIMIT ?", [Math.max(1, Math.min(2000, Math.round(limit)))])).map(rowToTransaction);
+  }
+
+  async updateManualTransaction(id: string, entry: FinanceManualEntry) {
+    await this.initialize();
+    assertTimestamp(entry.occurredAt);
+    const amount = positiveCents(entry.amountCents, "金额");
+    if (!entry.description.trim() || !isSource(entry.source) || !isCategory(entry.category) || !isBudgetRole(entry.budgetRole)) throw new Error("请检查消费说明、来源和分类");
+    const existing = (await this.database.select<TransactionRow>("SELECT * FROM finance_transactions WHERE id=? AND import_batch_id IS NULL", [id]))[0];
+    if (!existing) throw new Error("没有找到这笔手工记录");
+    const merchant = entry.description.trim();
+    const fingerprint = financeDuplicateFingerprint({ ...rowToTransaction(existing), ...entry, merchant });
+    await this.database.execute(`UPDATE finance_transactions SET occurred_at=?,amount_cents=?,description=?,merchant=?,merchant_normalized=?,source=?,account_id=?,category=?,budget_role=?,category_confirmed=?,budget_role_confirmed=?,project_id=?,life_domain=?,value_rating=?,duplicate_fingerprint=?,updated_at=? WHERE id=? AND import_batch_id IS NULL`,
+      [entry.occurredAt, amount, merchant, merchant, normalizeFinanceMerchant(merchant), entry.source, accountIdForSource(entry.source), entry.category, entry.budgetRole, entry.category === "other" ? 0 : 1, entry.budgetRole === "unknown" ? 0 : 1, entry.projectId || null, entry.lifeDomain || null, entry.valueRating, fingerprint, this.clock().toISOString(), id]);
+  }
+
+  async deleteManualTransaction(id: string) {
+    await this.initialize();
+    // The private journal's DELETE trigger records the tombstone atomically.
+    await this.database.execute("DELETE FROM finance_transactions WHERE id=? AND import_batch_id IS NULL", [id]);
   }
 
   async reconcileImportPreview(preview: FinanceImportPreview): Promise<FinanceImportPreview> {

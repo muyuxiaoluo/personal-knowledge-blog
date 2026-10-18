@@ -32,7 +32,7 @@ class NodeSqliteAdapter implements SqliteDatabase {
   }
 }
 
-test("loads the project index in three reads and a selected project in two more", async () => {
+test("loads the project index in three reads and a selected project in three more", async () => {
   const adapter = new NodeSqliteAdapter(new DatabaseSync(":memory:"));
   const repository = new SqliteProjectRepository(adapter, {
     seedProjects: initialProjectSeeds,
@@ -44,7 +44,7 @@ test("loads the project index in three reads and a selected project in two more"
   assert.ok(projects[0]);
   adapter.selectCount = 0;
   await repository.get(projects[0].id);
-  assert.equal(adapter.selectCount, 2);
+  assert.equal(adapter.selectCount, 3);
 });
 
 test("seeds staged projects and persists project progress", async () => {
@@ -56,11 +56,11 @@ test("seeds staged projects and persists project progress", async () => {
   });
 
   const seeded = await repository.list();
-  assert.equal(seeded.length, 5);
-  assert.deepEqual(rootProjectStatusCounts(seeded), { active: 4, paused: 1, completed: 0 });
-  assert.equal(seeded[0].title, "科研方向选择");
-  assert.equal(seeded[0].category, "learning");
-  assert.equal(seeded[0].isDraft, true);
+  assert.equal(seeded.length, 9);
+  assert.deepEqual(rootProjectStatusCounts(seeded), { active: 7, paused: 2, completed: 0 });
+  assert.equal(seeded[0].title, "机器人岗位投递与面试迭代");
+  assert.equal(seeded[0].category, "career");
+  assert.equal(seeded[0].isDraft, false);
   assert.ok(seeded[0].currentMilestone);
   assert.ok(seeded[0].nextTask);
 
@@ -74,6 +74,20 @@ test("seeds staged projects and persists project progress", async () => {
   assert.equal(workbench.tasks[0].actionType, "organize");
   assert.ok(workbench.tasks[0].details);
   assert.deepEqual(workbench.proposals, []);
+
+  const lidarPortfolio = await repository.get("project-ros2-lidar-uav-portfolio");
+  assert.ok(lidarPortfolio);
+  assert.equal(lidarPortfolio.project.targetDate, "2027-05-15");
+  assert.equal(lidarPortfolio.milestones.length, 4);
+  assert.equal(lidarPortfolio.tasks.length, 10);
+  assert.equal(lidarPortfolio.tasks.filter((task) => task.status === "next").length, 1);
+  assert.match(lidarPortfolio.tasks.find((task) => task.status === "next")?.currentFocus ?? "", /当前系统/);
+
+  const fastLio2 = await repository.get("project-fast-lio2-depth");
+  assert.ok(fastLio2);
+  assert.equal(fastLio2.project.status, "paused");
+  assert.equal(fastLio2.tasks.filter((task) => task.status === "next").length, 0);
+  assert.match(fastLio2.logs[0]?.body ?? "", /启动规则/);
 
   await repository.confirmProject(workbench.project.id);
   const confirmed = await repository.get(workbench.project.id);
@@ -149,7 +163,7 @@ test("seeds staged projects and persists project progress", async () => {
   const reopened = new SqliteProjectRepository(adapter, {
     seedProjects: initialProjectSeeds,
   });
-  assert.equal((await reopened.list()).length, 5);
+  assert.equal((await reopened.list()).length, 9);
   assert.equal(
     (await reopened.get(savedProject.id))?.project.outcome,
     "完成项目工作台并用于真实规划。",
@@ -768,7 +782,161 @@ test("seed upgrades add missing records without overwriting user edits", async (
   assert.equal(editedTask?.details, "这段内容必须在升级后保留");
   assert.equal(
     database.prepare("SELECT value FROM app_meta WHERE key = 'project_seed_version'").get()?.value,
-    "3",
+    "4",
   );
+  database.close();
+});
+
+test("adaptive checkpoints and actions progress independently and survive reopening", async () => {
+  const database = new DatabaseSync(":memory:");
+  const adapter = new NodeSqliteAdapter(database);
+  const repository = new SqliteProjectRepository(adapter, { seedProjects: initialProjectSeeds });
+  const original = await repository.get("project-research-direction");
+  assert.ok(original);
+  const first = { ...original.milestones[0], status: "current" as const };
+  const second = { ...first, id: "parallel-review", title: "写综述", sortOrder: 200 };
+  const candidate = { ...first, id: "future-candidate", title: "投稿", status: "planned" as const, sortOrder: 300 };
+  await repository.saveWorkspace({ ...original.project, planningMode: "adaptive" }, [first, second, candidate], null);
+  await repository.saveMilestone({ ...second, dueDate: "2026-10-01" });
+  const action = original.tasks[0];
+  await repository.saveTask({ ...action, milestoneId: first.id, status: "next" });
+  await repository.saveTask({ ...action, id: "parallel-action", milestoneId: second.id, status: "next" });
+  await repository.saveTask({ ...action, id: "replacement-action", milestoneId: first.id, status: "next" });
+  assert.equal((await repository.get(original.project.id))?.tasks.find((item) => item.id === action.id)?.status, "later");
+  await repository.updateTaskStatus(action.id, "next");
+  const reopened = new SqliteProjectRepository(adapter);
+  let detail = await reopened.get(original.project.id);
+  assert.equal(detail?.milestones.filter((item) => item.status === "current").length, 2);
+  assert.equal(detail?.tasks.filter((item) => item.status === "next").length, 2);
+  await reopened.completeMilestone(first.id, "开题完成");
+  detail = await reopened.get(original.project.id);
+  assert.equal(detail?.milestones.find((item) => item.id === second.id)?.status, "current");
+  assert.equal(detail?.milestones.find((item) => item.id === candidate.id)?.status, "planned");
+  assert.equal(detail?.tasks.find((item) => item.id === "parallel-action")?.status, "next");
+});
+
+test("retires legacy branch relationships without losing their workspace", async () => {
+  const database = new DatabaseSync(":memory:");
+  const adapter = new NodeSqliteAdapter(database);
+  const repository = new SqliteProjectRepository(adapter, { seedProjects: initialProjectSeeds });
+  const parent = await repository.get("project-research-direction");
+  assert.ok(parent);
+  const branch = await repository.saveProject({ ...parent.project, id: "legacy-side", title: "课程学习", projectType: "side", parentProjectId: parent.project.id, supportsMilestoneId: parent.milestones[0].id });
+  await repository.saveMilestone({ ...parent.milestones[0], id: "legacy-node", projectId: branch.id });
+  await repository.saveTask({ ...parent.tasks[0], id: "legacy-action", projectId: branch.id, milestoneId: "legacy-node" });
+  await repository.addLog(branch.id, "课程看到第三章");
+  const reopened = new SqliteProjectRepository(adapter);
+  const detail = await reopened.get(branch.id);
+  assert.equal(detail?.project.parentProjectId, null);
+  assert.equal(detail?.project.projectType, "main");
+  assert.equal(detail?.milestones.length, 1);
+  assert.equal(detail?.tasks[0].milestoneId, "legacy-node");
+  assert.ok(detail?.logs.some((log) => log.body === "课程看到第三章"));
+  const again = await new SqliteProjectRepository(adapter).get(branch.id);
+  assert.deepEqual(again, detail);
+});
+
+test("persists fork and merge edges, preserves lanes on completion, and gates a merge on all parents", async () => {
+  const adapter = new NodeSqliteAdapter(new DatabaseSync(":memory:"));
+  const repository = new SqliteProjectRepository(adapter, { seedProjects: initialProjectSeeds });
+  const original = await repository.get("project-research-direction");
+  assert.ok(original);
+  const base = { ...original.milestones[0], id: "graph-base", title: "理解领域", status: "completed" as const, predecessorIds: [], sortOrder: 10 };
+  const left = { ...base, id: "graph-proposal", title: "开题报告", status: "current" as const, predecessorIds: [base.id], sortOrder: 20 };
+  const right = { ...left, id: "graph-review", title: "综述写作", sortOrder: 30 };
+  const merge = { ...base, id: "graph-merge", title: "整理研究方案", status: "planned" as const, predecessorIds: [left.id, right.id], sortOrder: 40 };
+  await repository.saveWorkspace({ ...original.project, planningMode: "adaptive" }, [base, left, right, merge], null);
+  const { routeLayers } = await import("../app/project-route");
+  const before = routeLayers((await repository.get(original.project.id))!.milestones).map((row) => row.map((node) => node.id));
+  assert.deepEqual(before, [[base.id], [left.id, right.id], [merge.id]]);
+  await repository.completeMilestone(left.id, "开题验收");
+  await assert.rejects(repository.saveMilestone({ ...merge, status: "current" }), /前置节点/);
+  assert.equal((await repository.get(original.project.id))?.milestones.find((node) => node.id === right.id)?.status, "current");
+  await repository.completeMilestone(right.id, "综述验收");
+  await repository.saveMilestone({ ...merge, status: "current" });
+  const reopened = await new SqliteProjectRepository(adapter).get(original.project.id);
+  assert.ok(reopened);
+  assert.deepEqual(routeLayers(reopened.milestones).map((row) => row.map((node) => node.id)), before);
+  assert.deepEqual(reopened.milestones.find((node) => node.id === merge.id)?.predecessorIds, [left.id, right.id]);
+  const { UniversalSyncRepository } = await import("../app/data/universal-sync-repository");
+  const pending = await new UniversalSyncRepository(adapter).listPending();
+  const syncedMerge = pending.find((item) => item.entityType === "milestone" && item.id === merge.id);
+  assert.ok(syncedMerge);
+  assert.deepEqual(JSON.parse(String(syncedMerge.payload.predecessor_ids)), [left.id, right.id]);
+  await assert.rejects(repository.saveMilestone({ ...base, predecessorIds: [merge.id] }), /循环/);
+  await assert.rejects(repository.saveMilestone({ ...right, predecessorIds: ["another-project-node"] }), /同一项目/);
+  await assert.rejects(repository.removeMilestone(left.id), /后续任务/);
+});
+
+test("stores free-form project accumulation notes and makes a deleted checkpoint note shared", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-09-22T08:00:00.000Z"),
+  });
+  const detail = await repository.get("project-life-workbench-v01");
+  assert.ok(detail);
+  const checkpoint = detail.milestones.find((item) => item.status === "current");
+  assert.ok(checkpoint);
+  const saved = await repository.saveAccumulation({
+    id: "",
+    projectId: detail.project.id,
+    milestoneId: checkpoint.id,
+    title: "",
+    content: "使用工作台推进一次科研任务并记录摩擦。行动编辑需要更接近当前任务线。",
+    reference: "notes/real-use",
+    createdAt: "",
+    updatedAt: "",
+  });
+  assert.match((await repository.get(detail.project.id))?.accumulations[0].content ?? "", /记录摩擦/);
+  database.prepare("UPDATE project_accumulations SET completed_work = ?, takeaway = ? WHERE id = ?")
+    .run("旧格式完成内容", "旧格式关键结论", saved.id);
+  const legacyContent = (await repository.get(detail.project.id))?.accumulations[0].content ?? "";
+  assert.match(legacyContent, /旧格式完成内容/);
+  assert.match(legacyContent, /旧格式关键结论/);
+  await repository.saveAccumulation({ ...saved, content: "下一行动建议必须隔离并行分支" });
+  assert.match((await repository.get(detail.project.id))?.accumulations[0].content ?? "", /隔离并行分支/);
+  await repository.removeMilestone(checkpoint.id);
+  assert.equal((await repository.get(detail.project.id))?.accumulations[0].milestoneId, null);
+  await repository.removeAccumulation(saved.id);
+  assert.deepEqual((await repository.get(detail.project.id))?.accumulations, []);
+  database.close();
+});
+
+test("applies an AI route atomically, locks completed history and detaches work from a superseded checkpoint", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), {
+    seedProjects: initialProjectSeeds,
+    clock: () => new Date("2026-09-22T08:00:00.000Z"),
+  });
+  const original = await repository.get("project-life-workbench-v01");
+  assert.ok(original);
+  await repository.saveWorkspace({ ...original.project, planningMode: "adaptive" }, original.milestones, null);
+  const adaptive = await repository.get(original.project.id);
+  assert.ok(adaptive);
+  const current = adaptive.milestones.find((item) => item.status === "current")!;
+  const lastCompleted = adaptive.milestones.filter((item) => item.status === "completed").at(-1)!;
+  await repository.applyProjectRoute({
+    projectId: adaptive.project.id,
+    currentSituation: "真实使用发现原检查点过于宽泛",
+    requirements: "先验证新的最小闭环",
+    model: "deepseek-flash",
+    tokenUsage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+    proposal: {
+      summary: "用新的验证节点替代旧检查点",
+      nodes: [
+        { ref: current.id, existingMilestoneId: current.id, action: "supersede", title: current.title, definitionOfDone: current.definitionOfDone, dueDate: current.dueDate, status: "planned", predecessorRefs: [] },
+        { ref: "new-current", existingMilestoneId: null, action: "create", title: "验证分支隔离", definitionOfDone: "两个并行分支能分别获得行动建议", dueDate: "2026-09-30", status: "current", predecessorRefs: [lastCompleted.id] },
+      ],
+      assumptions: [], risks: [],
+    },
+  });
+  const updated = await repository.get(adaptive.project.id);
+  assert.ok(updated);
+  assert.equal(updated.milestones.find((item) => item.id === current.id)?.status, "superseded");
+  assert.equal(updated.milestones.find((item) => item.title === "验证分支隔离")?.status, "current");
+  assert.equal(updated.milestones.find((item) => item.id === lastCompleted.id)?.status, "completed");
+  assert.equal(updated.tasks.find((item) => item.id === `${adaptive.project.id}-task-1`)?.milestoneId, null);
+  assert.ok(updated.logs.some((item) => item.kind === "plan_revision" && item.body.includes("主线规划")));
   database.close();
 });

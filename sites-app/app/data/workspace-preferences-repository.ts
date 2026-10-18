@@ -1,6 +1,8 @@
 import type { QuickLink, WorkspacePreferences } from "../workspace-preferences";
 import { addDefaultAiLinks, addDefaultEntertainmentLinks, normalizeAvatarDataUrl, normalizeDisplayName, normalizeQuickLinks } from "../workspace-preferences";
+import { normalizeHealthReminderPreferences, parseHealthReminderPreferences, type HealthReminderPreferences } from "../reminder-preferences";
 import type { SqliteDatabase } from "./sqlite-article-repository";
+import { FOCUS_REMINDER_KEY, normalizeFocusReminderMinutes } from "../focus-reminder";
 
 const displayNameKey = "workspace_display_name";
 const avatarDataUrlKey = "workspace_avatar_data_url";
@@ -9,6 +11,7 @@ const legacyQuickLinksKeyV2 = "workspace_quick_links_v2";
 const legacyQuickLinksKeyV3 = "workspace_quick_links_v3";
 const legacyQuickLinksKeyV4 = "workspace_quick_links_v4";
 const quickLinksKey = "workspace_quick_links_v5";
+const healthReminderKey = "workspace_health_reminder_v1";
 
 export class WorkspacePreferencesRepository {
   private initialization: Promise<void> | null = null;
@@ -64,6 +67,21 @@ export class WorkspacePreferencesRepository {
     await this.write(quickLinksKey, JSON.stringify(links));
   }
 
+  async getHealthReminder(): Promise<HealthReminderPreferences> {
+    await this.initialize();
+    const rows = await this.database.select<{ value: string }>(
+      "SELECT value FROM app_meta WHERE key = ? LIMIT 1",
+      [healthReminderKey],
+    );
+    return parseHealthReminderPreferences(rows[0]?.value);
+  }
+
+  async saveHealthReminder(preferences: HealthReminderPreferences): Promise<HealthReminderPreferences> {
+    const normalized = normalizeHealthReminderPreferences(preferences);
+    await this.write(healthReminderKey, JSON.stringify(normalized));
+    return normalized;
+  }
+
   private async write(key: string, value: string) {
     await this.initialize();
     await this.database.execute(
@@ -71,6 +89,19 @@ export class WorkspacePreferencesRepository {
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
       [key, value],
     );
+  }
+
+  async getFocusReminderMinutes(): Promise<number> {
+    await this.initialize();
+    const rows = await this.database.select<{ value: string }>("SELECT value FROM app_meta WHERE key = ? LIMIT 1", [FOCUS_REMINDER_KEY]);
+    const value = rows[0]?.value;
+    return value === undefined ? 45 : normalizeFocusReminderMinutes(Number(value));
+  }
+
+  async saveFocusReminderMinutes(minutes: number): Promise<number> {
+    const normalized = normalizeFocusReminderMinutes(minutes);
+    await this.write(FOCUS_REMINDER_KEY, String(normalized));
+    return normalized;
   }
 }
 

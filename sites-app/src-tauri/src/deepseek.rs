@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 use url::Url;
 
 const WINDOW_LABEL: &str = "deepseek-bridge";
-const ADAPTER_VERSION: u8 = 10;
+const ADAPTER_VERSION: u8 = 12;
 const IDLE_SECONDS: u64 = 3 * 60;
 
 pub struct DeepSeekBridgeState {
@@ -37,6 +37,8 @@ pub struct DeepSeekSnapshot {
     #[serde(default)]
     reasoning_text: String,
     #[serde(default)]
+    legacy_text: String,
+    #[serde(default)]
     conversation_ref: String,
     #[serde(default)]
     error: String,
@@ -44,10 +46,6 @@ pub struct DeepSeekSnapshot {
     deep_thinking_available: bool,
     #[serde(default)]
     deep_thinking_enabled: bool,
-    #[serde(default)]
-    expert_mode_available: bool,
-    #[serde(default)]
-    expert_mode_enabled: bool,
     #[serde(default)]
     smart_search_available: bool,
     #[serde(default)]
@@ -67,12 +65,11 @@ impl DeepSeekSnapshot {
             generating: false,
             text: String::new(),
             reasoning_text: String::new(),
+            legacy_text: String::new(),
             conversation_ref: String::new(),
             error: String::new(),
             deep_thinking_available: false,
             deep_thinking_enabled: false,
-            expert_mode_available: false,
-            expert_mode_enabled: false,
             smart_search_available: false,
             smart_search_enabled: false,
             vision_available: false,
@@ -85,9 +82,9 @@ impl DeepSeekSnapshot {
 const ADAPTER_SCRIPT: &str = r#"
 (() => {
   if (!/(^|\.)deepseek\.com$/i.test(location.hostname)) return;
-  const VERSION = 10;
+  const VERSION = 12;
   const text = (node) => (node?.innerText || node?.textContent || '').trim();
-  const markdownText = (node) => {
+  const markdownText = (node, preserveMath = true) => {
     const renderChildren = (parent, context = {}) => Array.from(parent?.childNodes || []).map((child) => render(child, context)).join('');
     const compactInline = (value) => value.replace(/[\t\f\v ]+/g, ' ').replace(/ *\n */g, '\n').trim();
     const renderList = (list, ordered, depth) => {
@@ -120,6 +117,16 @@ const ADAPTER_SCRIPT: &str = r#"
       if (current.nodeType === Node.TEXT_NODE) return current.nodeValue || '';
       if (current.nodeType !== Node.ELEMENT_NODE) return '';
       const tag = current.tagName;
+      // Read the TeX source once, before traversing KaTeX's MathML and visual copies.
+      if (preserveMath && current.matches('.katex-display, .katex, mjx-container, math')) {
+        const source = current.querySelector('annotation[encoding="application/x-tex"]')?.textContent
+          || current.getAttribute('data-latex');
+        if (source?.trim()) {
+          const display = current.matches('.katex-display, [display="block"], [display="true"]')
+            || Boolean(current.querySelector('math[display="block"]'));
+          return display ? `\n\n$$\n${source.trim()}\n$$\n\n` : `$${source.trim()}$`;
+        }
+      }
       if (/^(BUTTON|SVG|PATH|SCRIPT|STYLE|NOSCRIPT)$/.test(tag) || current.getAttribute('aria-hidden') === 'true') return '';
       if (tag === 'BR') return '\n';
       if (/^H[1-6]$/.test(tag)) return `${'#'.repeat(Number(tag[1]))} ${compactInline(renderChildren(current))}\n\n`;
@@ -210,42 +217,52 @@ const ADAPTER_SCRIPT: &str = r#"
     }
     return false;
   };
-  const editor = () => Array.from(document.querySelectorAll('textarea, [contenteditable="true"][role="textbox"], [contenteditable="true"]')).find(visible) || null;
-  const deepThinkingControl = () => controlForLabel([/^(深度思考|DeepThink|Deep Think)$/i]);
-  const smartSearchControl = () => controlForLabel([/^(智能搜索|联网搜索|Web Search|Search)$/i]);
-  const quickModePatterns = [
-    /^(?:快速模式|快速|Quick\s*Mode|Quick)$/i,
-    /(?:^|[\s·|⚡💎\ufe0f])(?:快速模式|Quick\s*Mode)(?:$|[\s（(·|])/iu,
-    /⚡\ufe0f?\s*(?:快速|Quick|Instant|Flash)/i
-  ];
-  const expertModePatterns = [
-    /^(?:专家模式|专家|Expert\s*Mode|Expert)$/i,
-    /(?:^|[\s·|⚡💎\ufe0f])(?:专家模式|Expert\s*Mode)(?:$|[\s（(·|])/iu,
-    /💎\s*(?:专家|Expert|Pro)/i
-  ];
-  const quickModeControl = () => controlForLabel(quickModePatterns);
-  const expertModeControl = () => controlForLabel(expertModePatterns);
-  const modeControl = () => {
-    const quick = quickModeControl();
-    const expert = expertModeControl();
-    return [quick, expert].find(controlState) || (quick && !expert ? quick : null) || (expert && !quick ? expert : null) || expert || quick;
-  };
-  const modeState = () => {
-    const quick = quickModeControl();
-    const expert = expertModeControl();
-    return {
-      available: !!quick || !!expert,
-      expertEnabled: !!expert && (controlState(expert) || !quick)
-    };
-  };
+  const editor = () => Array.from(document.querySelectorAll('textarea, [contenteditable="true"][role="textbox"], [contenteditable="true"][data-lexical-editor], [contenteditable="true"]'))
+    .filter((node) => visible(node) && !node.disabled && !node.readOnly && node.getAttribute('aria-disabled') !== 'true')
+    .filter((node) => !node.closest('pre, code'))
+    .map((node) => {
+      const rect = node.getBoundingClientRect();
+      const label = `${node.getAttribute('placeholder') || ''} ${node.getAttribute('aria-label') || ''} ${node.getAttribute('data-placeholder') || ''}`;
+      let score = Math.min(rect.width / 100, 8) + Math.min(rect.bottom / Math.max(window.innerHeight, 1), 1) * 5;
+      if (/发送消息|输入消息|message|ask|提问/i.test(label)) score += 12;
+      if (node.matches('[role="textbox"]')) score += 4;
+      if (node.closest('form')) score += 4;
+      return { node, score };
+    })
+    .sort((left, right) => right.score - left.score)[0]?.node || null;
+  const deepThinkingControl = () => controlForLabel([/^(深度思考|思考|推理|DeepThink|Deep Think|Thinking|Reasoning)(?:\s|$)/i]);
+  const smartSearchControl = () => controlForLabel([/^(智能搜索|联网搜索|搜索|Web Search|Search)(?:\s|$)/i]);
   const fileInput = () => Array.from(document.querySelectorAll('input[type="file"]')).find((input) => /image|\*/i.test(input.accept || '')) || document.querySelector('input[type="file"]');
-  const attachmentControl = () => controlForLabel([/^(附件|上传文件|上传图片|Attach|Upload)$/i]) || findButton([/附件|上传|attach|upload/i]);
-  const stopButton = () => findButton([/停止|终止|stop generating|stop response|stop$/i]);
-  const sendButton = () => findButton([/发送|send|提交/i]);
+  const attachmentControl = () => controlForLabel([/^(添加附件|添加图片|添加文件|附件|上传文件|上传图片|Attach|Upload|Add (?:file|image)s?)(?:\s|$)/i]) || findButton([/附件|上传|attach|upload|add (?:file|image)/i]);
+  const composerRoot = () => {
+    const input = editor();
+    if (!input) return document;
+    return input.closest('form') || input.parentElement?.parentElement?.parentElement || document;
+  };
+  const buttonInComposer = (patterns) => Array.from(composerRoot().querySelectorAll('button, [role="button"]')).filter(visible).find((button) => {
+    const label = `${text(button)} ${button.getAttribute('aria-label') || ''} ${button.getAttribute('title') || ''} ${button.getAttribute('data-testid') || ''}`;
+    return patterns.some((pattern) => pattern.test(label));
+  });
+  const stopButton = () => buttonInComposer([/停止|终止|stop generating|stop response|stop$/i]) || findButton([/停止|终止|stop generating|stop response|stop$/i]);
+  const sendButton = () => buttonInComposer([/发送|send|提交|submit/i]) || Array.from(composerRoot().querySelectorAll('button[type="submit"]')).filter(visible).find((button) => !button.disabled) || findButton([/发送|send|提交/i]);
   const newButton = () => controlForLabel([/^(开启新对话|新建对话|新对话|New Chat|New Conversation)(?:\s|$)/i]) || findButton([/新建对话|新对话|开启新对话|new chat|new conversation/i]);
-  const markdownCandidates = () => {
-    const selectors = ['.ds-assistant-message-main-content', '[class*="assistant"] [class*="markdown"]', '.ds-markdown', '.markdown-body'];
+  const assistantContainers = () => {
+    const selectors = [
+      '[data-message-role="assistant"]', '[data-role="assistant"]', '[data-author-role="assistant"]',
+      '[data-message-author-role="assistant"]', '[data-testid*="assistant-message"]',
+      '[class*="assistant-message"]', '[class*="assistantMessage"]'
+    ];
     return [...new Set(selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector))).filter(visible))];
+  };
+  const markdownCandidates = () => {
+    const nestedSelectors = ['.ds-assistant-message-main-content', '.ds-markdown', '.markdown-body', '[class*="markdown"]', '[class*="message-content"]', '[class*="messageContent"]'];
+    const scoped = assistantContainers().flatMap((container) => {
+      const nested = nestedSelectors.flatMap((selector) => Array.from(container.querySelectorAll(selector))).filter(visible);
+      return nested.length ? nested : [container];
+    });
+    const legacy = ['.ds-assistant-message-main-content', '[class*="assistant"] [class*="markdown"]']
+      .flatMap((selector) => Array.from(document.querySelectorAll(selector))).filter(visible);
+    return [...new Set([...scoped, ...legacy])];
   };
   const reasoningNode = () => {
     const directSelectors = [
@@ -280,11 +297,11 @@ const ADAPTER_SCRIPT: &str = r#"
       .replace(/^(?:已)?深度思考(?:完成)?(?:\s*[（(].*?[）)])?\s*/i, '')
       .trim();
   };
-  const assistantText = () => {
+  const assistantText = (preserveMath = true) => {
     const reasoning = reasoningNode();
     const candidates = markdownCandidates().filter((candidate) => !reasoning || (candidate !== reasoning && !reasoning.contains(candidate) && !candidate.contains(reasoning)));
     const outermost = candidates.filter((candidate) => !candidates.some((other) => other !== candidate && other.contains(candidate)));
-    const values = (outermost.length ? outermost : candidates).map((node) => ({ node, value: markdownText(node) })).filter((item) => item.value);
+    const values = (outermost.length ? outermost : candidates).map((node) => ({ node, value: markdownText(node, preserveMath) })).filter((item) => item.value);
     if (values.length) {
       values.sort((left, right) => {
         const position = left.node.compareDocumentPosition(right.node);
@@ -294,9 +311,9 @@ const ADAPTER_SCRIPT: &str = r#"
       });
       return values.at(-1)?.value || '';
     }
-    const messageContainers = Array.from(document.querySelectorAll('[data-message-role="assistant"], [data-role="assistant"]')).filter(visible)
+    const messageContainers = assistantContainers()
       .filter((candidate) => !reasoning || (candidate !== reasoning && !candidate.contains(reasoning)));
-    return messageContainers.length ? markdownText(messageContainers.at(-1)) : '';
+    return messageContainers.length ? markdownText(messageContainers.at(-1), preserveMath) : '';
   };
   const normalizePath = (value) => {
     try { return new URL(value, location.href).pathname.replace(/\/$/, ''); }
@@ -413,14 +430,11 @@ const ADAPTER_SCRIPT: &str = r#"
   const withFeatures = (value) => {
     const deepThinking = deepThinkingControl();
     const smartSearch = smartSearchControl();
-    const mode = modeState();
     return {
       ...value,
       reasoningText: reasoningText(),
       deepThinkingAvailable: !!deepThinking,
       deepThinkingEnabled: controlState(deepThinking),
-      expertModeAvailable: mode.available,
-      expertModeEnabled: mode.expertEnabled,
       smartSearchAvailable: !!smartSearch,
       smartSearchEnabled: controlState(smartSearch),
       visionAvailable: !!fileInput() || !!attachmentControl(),
@@ -439,7 +453,7 @@ const ADAPTER_SCRIPT: &str = r#"
       return withFeatures({ status: 'adapter_error', ready: false, generating: false, text: assistantText(), conversationRef: location.href, error: '没有识别到 DeepSeek 输入框，网页结构可能已经变化。', adapterVersion: VERSION });
     }
     const generating = !!stopButton();
-    return withFeatures({ status: generating ? 'generating' : 'ready', ready: true, generating, text: assistantText(), conversationRef: location.href, error: '', adapterVersion: VERSION });
+    return withFeatures({ status: generating ? 'generating' : 'ready', ready: true, generating, text: assistantText(), legacyText: generating ? '' : assistantText(false), conversationRef: location.href, error: '', adapterVersion: VERSION });
   };
   const setInput = (input, prompt) => {
     input.focus();
@@ -476,25 +490,6 @@ const ADAPTER_SCRIPT: &str = r#"
       if (!control) return { ...snapshot(), status: 'adapter_error', error: kind === 'deepThinking' ? '官网当前没有可用的“深度思考”开关。' : '官网当前没有可用的“智能搜索”开关。' };
       if (controlState(control) !== !!enabled) control.click();
       return snapshot();
-    },
-    openModeMenu() {
-      const control = modeControl();
-      if (!control) return { ok: false, error: '官网当前没有识别到快速/专家模式选择器。' };
-      control.click();
-      return { ok: true, error: '' };
-    },
-    selectMode(mode) {
-      const patterns = mode === 'expert' ? expertModePatterns : quickModePatterns;
-      const option = controlForLabel(patterns);
-      if (!option) {
-        const labels = visibleActionLabels();
-        return { ok: false, error: `官网模式菜单中没有识别到“${mode === 'expert' ? '专家模式' : '快速模式'}”。${labels.length ? `当前可见选项：${labels.join('、')}` : '官网模式菜单可能没有展开。'}` };
-      }
-      option.scrollIntoView?.({ block: 'nearest' });
-      if (typeof PointerEvent === 'function') option.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
-      option.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-      option.click();
-      return { ok: true, error: '' };
     },
     attachImage(name, mime, dataUrl) {
       try {
@@ -679,51 +674,10 @@ pub async fn deepseek_get_status(app: tauri::AppHandle) -> Result<DeepSeekSnapsh
 pub async fn deepseek_configure_modes(
     app: tauri::AppHandle,
     deep_thinking: bool,
-    expert_mode: bool,
     smart_search: bool,
 ) -> Result<DeepSeekSnapshot, String> {
     let window = ensure_window(&app)?;
     let mut current = snapshot(&window).await?;
-    if current.expert_mode_available && current.expert_mode_enabled != expert_mode {
-        let mode = if expert_mode { "expert" } else { "quick" };
-        let select_script = format!(
-            "window.__personalDeepSeekBridge?.selectMode?.('{mode}') ?? {{ok:false,error:'DeepSeek 页面尚未准备完成'}}"
-        );
-        let mut selected: DeepSeekActionResult = eval_json(&window, select_script.clone()).await?;
-        if !selected.ok {
-            let menu = bridge_action(&window, "openModeMenu").await?;
-            if !menu.ok {
-                return Err(menu.error);
-            }
-            for _ in 0..6 {
-                tokio::time::sleep(Duration::from_millis(180)).await;
-                selected = eval_json(&window, select_script.clone()).await?;
-                if selected.ok {
-                    break;
-                }
-            }
-        }
-        if !selected.ok {
-            return Err(selected.error);
-        }
-        for _ in 0..6 {
-            tokio::time::sleep(Duration::from_millis(160)).await;
-            current = snapshot(&window).await?;
-            if current.expert_mode_available && current.expert_mode_enabled == expert_mode {
-                break;
-            }
-        }
-        if !current.expert_mode_available || current.expert_mode_enabled != expert_mode {
-            return Err(format!(
-                "官网点击了{}，但页面状态没有完成切换。",
-                if expert_mode {
-                    "专家模式"
-                } else {
-                    "快速模式"
-                }
-            ));
-        }
-    }
     if current.deep_thinking_available && current.deep_thinking_enabled != deep_thinking {
         let _: DeepSeekSnapshot = eval_json(
             &window,
@@ -1073,5 +1027,14 @@ mod tests {
         assert!(ADAPTER_SCRIPT.contains("clickDeleteAction(stage = 'menu')"));
         assert!(ADAPTER_SCRIPT.contains("stage === 'confirm'"));
         assert!(ADAPTER_SCRIPT.contains("删除(?:此|该)?(?:对话|会话)"));
+    }
+
+    #[test]
+    fn unified_chat_adapter_does_not_depend_on_retired_primary_modes() {
+        assert!(!ADAPTER_SCRIPT.contains("quickModePatterns"));
+        assert!(!ADAPTER_SCRIPT.contains("expertModePatterns"));
+        assert!(!ADAPTER_SCRIPT.contains("selectMode(mode)"));
+        assert!(ADAPTER_SCRIPT.contains("[contenteditable=\"true\"][data-lexical-editor]"));
+        assert!(ADAPTER_SCRIPT.contains("data-message-author-role=\"assistant\""));
     }
 }

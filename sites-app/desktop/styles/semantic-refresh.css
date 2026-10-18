@@ -132,6 +132,34 @@
   padding: 0;
 }
 
+.home-quick-start {
+  display: flex;
+  gap: 9px;
+  width: min(560px, 100%);
+}
+
+.home-quick-start input {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid rgba(76, 89, 153, .2);
+  border-radius: var(--control-radius);
+  padding: 11px 14px;
+  background: rgba(255, 255, 255, .92);
+  color: var(--text);
+  font: inherit;
+  box-shadow: 0 8px 24px rgba(43, 50, 91, .06);
+}
+
+.home-quick-start input:focus {
+  border-color: #6476b8;
+  outline: 3px solid rgba(100, 118, 184, .13);
+}
+
+.home-quick-start .ui-button {
+  flex: 0 0 auto;
+  min-height: 44px;
+}
+
 .home-empty-today > button {
   min-height: 42px;
   border: 1px solid #596aa9;
@@ -142,6 +170,11 @@
   font-size: 14px;
   font-weight: 750;
   cursor: pointer;
+}
+
+@media (max-width: 620px) {
+  .home-quick-start { flex-direction: column; }
+  .home-quick-start .ui-button { width: 100%; }
 }
 
 .workspace-empty strong {
@@ -1207,18 +1240,21 @@ button.activity-cell.selected {
 }
 
 .notes-help-popover {
-  position: absolute;
-  z-index: 5;
-  right: 16px;
-  bottom: 20px;
-  left: 16px;
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(420px, calc(100vw - 40px));
+  max-height: min(480px, calc(100dvh - 48px));
+  overflow-y: auto;
+  box-sizing: border-box;
   border: 1px solid rgba(75, 84, 143, 0.18);
   border-radius: 14px;
-  padding: 15px;
+  padding: 22px;
   background: rgba(251, 251, 253, 0.97);
   box-shadow: 0 18px 46px rgba(39, 44, 84, 0.18);
   color: #525a75;
 }
+.notes-help-popover::backdrop { background: rgba(27, 33, 52, .18); }
 
 .notes-help-popover > header {
   display: flex;
@@ -1228,7 +1264,7 @@ button.activity-cell.selected {
 
 .notes-help-popover > header strong {
   color: #414a70;
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .notes-help-popover > header button {
@@ -1240,8 +1276,8 @@ button.activity-cell.selected {
 }
 
 .notes-help-popover > p {
-  margin: 10px 0 12px;
-  font-size: 12px;
+  margin: 14px 0 18px;
+  font-size: 13px;
   line-height: 1.6;
 }
 
@@ -1253,22 +1289,22 @@ button.activity-cell.selected {
 }
 
 .notes-help-popover dl div {
-  grid-template-columns: 42px minmax(0, 1fr);
+  grid-template-columns: 64px minmax(0, 1fr);
   border-top: 1px solid rgba(75, 84, 143, 0.1);
-  padding-top: 9px;
+  padding-block: 12px 6px;
 }
 
 .notes-help-popover dt {
   color: #6273ad;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 800;
 }
 
 .notes-help-popover dd {
   margin: 0;
   color: #70768c;
-  font-size: 11px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.7;
 }
 
 .source-item-main code {

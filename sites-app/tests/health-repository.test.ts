@@ -39,6 +39,7 @@ test("persists a private health profile and daily manual records", async () => {
 
   const daily = await repository.saveDaily({
     ...emptyHealthDailyLog("2026-08-31"),
+    sleepMinutes: 445,
     sleepStart: "23:30",
     sleepEnd: "07:15",
     awakeMinutes: 10,
@@ -50,6 +51,8 @@ test("persists a private health profile and daily manual records", async () => {
     activityNote: "晚饭后散步",
   });
   assert.equal(daily.steps, 8_234);
+  assert.equal((await repository.getDaily("2026-08-31")).sleepMinutes, 445);
+  assert.equal((await repository.getDaily("2026-08-31")).awakeMinutes, 10);
 
   now = new Date("2026-08-31T02:00:00Z");
   const updated = await repository.saveDaily({ ...daily, steps: 9_000 });
@@ -120,5 +123,24 @@ test("rejects incomplete sleep intervals and invalid profile values", async () =
   await assert.rejects(() => repository.saveDaily({ ...emptyHealthDailyLog("2026-08-31"), sleepStart: "23:00" }), /一起填写/);
   await assert.rejects(() => repository.saveProfile({ ...emptyHealthProfile, age: 12 }), /年龄/);
   await assert.rejects(() => repository.getDaily("2026-02-30"), /日期/);
+  database.close();
+});
+
+test("upgrades legacy health rows and keeps unknown awake time distinct from zero", async () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec(`CREATE TABLE health_daily_logs (
+    log_date TEXT PRIMARY KEY NOT NULL,
+    sleep_start TEXT NOT NULL DEFAULT '', sleep_end TEXT NOT NULL DEFAULT '',
+    awake_minutes INTEGER NOT NULL DEFAULT 0, sleep_quality INTEGER, energy_level INTEGER,
+    steps INTEGER, weight_kg REAL, activity_minutes INTEGER, activity_note TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  );
+  INSERT INTO health_daily_logs VALUES ('2026-08-30', '23:00', '07:00', 0, NULL, NULL, NULL, NULL, NULL, '', '', 'now', 'now');`);
+  const repository = new HealthRepository(new NodeSqliteAdapter(database));
+  const legacy = await repository.getDaily("2026-08-30");
+  assert.equal(legacy.sleepMinutes, null);
+  assert.equal(legacy.awakeMinutes, null);
+  const saved = await repository.saveDaily({ ...legacy, sleepMinutes: 450, awakeMinutes: 0 });
+  assert.equal((await repository.getDaily(saved.date)).awakeMinutes, 0);
   database.close();
 });

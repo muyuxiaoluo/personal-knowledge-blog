@@ -1,0 +1,9 @@
+.action-estimate-field { display: flex; flex-wrap: wrap; align-items: end; gap: 8px 12px; }
+.inline-action-fields > .action-estimate-field { grid-column: 1 / -1; }
+.action-estimate-field > label:first-child { display: grid; gap: 6px; min-width: 160px; }
+.action-estimate-field input[type="number"] { width: 150px; }
+.action-estimate-note, .action-estimate-warning, .action-estimate-error, .action-estimate-suggestion { flex-basis: 100%; margin: 0; font-size: .86rem; }
+.action-estimate-warning, .action-estimate-error { color: #a54f31; }
+.action-estimate-suggestion { display: flex; align-items: center; gap: 10px; }
+.action-estimate-suggestion p { margin: 0; }
+.action-estimate-resume { display: flex; align-items: center; gap: 6px; }

@@ -1,22 +1,50 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{Connection, Executor, SqliteConnection};
+#[cfg(desktop)]
 use std::{
     fs,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::{Emitter, Manager};
+#[cfg(desktop)]
+use tauri::Emitter;
+use tauri::Manager;
 
+#[cfg(desktop)]
 mod attachments;
+#[cfg(desktop)]
 mod backup;
+#[cfg(desktop)]
 mod dashboard;
+#[cfg(desktop)]
 mod deepseek;
+#[cfg(desktop)]
 mod deepseek_api;
+#[cfg(desktop)]
 mod finance;
+#[cfg(desktop)]
+mod focus_reminders;
+#[cfg(desktop)]
 mod integrations;
+#[cfg(windows)]
+mod ollama_runtime;
+#[cfg(desktop)]
+mod reminders;
+#[cfg(desktop)]
 mod webviews;
+#[cfg(windows)]
+mod windows_focus_notification;
+#[cfg(desktop)]
+mod work_observer;
+#[cfg(desktop)]
+mod work_observer_analysis;
+#[cfg(desktop)]
+mod work_observer_files;
+#[cfg(desktop)]
+mod work_observer_screen;
 
+#[cfg(desktop)]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BackupPath {
@@ -83,6 +111,7 @@ async fn execute_sqlite_transaction(
     Ok(())
 }
 
+#[cfg(desktop)]
 pub(crate) fn backup_dir(app: &tauri::AppHandle) -> PathBuf {
     app.path()
         .document_dir()
@@ -90,6 +119,7 @@ pub(crate) fn backup_dir(app: &tauri::AppHandle) -> PathBuf {
         .unwrap_or_else(|_| fallback_backup_dir(app))
 }
 
+#[cfg(desktop)]
 fn legacy_backup_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     app.path()
         .document_dir()
@@ -98,6 +128,7 @@ fn legacy_backup_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
 }
 
 #[tauri::command]
+#[cfg(desktop)]
 fn reserve_backup_path(app: tauri::AppHandle) -> Result<BackupPath, String> {
     let backup_dir = backup_dir(&app);
 
@@ -117,6 +148,7 @@ fn reserve_backup_path(app: tauri::AppHandle) -> Result<BackupPath, String> {
 }
 
 #[tauri::command]
+#[cfg(desktop)]
 fn latest_backup_path(app: tauri::AppHandle) -> Result<Option<BackupPath>, String> {
     let mut directories = vec![backup_dir(&app)];
     if let Some(legacy) = legacy_backup_dir(&app) {
@@ -145,6 +177,7 @@ fn latest_backup_path(app: tauri::AppHandle) -> Result<Option<BackupPath>, Strin
     }))
 }
 
+#[cfg(desktop)]
 fn is_primary_backup_name(name: &str) -> bool {
     name.strip_prefix("mind-garden-")
         .and_then(|value| {
@@ -158,6 +191,7 @@ fn is_primary_backup_name(name: &str) -> bool {
 }
 
 #[tauri::command]
+#[cfg(desktop)]
 async fn restore_backup(app: tauri::AppHandle, source_path: String) -> Result<(), String> {
     let source = PathBuf::from(&source_path);
     let canonical_source = source
@@ -178,6 +212,7 @@ async fn restore_backup(app: tauri::AppHandle, source_path: String) -> Result<()
     backup::restore_backup_file(&app, &canonical_source).await
 }
 
+#[cfg(desktop)]
 fn fallback_backup_dir(app: &tauri::AppHandle) -> PathBuf {
     app.path()
         .app_data_dir()
@@ -185,6 +220,7 @@ fn fallback_backup_dir(app: &tauri::AppHandle) -> PathBuf {
         .join("backups")
 }
 
+#[cfg(desktop)]
 fn reveal_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
@@ -202,22 +238,30 @@ fn reveal_main_window(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+#[cfg(desktop)]
 fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     reveal_main_window(&app)
 }
 
 #[tauri::command]
+#[cfg(desktop)]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg(desktop)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(windows)]
+    let builder = builder.manage(ollama_runtime::OllamaRuntime::default());
+    builder
+        .plugin(tauri_plugin_companion_secrets::init())
         .manage(deepseek::DeepSeekBridgeState::default())
         .manage(webviews::ToolWindowState::default())
         .manage(webviews::EntertainmentCaptureState::default())
+        .manage(work_observer::ObserverState::default())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_sql::Builder::default().build())
@@ -249,8 +293,21 @@ pub fn run() {
                     MenuItem::with_id(app, "show", "打开个人工作台", true, None::<&str>)?;
                 let capture_item =
                     MenuItem::with_id(app, "capture", "快速记录", true, None::<&str>)?;
+                let health_item =
+                    MenuItem::with_id(app, "health", "记录今日健康", true, None::<&str>)?;
+                let expense_item =
+                    MenuItem::with_id(app, "expense", "补记一笔消费", true, None::<&str>)?;
                 let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-                let menu = Menu::with_items(app, &[&show_item, &capture_item, &quit_item])?;
+                let menu = Menu::with_items(
+                    app,
+                    &[
+                        &show_item,
+                        &capture_item,
+                        &health_item,
+                        &expense_item,
+                        &quit_item,
+                    ],
+                )?;
 
                 let mut tray = TrayIconBuilder::new()
                     .tooltip("个人工作台")
@@ -263,6 +320,14 @@ pub fn run() {
                         "capture" => {
                             let _ = reveal_main_window(app);
                             let _ = app.emit("open-quick-capture", ());
+                        }
+                        "health" => {
+                            let _ = reveal_main_window(app);
+                            let _ = app.emit("open-health-record", ());
+                        }
+                        "expense" => {
+                            let _ = reveal_main_window(app);
+                            let _ = app.emit("open-expense-capture", ());
                         }
                         "quit" => {
                             let _ = app.emit("request-app-quit", ());
@@ -283,10 +348,18 @@ pub fn run() {
                     tray = tray.icon(icon.clone());
                 }
                 tray.build(app)?;
+                reminders::start_health_reminder_monitor(app.handle().clone());
+                focus_reminders::start_focus_reminder_monitor(app.handle().clone());
+                work_observer::start(app.handle().clone());
             }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            work_observer::work_observer_status,
+            work_observer::work_observer_configure,
+            work_observer::work_observer_set_enabled,
+            work_observer::work_observer_capture,
+            work_observer::work_observer_image,
             attachments::attachment_store_blob,
             attachments::attachment_read_blob,
             attachments::attachment_blob_exists,
@@ -297,6 +370,11 @@ pub fn run() {
             reserve_backup_path,
             latest_backup_path,
             restore_backup,
+            reminders::test_health_reminder,
+            focus_reminders::acknowledge_focus_reminder,
+            focus_reminders::pending_focus_reminder,
+            focus_reminders::test_focus_reminder,
+            reminders::take_pending_health_reminder,
             execute_sqlite_transaction,
             show_main_window,
             quit_app,
@@ -315,8 +393,11 @@ pub fn run() {
             deepseek_api::deepseek_api_list_models,
             deepseek_api::deepseek_api_project_create,
             deepseek_api::deepseek_api_project_replan,
+            deepseek_api::deepseek_api_project_route,
             deepseek_api::deepseek_api_next_action,
+            deepseek_api::deepseek_api_estimate_action_days,
             deepseek_api::deepseek_api_health_advice,
+            deepseek_api::deepseek_api_recognize_meal,
             finance::finance_preview_import,
             finance::finance_generate_monthly_report,
             dashboard::dashboard_search_cities,
@@ -342,11 +423,19 @@ pub fn run() {
             webviews::usage_console_open,
             webviews::usage_console_snapshot
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the life strategy library");
+        .build(tauri::generate_context!())
+        .expect("error while building the life strategy library")
+        .run(|app, event| {
+            #[cfg(windows)]
+            if matches!(event, tauri::RunEvent::Exit) {
+                app.state::<ollama_runtime::OllamaRuntime>().stop();
+            }
+            #[cfg(not(windows))]
+            let _ = (app, event);
+        });
 }
 
-#[cfg(test)]
+#[cfg(all(test, desktop))]
 mod tests {
     use super::is_primary_backup_name;
 
@@ -360,4 +449,15 @@ mod tests {
         assert!(!is_primary_backup_name("mind-garden-latest.sqlite3"));
         assert!(!is_primary_backup_name("mind-garden-1786800000.db"));
     }
+}
+
+#[cfg(target_os = "android")]
+#[tauri::mobile_entry_point]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_sql::Builder::default().build())
+        .plugin(tauri_plugin_companion_secrets::init())
+        .invoke_handler(tauri::generate_handler![execute_sqlite_transaction])
+        .run(tauri::generate_context!())
+        .expect("unable to start companion");
 }

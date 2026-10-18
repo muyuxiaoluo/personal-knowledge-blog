@@ -179,6 +179,7 @@ export type FinanceSavingCandidate = {
   evidenceId: string;
   category: FinanceCategory;
   budgetRole: FinanceBudgetRole;
+  valueRating: FinanceValueRating | null;
   transactionTotalCents: number;
   minimumSavingCents: number;
   maximumSavingCents: number;
@@ -229,6 +230,7 @@ export type FinanceMonthlySummary = {
 };
 
 export type FinanceInsightSnapshot = {
+  analysisVersion: 2;
   month: string;
   incomeBaselineCents: number;
   actualIncomeCents: number;
@@ -290,6 +292,7 @@ export type FinanceAiOpportunity = {
 };
 
 export type FinanceAiReportContent = {
+  presentationVersion?: 2;
   overview: string;
   essentialStructure: string;
   pendingConfirmations: string[];
@@ -356,6 +359,15 @@ export const FINANCE_CATEGORY_LABELS = Object.fromEntries(
 export const FINANCE_BUDGET_ROLE_LABELS = Object.fromEntries(
   FINANCE_BUDGET_ROLES.map((entry) => [entry.value, entry.label]),
 ) as Record<FinanceBudgetRole, string>;
+
+export const FINANCE_BUDGET_ROLE_GUIDANCE: Record<FinanceBudgetRole, string> = {
+  "fixed-essential": "短期必须履行、金额较固定，如房租、合同内的基础服务费。先保留，续约时再比较。",
+  "variable-essential": "需求必须满足，但价格或方式可调整，如正常三餐、饮水、通勤、用完后补购的日用品。必要不代表整笔都不能省。",
+  growth: "有明确用途、确实会使用的学习或能力投入，如在用的课程和工作工具。闲置时也值得复查。",
+  quality: "为休息、享受或关系主动保留的消费，如朋友聚餐、偶尔的饮料。可以定额度，不默认取消。",
+  optional: "推迟或不买也不影响基本生活，如冲动购物、重复购买。自由消费不等于浪费，要结合是否值得判断。",
+  unknown: "暂时不清楚用途就保留待确认，不必为了完成分类随便选择。",
+};
 
 export const emptyFinanceSettings: FinanceSettings = {
   stableMonthlyIncomeCents: 0,

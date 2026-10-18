@@ -524,6 +524,45 @@
   font-size: 12px;
 }
 
+.settings-reminder-actions {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin: 16px 20px 0;
+}
+
+.settings-reminder-actions > label {
+  display: grid;
+  min-width: 132px;
+  gap: 6px;
+  color: #69718e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings-reminder-actions input {
+  min-height: 38px;
+  border: 1px solid rgba(74, 83, 140, 0.18);
+  border-radius: 10px;
+  padding: 0 11px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #454b68;
+  font: inherit;
+}
+
+.settings-reminder-actions button { min-height: 38px; }
+
+.settings-expense-capture-note {
+  margin: 16px 20px 0;
+  border-radius: 11px;
+  padding: 13px 14px;
+  background: rgba(236, 238, 247, 0.7);
+}
+
+.settings-expense-capture-note strong { color: #5e688f; font-size: 12px; }
+.settings-expense-capture-note p { margin: 5px 0 0; color: #7a8097; font-size: 12px; line-height: 1.55; }
+
 .settings-data-section > aside {
   margin: 14px 20px 0;
   border-radius: 11px;

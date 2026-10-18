@@ -37,12 +37,11 @@ export type DeepSeekSnapshot = {
   generating: boolean;
   text: string;
   reasoningText: string;
+  legacyText?: string;
   conversationRef: string;
   error: string;
   deepThinkingAvailable: boolean;
   deepThinkingEnabled: boolean;
-  expertModeAvailable: boolean;
-  expertModeEnabled: boolean;
   smartSearchAvailable: boolean;
   smartSearchEnabled: boolean;
   visionAvailable: boolean;
@@ -52,8 +51,5 @@ export type DeepSeekSnapshot = {
 
 export type DeepSeekModeOptions = {
   deepThinking: boolean;
-  expertMode: boolean;
   smartSearch: boolean;
 };
-
-export type DeepSeekPrimaryMode = "quick" | "expert" | "vision";

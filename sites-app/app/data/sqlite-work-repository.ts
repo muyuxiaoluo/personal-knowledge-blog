@@ -3,6 +3,7 @@ import type {
   FocusSession,
   FocusSessionInput,
   FocusSessionStopInput,
+  FocusSessionUpdateInput,
   TaskPlan,
   TaskPriority,
   WeeklyFocus,
@@ -20,13 +21,15 @@ import { isValidDay } from "../action-planning";
 type TaskPlanRow = {
   task_id: string;
   planned_date: string;
+  source: "manual" | "auto";
+  skip_auto_date: string;
   priority: TaskPriority;
   estimate_minutes: number;
   sort_order: number;
   updated_at: string;
 };
 
-type FocusSessionRow = {
+export type FocusSessionRow = {
   id: string;
   task_id: string | null;
   project_id: string | null;
@@ -66,6 +69,7 @@ const migrations = [
     id TEXT PRIMARY KEY NOT NULL,
     task_id TEXT NOT NULL,
     planned_date TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'manual',
     task_title TEXT NOT NULL DEFAULT '',
     current_focus TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
@@ -80,6 +84,8 @@ const migrations = [
   `CREATE TABLE IF NOT EXISTS task_plans (
     task_id TEXT PRIMARY KEY NOT NULL,
     planned_date TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'manual',
+    skip_auto_date TEXT NOT NULL DEFAULT '',
     priority TEXT NOT NULL DEFAULT 'normal',
     estimate_minutes INTEGER NOT NULL DEFAULT 0,
     sort_order INTEGER NOT NULL DEFAULT 0,
@@ -132,12 +138,23 @@ export class SqliteWorkRepository implements WorkRepository {
   private async initialize() {
     this.initialization ??= (async () => {
       for (const statement of migrations) await this.database.execute(statement);
+      const planColumns = await this.database.select<{ name: string }>("PRAGMA table_info(task_plans)");
+      if (!planColumns.some((column) => column.name === "source")) {
+        await this.database.execute("ALTER TABLE task_plans ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'");
+      }
+      if (!planColumns.some((column) => column.name === "skip_auto_date")) {
+        await this.database.execute("ALTER TABLE task_plans ADD COLUMN skip_auto_date TEXT NOT NULL DEFAULT ''");
+      }
+      const historyColumns = await this.database.select<{ name: string }>("PRAGMA table_info(task_plan_history)");
+      if (!historyColumns.some((column) => column.name === "source")) {
+        await this.database.execute("ALTER TABLE task_plan_history ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'");
+      }
       const hasTasks = (await this.database.select<{ name: string }>("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'project_tasks'")).length > 0;
       const snapshot = (alias: string) => hasTasks
         ? `COALESCE((SELECT title FROM project_tasks WHERE id = ${alias}.task_id), ''), COALESCE((SELECT current_focus FROM project_tasks WHERE id = ${alias}.task_id), '')`
         : "'', ''";
-      const remember = (alias: string) => `INSERT OR IGNORE INTO task_plan_history(id, task_id, planned_date, task_title, current_focus, created_at)
-        SELECT ${alias}.planned_date || ':' || ${alias}.task_id, ${alias}.task_id, ${alias}.planned_date, ${snapshot(alias)}, ${alias}.updated_at
+      const remember = (alias: string) => `INSERT OR IGNORE INTO task_plan_history(id, task_id, planned_date, source, task_title, current_focus, created_at)
+        SELECT ${alias}.planned_date || ':' || ${alias}.task_id, ${alias}.task_id, ${alias}.planned_date, ${alias}.source, ${snapshot(alias)}, ${alias}.updated_at
         WHERE ${alias}.planned_date != '' AND NOT EXISTS (
           SELECT 1 FROM task_plan_history WHERE id = ${alias}.planned_date || ':' || ${alias}.task_id
         );`;
@@ -150,8 +167,8 @@ export class SqliteWorkRepository implements WorkRepository {
         );
       }
       await executeSqliteTransaction(this.database, triggerStatements);
-      await this.database.execute(`INSERT OR IGNORE INTO task_plan_history(id, task_id, planned_date, task_title, current_focus, created_at)
-        SELECT task_plans.planned_date || ':' || task_plans.task_id, task_plans.task_id, task_plans.planned_date, ${snapshot("task_plans")}, task_plans.updated_at FROM task_plans WHERE planned_date != ''`);
+      await this.database.execute(`INSERT OR IGNORE INTO task_plan_history(id, task_id, planned_date, source, task_title, current_focus, created_at)
+        SELECT task_plans.planned_date || ':' || task_plans.task_id, task_plans.task_id, task_plans.planned_date, task_plans.source, ${snapshot("task_plans")}, task_plans.updated_at FROM task_plans WHERE planned_date != ''`);
       await this.database.execute("PRAGMA optimize");
     })().catch((error) => {
       this.initialization = null;
@@ -178,10 +195,10 @@ export class SqliteWorkRepository implements WorkRepository {
 
   async listPlanHistory(date = ""): Promise<TaskPlanHistory[]> {
     await this.initialize();
-    const rows = await this.database.select<{ id: string; task_id: string; planned_date: string; task_title: string; current_focus: string; created_at: string }>(
+    const rows = await this.database.select<{ id: string; task_id: string; planned_date: string; source: "manual" | "auto"; task_title: string; current_focus: string; created_at: string }>(
       "SELECT * FROM task_plan_history WHERE (? = '' OR planned_date = ?) ORDER BY planned_date DESC, created_at", [date, date],
     );
-    return rows.map((row) => ({ id: row.id, taskId: row.task_id, plannedDate: row.planned_date, taskTitle: row.task_title, currentFocus: row.current_focus, createdAt: row.created_at }));
+    return rows.map((row) => ({ id: row.id, taskId: row.task_id, plannedDate: row.planned_date, source: row.source === "auto" ? "auto" : "manual", taskTitle: row.task_title, currentFocus: row.current_focus, createdAt: row.created_at }));
   }
 
   async listDailySituations(): Promise<DailySituation[]> {
@@ -213,10 +230,10 @@ export class SqliteWorkRepository implements WorkRepository {
       }
       // Compare the current plan at write time so a retrospective note cannot roll back newer work.
       statements.push({
-        sql: `UPDATE task_plans SET planned_date = ?, updated_at = ? WHERE task_id = ? AND planned_date = ? AND updated_at = ?
+        sql: `UPDATE task_plans SET planned_date = ?, source = 'manual', skip_auto_date = CASE WHEN ? = '' THEN ? ELSE '' END, updated_at = ? WHERE task_id = ? AND planned_date = ? AND updated_at = ?
           AND EXISTS (SELECT 1 FROM project_tasks WHERE id = ? AND status NOT IN ('done', 'cancelled', 'waiting') AND deleted_at IS NULL)
           AND NOT EXISTS (SELECT 1 FROM focus_sessions WHERE task_id = ? AND ended_at IS NULL)`,
-        bindValues: [change.plannedDate, now, change.taskId, change.expectedPlan.plannedDate, change.expectedPlan.updatedAt, change.taskId, change.taskId],
+        bindValues: [change.plannedDate, change.plannedDate, today, now, change.taskId, change.expectedPlan.plannedDate, change.expectedPlan.updatedAt, change.taskId, change.taskId],
       });
     }
     await executeSqliteTransaction(this.database, statements);
@@ -230,25 +247,82 @@ export class SqliteWorkRepository implements WorkRepository {
       await this.initialize();
       const saved = {
         ...plan,
+        source: plan.source === "auto" ? "auto" as const : "manual" as const,
+        skipAutoDate: plan.skipAutoDate || "",
         estimateMinutes: Math.max(0, Math.round(plan.estimateMinutes || 0)),
         updatedAt: this.clock().toISOString(),
       };
       await this.database.execute(
-        `INSERT INTO task_plans(task_id, planned_date, priority, estimate_minutes, sort_order, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO task_plans(task_id, planned_date, source, skip_auto_date, priority, estimate_minutes, sort_order, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(task_id) DO UPDATE SET
            planned_date = excluded.planned_date,
+           source = excluded.source,
+           skip_auto_date = excluded.skip_auto_date,
            priority = excluded.priority,
            estimate_minutes = excluded.estimate_minutes,
            sort_order = excluded.sort_order,
            updated_at = excluded.updated_at`,
-        [saved.taskId, saved.plannedDate, saved.priority, saved.estimateMinutes, saved.sortOrder, saved.updatedAt],
+        [saved.taskId, saved.plannedDate, saved.source, saved.skipAutoDate, saved.priority, saved.estimateMinutes, saved.sortOrder, saved.updatedAt],
       );
       return saved;
     } catch (error) {
       if (error instanceof WorkRepositoryError) throw error;
       throw new WorkRepositoryError("保存任务安排失败", "save_failed", error);
     }
+  }
+
+  async autoScheduleDueTasks(today: string): Promise<number> {
+    if (!isValidDay(today)) throw new WorkRepositoryError("日期无效", "invalid_data");
+    await this.initialize();
+    const now = this.clock().toISOString();
+    const removed = await this.database.execute(
+      `DELETE FROM task_plans
+       WHERE source = 'auto' AND planned_date != '' AND planned_date <= ?
+         AND NOT EXISTS (
+           SELECT 1 FROM project_tasks AS task
+           LEFT JOIN projects AS project ON project.id = task.project_id
+           WHERE task.id = task_plans.task_id AND task.deleted_at IS NULL AND task.status = 'next'
+             AND (task.project_id IS NULL OR project.status = 'active')
+             AND task.auto_schedule_paused = 0 AND task.estimated_days BETWEEN 1 AND 365
+             AND date(task.due_date, '-' || task.estimated_days || ' days') <= ?
+         )`,
+      [today, today],
+    );
+    const result = await this.database.execute(
+      `INSERT INTO task_plans(task_id, planned_date, source, skip_auto_date, priority, estimate_minutes, sort_order, updated_at)
+       SELECT task.id, ?, 'auto', '', COALESCE(plan.priority, 'normal'), COALESCE(plan.estimate_minutes, 0),
+              COALESCE(plan.sort_order, 99), ?
+       FROM project_tasks AS task
+       LEFT JOIN projects AS project ON project.id = task.project_id
+       LEFT JOIN task_plans AS plan ON plan.task_id = task.id
+       WHERE task.deleted_at IS NULL AND task.status = 'next'
+         AND (task.project_id IS NULL OR project.status = 'active')
+         AND task.auto_schedule_paused = 0 AND task.estimated_days BETWEEN 1 AND 365
+         AND date(task.due_date, '-' || task.estimated_days || ' days') <= ?
+         AND (plan.task_id IS NULL OR plan.planned_date = '' OR plan.planned_date < ?)
+         AND COALESCE(plan.skip_auto_date, '') != ?
+       ON CONFLICT(task_id) DO UPDATE SET planned_date = excluded.planned_date,
+         source = 'auto', skip_auto_date = '', updated_at = excluded.updated_at
+       WHERE task_plans.planned_date = '' OR task_plans.planned_date < ?`,
+      [today, now, today, today, today, today],
+    );
+    return (removed.rowsAffected || 0) + (result.rowsAffected || 0);
+  }
+
+  async pauseAutoSchedule(taskId: string, today: string): Promise<void> {
+    if (!isValidDay(today)) throw new WorkRepositoryError("日期无效", "invalid_data");
+    await this.initialize();
+    const now = this.clock().toISOString();
+    await executeSqliteTransaction(this.database, [
+      { sql: "UPDATE project_tasks SET auto_schedule_paused = 1, updated_at = ? WHERE id = ?", bindValues: [now, taskId] },
+      { sql: "UPDATE task_plans SET planned_date = '', updated_at = ? WHERE task_id = ? AND planned_date = ?", bindValues: [now, taskId, today] },
+    ]);
+  }
+
+  async resumeAutoSchedule(taskId: string): Promise<void> {
+    await this.initialize();
+    await this.database.execute("UPDATE project_tasks SET auto_schedule_paused = 0, updated_at = ? WHERE id = ?", [this.clock().toISOString(), taskId]);
   }
 
   async removePlan(taskId: string): Promise<void> {
@@ -280,6 +354,18 @@ export class SqliteWorkRepository implements WorkRepository {
     } catch (error) {
       throw new WorkRepositoryError("读取专注记录失败", "read_failed", error);
     }
+  }
+
+  async updateSession(input: FocusSessionUpdateInput): Promise<FocusSession> {
+    await this.initialize();
+    const { updateFocusHistory } = await import("./sqlite-focus-history");
+    return updateFocusHistory(this.database, input, this.clock(), rowToSession);
+  }
+
+  async deleteSession(id: string): Promise<void> {
+    await this.initialize();
+    const { deleteFocusHistory } = await import("./sqlite-focus-history");
+    return deleteFocusHistory(this.database, id);
   }
 
   async getActiveSession(): Promise<FocusSession | null> {
@@ -499,6 +585,8 @@ function rowToPlan(row: TaskPlanRow): TaskPlan {
   return {
     taskId: row.task_id,
     plannedDate: row.planned_date,
+    source: row.source === "auto" ? "auto" : "manual",
+    skipAutoDate: row.skip_auto_date || "",
     priority: row.priority,
     estimateMinutes: Number(row.estimate_minutes || 0),
     sortOrder: Number(row.sort_order || 0),

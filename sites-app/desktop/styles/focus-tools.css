@@ -1,0 +1,38 @@
+.focus-tools-dialog {
+  width: min(680px, calc(100vw - 40px));
+  max-height: calc(100vh - 64px);
+  overflow: auto;
+  border: 1px solid var(--ui-border);
+  border-radius: 20px;
+  padding: 24px;
+  background: var(--ui-surface);
+  color: var(--ui-ink);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .22);
+}
+.focus-tools-dialog::backdrop { background: rgba(28, 31, 55, .46); backdrop-filter: blur(5px); }
+.focus-tools-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.focus-tools-dialog h2 { margin: 0; font-size: 24px; }
+.focus-tools-dialog p { line-height: 1.7; color: var(--ui-muted); }
+.focus-tools-dialog .focus-tools-subject { font-weight: 700; color: var(--ui-ink); overflow-wrap: anywhere; }
+.focus-tools-dialog label { display: grid; gap: 8px; margin-top: 16px; }
+.focus-tools-dialog input { width: 100%; min-height: 42px; box-sizing: border-box; border: 1px solid var(--ui-border); border-radius: 10px; padding: 8px 12px; background: var(--ui-surface); color: var(--ui-ink); font: inherit; color-scheme: light dark; }
+.focus-tools-dialog footer, .focus-tools-quick-times, .focus-tools-preferences > div { display: flex; gap: 8px; flex-wrap: wrap; }
+.focus-tools-dialog footer { justify-content: flex-end; margin-top: 20px; }
+.focus-tools-dialog .focus-tools-error { color: #b74848; }
+.focus-tools-preview { min-height: 24px; }
+.focus-tools-preferences { padding: 18px 0; border-bottom: 1px solid var(--ui-border); }
+.focus-tools-preferences > .ui-button { margin-top: 12px; }
+.focus-tools-records > article { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px 0; border-bottom: 1px solid var(--ui-border); }
+.focus-tools-records strong { overflow-wrap: anywhere; }
+.focus-tools-records p { margin: 6px 0; font-size: 12px; }
+.focus-tools-records small { color: var(--ui-muted); }
+.focus-tools-record-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.focus-tools-delete-confirm { max-width: 210px; flex-shrink: 0; }
+.focus-tools-delete-confirm button { margin-right: 6px; }
+.focus-reminder-prompt { position: fixed; z-index: 8500; right: 24px; bottom: 24px; width: min(370px, calc(100vw - 48px)); box-sizing: border-box; padding: 20px; border: 1px solid var(--ui-border); border-radius: 16px; background: var(--ui-surface); color: var(--ui-ink); box-shadow: 0 12px 38px rgba(0, 0, 0, .18); }
+.focus-reminder-prompt p { color: var(--ui-muted); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.focus-reminder-prompt > div { display: flex; gap: 6px; flex-wrap: wrap; }
+@media (max-width: 600px) {
+  .focus-tools-dialog { padding: 18px; }
+  .focus-tools-records > article { flex-wrap: wrap; gap: 10px; }
+}

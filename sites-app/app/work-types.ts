@@ -4,6 +4,7 @@ export type TaskPlanHistory = {
   id: string;
   taskId: string;
   plannedDate: string;
+  source: "manual" | "auto";
   taskTitle: string;
   currentFocus: string;
   createdAt: string;
@@ -34,6 +35,8 @@ export type SituationPlanChange = {
 export type TaskPlan = {
   taskId: string;
   plannedDate: string;
+  source?: "manual" | "auto";
+  skipAutoDate?: string;
   priority: TaskPriority;
   estimateMinutes: number;
   sortOrder: number;
@@ -53,6 +56,12 @@ export type FocusSession = {
 export type FocusSessionStopInput = {
   id: string;
   endedAt?: string;
+};
+
+export type FocusSessionUpdateInput = {
+  id: string;
+  startedAt: string;
+  endedAt: string;
 };
 
 export type FocusSessionInput = {

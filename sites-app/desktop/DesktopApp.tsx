@@ -2,11 +2,13 @@ import { Button } from "./DesktopControls";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isRegistered, register } from "@tauri-apps/plugin-global-shortcut";
+import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import Database from "@tauri-apps/plugin-sql";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AppUpdater } from "./AppUpdater";
+import { errorMessage } from "../app/data/error-message";
+import { startSyncSchedule } from "./sync-schedule";
 import { DesktopThemeProvider, loadDesktopTheme, saveDesktopTheme, type ThemeId } from "./DesktopThemes";
 import {
   loadDesktopFontPreset,
@@ -34,6 +36,12 @@ import { IntegrationRepository } from "../app/data/integration-repository";
 import { DashboardRepository } from "../app/data/dashboard-repository";
 import { HealthRepository } from "../app/data/health-repository";
 import { FinanceRepository } from "../app/data/finance-repository";
+import type { PrivateRepository } from "../app/data/private-repository";
+import { PrivateSyncClient } from "../app/data/private-sync-client";
+import { systemSecrets } from "../app/data/secret-store";
+const PrivateSyncPanel = lazy(async () => ({ default: (await import("../app/PrivateSyncPanel")).PrivateSyncPanel }));
+const AccountPasswordForm = lazy(async () => ({ default: (await import("./AccountPasswordForm")).AccountPasswordForm }));
+const AppUpdater = lazy(async () => ({ default: (await import("./AppUpdater")).AppUpdater }));
 import {
   UniversalSyncRepository,
   type SyncConflict,
@@ -49,8 +57,8 @@ import {
   workspaceTitle,
   type QuickLink,
 } from "../app/workspace-preferences";
-import seedArticles from "../app/generated/articles.json";
 import type { Article } from "../app/types";
+import { defaultHealthReminderPreferences, type HealthReminderPreferences } from "../app/reminder-preferences";
 import {
   buildCapturedArticle,
   findExistingCapturedSource,
@@ -64,6 +72,7 @@ const DesktopWorkbench = lazy(async () => ({
 
 const defaultServerUrl = "https://mind.47-108-88-117.sslip.io";
 const quickCaptureShortcut = "CommandOrControl+Shift+Space";
+const expenseCaptureShortcut = "CommandOrControl+Shift+M";
 let shortcutInitialization: Promise<void> | null = null;
 
 type BackupPath = {
@@ -88,6 +97,7 @@ type DesktopRuntime = {
   dashboardRepository: DashboardRepository;
   healthRepository: HealthRepository;
   financeRepository: FinanceRepository;
+  privateRepository: PrivateRepository;
   syncRepository: UniversalSyncRepository;
   database: Database;
 };
@@ -102,6 +112,7 @@ type DesktopRuntimeStartup = {
   displayName: string;
   avatarDataUrl: string;
   quickLinks: QuickLink[];
+  healthReminder: HealthReminderPreferences;
   pendingCount: number;
 };
 
@@ -111,6 +122,7 @@ let attachmentMigration: Promise<Awaited<ReturnType<typeof migrateLegacyInlineIm
 function initializeDesktopRuntime() {
   desktopRuntimeInitialization ??= Database.load("sqlite:mind-garden.db")
     .then(async (database) => {
+      const { default: seedArticles } = await import("../app/generated/articles.json");
       const transactionalDatabase = database as TauriSqliteDatabase;
       transactionalDatabase.transaction = async (statements) => {
         await invoke("execute_sqlite_transaction", { statements });
@@ -140,12 +152,16 @@ function initializeDesktopRuntime() {
         aiRepository.cleanupExpired(),
       ]);
       await workRepository.ready();
+      const { PrivateRepository } = await import("../app/data/private-repository");
+      const privateRepository = new PrivateRepository(transactionalDatabase);
+      await privateRepository.ready();
       const syncRepository = new UniversalSyncRepository(transactionalDatabase);
       await syncRepository.initialize();
       await attachmentRepository.cleanupAbandonedDrafts();
-      const [activeFocusAtStartup, preferences, pending] = await Promise.all([
+      const [activeFocusAtStartup, preferences, healthReminder, pending] = await Promise.all([
         workRepository.getActiveSession(),
         preferencesRepository.getPreferences(),
+        preferencesRepository.getHealthReminder(),
         syncRepository.getStatus(),
       ]);
       const resolvedQuickLinks = preferences.quickLinks
@@ -163,6 +179,7 @@ function initializeDesktopRuntime() {
           dashboardRepository,
           healthRepository,
           financeRepository,
+          privateRepository,
           syncRepository,
           database,
         },
@@ -170,6 +187,7 @@ function initializeDesktopRuntime() {
         displayName: preferences.displayName,
         avatarDataUrl: preferences.avatarDataUrl,
         quickLinks: resolvedQuickLinks,
+        healthReminder,
         pendingCount: pending.pending,
       };
     })
@@ -189,6 +207,16 @@ function describeStartupError(error: unknown) {
   return error.message;
 }
 
+async function requestNotificationPermissionIfAvailable() {
+  if (!isTauri()) return false;
+  try {
+    if (await isPermissionGranted()) return true;
+    return await requestPermission() === "granted";
+  } catch {
+    return false;
+  }
+}
+
 type SyncNotice = {
   tone: "quiet" | "success" | "warning";
   text: string;
@@ -206,7 +234,13 @@ export function DesktopApp() {
   const [serverUrl, setServerUrl] = useState(
     () => localStorage.getItem("mind-garden.server-url") || defaultServerUrl,
   );
-  const [session, setSession] = useState<LoginResult | null>(null);
+  const [session, setSessionState] = useState<LoginResult | null>(null);
+  const sessionRef = useRef<LoginResult | null>(null);
+  const sessionRestoreAllowed = useRef(true);
+  const setSession = useCallback((value: LoginResult | null) => {
+    sessionRef.current = value;
+    setSessionState(value);
+  }, []);
   const [pendingCount, setPendingCount] = useState(0);
   const [syncCenter, setSyncCenter] = useState({ pending: 0, errors: 0, conflicts: 0, recycled: 0, cursor: "" });
   const [syncConflicts, setSyncConflicts] = useState<SyncConflict[]>([]);
@@ -221,6 +255,7 @@ export function DesktopApp() {
   const [displayName, setDisplayName] = useState("");
   const [avatarDataUrl, setAvatarDataUrl] = useState("");
   const [quickLinks, setQuickLinks] = useState<QuickLink[]>([]);
+  const [healthReminder, setHealthReminder] = useState<HealthReminderPreferences>(() => ({ ...defaultHealthReminderPreferences }));
   const [notice, setNotice] = useState<SyncNotice>({
     tone: "quiet",
     text: "本地资料库准备中…",
@@ -305,12 +340,20 @@ export function DesktopApp() {
   useEffect(() => {
     if (!isTauri() || shortcutInitialization) return;
     shortcutInitialization = (async () => {
-      if (await isRegistered(quickCaptureShortcut)) return;
-      await register(quickCaptureShortcut, async (event) => {
-        if (event.state !== "Pressed") return;
-        await invoke("show_main_window").catch(() => undefined);
-        window.dispatchEvent(new Event("mind-garden:quick-capture"));
-      });
+      if (!await isRegistered(quickCaptureShortcut)) {
+        await register(quickCaptureShortcut, async (event) => {
+          if (event.state !== "Pressed") return;
+          await invoke("show_main_window").catch(() => undefined);
+          window.dispatchEvent(new Event("mind-garden:quick-capture"));
+        });
+      }
+      if (!await isRegistered(expenseCaptureShortcut)) {
+        await register(expenseCaptureShortcut, async (event) => {
+          if (event.state !== "Pressed") return;
+          await invoke("show_main_window").catch(() => undefined);
+          window.dispatchEvent(new Event("mind-garden:quick-expense"));
+        });
+      }
     })().catch((error) => {
       shortcutInitialization = null;
       setNotice({
@@ -332,6 +375,7 @@ export function DesktopApp() {
         setDisplayName(startup.displayName);
         setAvatarDataUrl(startup.avatarDataUrl);
         setQuickLinks(startup.quickLinks);
+        setHealthReminder(startup.healthReminder);
         setPendingCount(startup.pendingCount);
         setNotice({ tone: "quiet", text: "" });
         attachmentMigration ??= migrateLegacyInlineImages(
@@ -447,12 +491,33 @@ export function DesktopApp() {
       runtime.syncRepository.listErrors(),
       runtime.syncRepository.listRecycle(),
     ]);
-    setPendingCount(status.pending);
+    setPendingCount(status.pending + status.errors);
     setSyncCenter(status);
     setSyncConflicts(conflicts);
     setSyncErrors(errors);
     setSyncRecycle(recycle);
+    return status;
   }, [runtime]);
+
+  const privateClient = useMemo(() => runtime && session ? new PrivateSyncClient(
+    runtime.privateRepository, serverUrl, session.username, async () => session.accessToken, systemSecrets,
+  ) : null, [runtime, serverUrl, session]);
+  const [privateStatus, setPrivateStatus] = useState("");
+  const syncPrivate = useCallback(async () => {
+    if (!privateClient || !runtime || workbenchEditing) return;
+    try {
+      await privateClient.sync();
+      const state = await runtime.privateRepository.status();
+      setPrivateStatus(state.enabled ? state.conflicts ? "私人同步有冲突" : state.pending ? "私人记录待同步" : "私人数据已同步" : "私人同步未开启");
+      setRevision(value => value + 1);
+    } catch { setPrivateStatus("私人同步失败，可重试；普通同步不受影响。"); }
+  }, [privateClient, runtime, workbenchEditing]);
+  useEffect(() => {
+    const resume = () => { if (!document.hidden) void syncPrivate(); };
+    void syncPrivate();
+    window.addEventListener("online", resume); document.addEventListener("visibilitychange", resume);
+    return () => { window.removeEventListener("online", resume); document.removeEventListener("visibilitychange", resume); };
+  }, [syncPrivate, mutationRevision]);
 
   useEffect(() => {
     void updatePendingCount();
@@ -487,20 +552,21 @@ export function DesktopApp() {
   }, [runtime, serverUrl, session]);
 
   useEffect(() => {
-    if (!syncClient || session || !isTauri()) return;
+    if (!syncClient || session || !sessionRestoreAllowed.current || !isTauri()) return;
     let active = true;
     void invoke<StoredRefreshSession | null>("sync_refresh_session_load")
       .then(async (stored) => {
-        if (!stored || stored.serverUrl.replace(/\/+$/, "") !== serverUrl.replace(/\/+$/, "")) return;
+        if (!active || !sessionRestoreAllowed.current || !stored || stored.serverUrl.replace(/\/+$/, "") !== serverUrl.replace(/\/+$/, "")) return;
         const refreshed = await syncClient.refresh(stored.refreshToken);
-        if (!active) return;
+        if (!active || !sessionRestoreAllowed.current) return;
         await storeRefreshSession(refreshed);
+        if (!active || !sessionRestoreAllowed.current) return;
         setSession(refreshed);
         setUsername(refreshed.username);
         setNotice({ tone: "quiet", text: "登录状态已恢复，正在同步…" });
       })
       .catch(async (error) => {
-        if (error instanceof CloudSyncError && error.code === "unauthorized") {
+        if (active && sessionRestoreAllowed.current && error instanceof CloudSyncError && error.code === "unauthorized") {
           await invoke("sync_refresh_session_delete").catch(() => undefined);
         }
       });
@@ -509,7 +575,7 @@ export function DesktopApp() {
 
   const syncNow = useCallback(
     async (showSuccess = true) => {
-      if (!syncClient || !runtime || !session || syncInFlight.current) return;
+      if (!syncClient || !runtime || !session || sessionRef.current !== session || syncInFlight.current) return;
       if (workbenchEditing) {
         if (showSuccess) {
           setNotice({ tone: "warning", text: "请先保存或退出当前编辑，再开始同步。" });
@@ -519,30 +585,50 @@ export function DesktopApp() {
       syncInFlight.current = true;
       setSyncing(true);
       setNotice({ tone: "quiet", text: "正在安全同步…" });
+      let activeSession = session;
       try {
-        let activeSession = session;
+        let refreshed = false;
+        const refreshSession = async () => {
+          const nextSession = await syncClient.refresh(activeSession.refreshToken!);
+          if (sessionRef.current !== activeSession) return false;
+          await storeRefreshSession(nextSession);
+          if (sessionRef.current !== activeSession) return false;
+          activeSession = nextSession;
+          setSession(activeSession);
+          refreshed = true;
+          return true;
+        };
         if (
           activeSession.refreshToken
           && new Date(activeSession.expiresAt).getTime() <= Date.now() + 60_000
         ) {
-          activeSession = await syncClient.refresh(activeSession.refreshToken);
-          await storeRefreshSession(activeSession);
-          setSession(activeSession);
+          if (!await refreshSession()) return;
         }
-        const result = await syncClient.sync(activeSession.accessToken);
-        await updatePendingCount();
+        let result: SyncResult;
+        try {
+          result = await syncClient.sync(activeSession.accessToken);
+        } catch (error) {
+          if (!(error instanceof CloudSyncError) || error.code !== "unauthorized" || refreshed || !activeSession.refreshToken) throw error;
+          if (!await refreshSession()) return;
+          result = await syncClient.sync(activeSession.accessToken);
+        }
+        if (sessionRef.current !== activeSession) return;
+        const status = await updatePendingCount();
         setRevision((value) => value + 1);
-        setNotice(syncMessage(result, showSuccess));
+        setNotice(syncMessage({ ...result, failed: Math.max(result.failed ?? 0, showSuccess ? status?.errors ?? 0 : 0) }, showSuccess));
       } catch (error) {
+        if (sessionRef.current !== activeSession) return;
         if (error instanceof CloudSyncError && error.code === "unauthorized") {
-          await invoke("sync_refresh_session_delete").catch(() => undefined);
+          sessionRestoreAllowed.current = false;
           setSession(null);
-          setShowAccount(true);
+          await invoke("sync_refresh_session_delete").catch(() => undefined);
+          if (showSuccess) setShowAccount(true);
         }
         setNotice({
           tone: "warning",
-          text: error instanceof Error ? error.message : "同步没有完成",
+          text: errorMessage(error, "同步没有完成，请稍后重试。"),
         });
+        await updatePendingCount().catch(() => undefined);
       } finally {
         syncInFlight.current = false;
         setSyncing(false);
@@ -565,20 +651,13 @@ export function DesktopApp() {
   useEffect(() => {
     if (!session) return;
     void syncNow(false);
-    let timer = 0;
-    const schedule = () => {
-      const jitter = Math.round((Math.random() - 0.5) * 60_000);
-      timer = window.setTimeout(async () => {
-        await syncNow(false);
-        schedule();
-      }, 5 * 60_000 + jitter);
-    };
+    const stopSchedule = startSyncSchedule(() => syncNow(false),
+      () => 5 * 60_000 + Math.round((Math.random() - 0.5) * 60_000));
     const resume = () => void syncNow(false);
-    schedule();
     window.addEventListener("online", resume);
     window.addEventListener("focus", resume);
     return () => {
-      window.clearTimeout(timer);
+      stopSchedule();
       window.removeEventListener("online", resume);
       window.removeEventListener("focus", resume);
     };
@@ -587,11 +666,14 @@ export function DesktopApp() {
   async function login(event: React.FormEvent) {
     event.preventDefault();
     if (!syncClient || !username.trim() || !password) return;
+    if (syncInFlight.current) return;
     if (workbenchEditing) {
       setNotice({ tone: "warning", text: "请先保存或退出当前编辑，再登录同步。" });
       setShowAccount(false);
       return;
     }
+    sessionRestoreAllowed.current = false;
+    syncInFlight.current = true;
     setSyncing(true);
     setNotice({ tone: "quiet", text: "正在登录同步账户…" });
     try {
@@ -613,6 +695,7 @@ export function DesktopApp() {
         text: error instanceof Error ? error.message : "登录失败",
       });
     } finally {
+      syncInFlight.current = false;
       setSyncing(false);
     }
   }
@@ -638,12 +721,36 @@ export function DesktopApp() {
   }
 
   async function logout() {
+    sessionRestoreAllowed.current = false;
     const refreshToken = session?.refreshToken;
     setSession(null);
     setShowAccount(false);
     if (refreshToken) await syncClient?.logout(refreshToken).catch(() => undefined);
     await invoke("sync_refresh_session_delete").catch(() => undefined);
     setNotice({ tone: "quiet", text: "已退出同步，本地内容仍可正常使用。" });
+  }
+
+  async function changePassword(currentPassword: string, newPassword: string) {
+    if (!session || !syncClient || syncInFlight.current) throw new Error("请等待当前同步完成后再修改密码。");
+    syncInFlight.current = true;
+    setSyncing(true);
+    try {
+      let activeSession = session;
+      if (activeSession.refreshToken && new Date(activeSession.expiresAt).getTime() <= Date.now() + 60_000) {
+        activeSession = await syncClient.refresh(activeSession.refreshToken);
+        await storeRefreshSession(activeSession);
+        setSession(activeSession);
+      }
+      await syncClient.changePassword(activeSession.accessToken, currentPassword, newPassword);
+      sessionRestoreAllowed.current = false;
+      setSession(null);
+      setPassword("");
+      await invoke("sync_refresh_session_delete").catch(() => undefined);
+      setNotice({ tone: "success", text: "密码已修改，请使用新密码重新登录。其他设备也需要重新登录。" });
+    } finally {
+      syncInFlight.current = false;
+      setSyncing(false);
+    }
   }
 
   async function resolveSyncConflict(id: string, strategy: "local" | "remote" | "copy") {
@@ -737,7 +844,7 @@ export function DesktopApp() {
 
   return (
     <div className="desktop-app">
-      {notice.text && notice.tone !== "quiet" && <div className="floating-system-alert system-alert visible"><i className={notice.tone} /><span>{notice.text}</span></div>}
+      {notice.text && notice.tone !== "quiet" && <div role="status" className="floating-system-alert system-alert visible"><i className={notice.tone} /><span>{notice.text}</span><Button variant="ghost" size="small" iconOnly aria-label="关闭提示" onClick={() => setNotice({ tone: "quiet", text: "" })}>×</Button></div>}
 
       <Suspense fallback={<main className="desktop-startup"><span>个人工作台</span><h1>正在整理桌面</h1></main>}>
       <DesktopThemeProvider themeId={themeId}>
@@ -746,6 +853,7 @@ export function DesktopApp() {
         attachmentRepository={runtime.attachmentRepository}
         projectRepository={runtime.projectRepository}
         workRepository={runtime.workRepository}
+        preferencesRepository={runtime.preferencesRepository}
         aiRepository={runtime.aiRepository}
         integrationRepository={runtime.integrationRepository}
         dashboardRepository={runtime.dashboardRepository}
@@ -754,6 +862,7 @@ export function DesktopApp() {
         displayName={displayName}
         avatarDataUrl={avatarDataUrl}
         quickLinks={quickLinks}
+        healthReminder={healthReminder}
         dataRevision={revision}
         themeId={themeId}
         fontPresetId={fontPresetId}
@@ -773,6 +882,15 @@ export function DesktopApp() {
         onSaveQuickLinks={async (links) => {
           setQuickLinks(links);
           await runtime.preferencesRepository.saveQuickLinks(links);
+        }}
+        onSaveHealthReminder={async (preferences) => {
+          if (preferences.enabled) await requestNotificationPermissionIfAvailable();
+          const saved = await runtime.preferencesRepository.saveHealthReminder(preferences);
+          setHealthReminder(saved);
+        }}
+        onTestHealthReminder={async () => {
+          await requestNotificationPermissionIfAvailable();
+          await invoke("test_health_reminder");
         }}
         startupActiveFocusId={startupActiveFocusId}
         onEditingStateChange={setWorkbenchEditing}
@@ -808,18 +926,28 @@ export function DesktopApp() {
             >
               ×
             </Button>
-            <span>个人同步</span>
-            <h2 id="account-title">
-              {session ? "同步账户" : "登录后同步"}
-            </h2>
-            <p>
-              不登录也可以继续写。登录只会把本地变更推送到你的服务器，并拉取其他设备的内容。
-            </p>
+            <header className="account-dialog-heading">
+              <span>个人同步</span>
+              <h2 id="account-title">
+                {session ? "账户设置" : "登录后同步"}
+              </h2>
+              <p>
+                不登录也可以继续写。登录只会把本地变更推送到你的服务器，并拉取其他设备的内容。
+              </p>
+            </header>
             {session ? (
               <div className="account-current">
-                <strong>{session.username}</strong>
-                <small>本次登录有效至 {formatTime(session.expiresAt)}</small>
-                <Button variant="secondary" type="button"
+                <div className="account-profile">
+                  <i aria-hidden="true">{session.username.trim().slice(0, 1).toUpperCase()}</i>
+                  <div>
+                    <strong>{session.username}</strong>
+                    <small>已连接 · 登录有效至 {formatTime(session.expiresAt)}</small>
+                    <small title={serverUrl}>{serverUrl}</small>
+                  </div>
+                </div>
+                <Suspense fallback={<p>正在打开账户设置…</p>}><AccountPasswordForm disabled={syncing} onChangePassword={changePassword} /></Suspense>
+                <Button className="account-logout" variant="secondary" type="button"
+                  disabled={syncing}
                   onClick={() => void logout()}
                 >
                   退出同步账户
@@ -836,8 +964,15 @@ export function DesktopApp() {
                     ))}
                     {syncErrors.map((item) => (
                       <article key={`${item.entityType}:${item.entityId}`} className="sync-center-item error">
-                        <div><strong>{item.entityId}</strong><small>{item.error}</small></div>
-                        <Button variant="secondary" type="button" onClick={async () => { await runtime?.syncRepository.retryError(item.entityType, item.entityId); await updatePendingCount(); }}>重试</Button>
+                        <div className="sync-center-copy">
+                          <strong>{syncErrorTitle(item)}</strong>
+                          <small>{syncErrorSummary(item)}</small>
+                          <details className="sync-error-detail">
+                            <summary>查看技术详情</summary>
+                            <code>{item.error}</code>
+                          </details>
+                        </div>
+                        <Button variant="secondary" type="button" disabled={syncing} onClick={async () => { await runtime?.syncRepository.retryError(item.entityType, item.entityId); await updatePendingCount(); await syncNow(); }}>重试</Button>
                       </article>
                     ))}
                     {syncRecycle.slice(0, 20).map((item) => (
@@ -852,6 +987,7 @@ export function DesktopApp() {
               </div>
             ) : (
               <form onSubmit={login}>
+                <p>同步账户由服务器首次部署时创建，没有公开注册入口。请在手机和电脑使用同一账户；忘记密码时需由服务器管理员重置，已有记录会保留。</p>
                 <label>
                   <span>账户</span>
                   <input
@@ -887,6 +1023,7 @@ export function DesktopApp() {
                 </Button>
               </form>
             )}
+            {session && <details className="account-private"><summary>私人数据同步</summary><Suspense fallback={<p>正在打开私人同步设置…</p>}><PrivateSyncPanel repository={runtime.privateRepository} server={serverUrl} username={session.username} onSync={syncPrivate} token={async () => sessionRef.current?.accessToken ?? ""} /></Suspense>{privateStatus && <p role="status">{privateStatus}</p>}</details>}
           </section>
         </div>
       )}
@@ -898,6 +1035,8 @@ function syncMessage(
   result: SyncResult,
   showSuccess: boolean,
 ): SyncNotice {
+  if (result.failed) return { tone: "warning", text: `已同步可处理的记录，${result.failed} 项未完成。请在“账户设置 → 同步中心”查看原因并重试。` };
+  if (result.deferredDownloads) return { tone: "warning", text: `记录已同步，${result.deferredDownloads} 个附件暂未下载。网络恢复后打开对应笔记会重试。` };
   if (result.limited) {
     return {
       tone: "warning",
@@ -926,6 +1065,27 @@ function syncEntityLabel(payload: Record<string, unknown>, fallback: string) {
     if (typeof value === "string" && value.trim()) return value.trim().slice(0, 80);
   }
   return fallback;
+}
+
+function syncErrorTitle(item: SyncItemError) {
+  const labels: Partial<Record<SyncItemError["entityType"], string>> = {
+    article: "笔记",
+    attachment: "图片附件",
+    project: "项目",
+    milestone: "阶段",
+    task: "行动",
+    calendar_event: "日程",
+    preference: "工作台设置",
+  };
+  const label = labels[item.entityType] ?? "同步记录";
+  return `${label} · ${item.entityId.slice(-8)}`;
+}
+
+function syncErrorSummary(item: SyncItemError) {
+  if (item.entityType === "attachment" && /云端附件|附件上传|sending request for url/i.test(item.error)) {
+    return "图片未能连接同步服务器。请检查网络或系统代理后重试。";
+  }
+  return item.error;
 }
 
 function AccountDock({
@@ -978,7 +1138,7 @@ function AccountDock({
         <nav>
           <button disabled={syncing} onClick={onSync}><i>↻</i><span><strong>{session ? syncing ? "正在同步" : "立即同步" : "登录同步"}</strong><small>{session ? pendingCount ? `${pendingCount} 条本地变更` : "当前没有待同步变更" : "连接自己的服务器"}</small></span></button>
           <button onClick={onAccount}><i>◉</i><span><strong>账户设置</strong><small>管理登录状态与同步服务器</small></span></button>
-          <div className="account-update-entry"><AppUpdater /></div>
+          <div className="account-update-entry"><Suspense fallback={<span>正在加载更新入口…</span>}><AppUpdater /></Suspense></div>
         </nav>
       </section>}
     </div>

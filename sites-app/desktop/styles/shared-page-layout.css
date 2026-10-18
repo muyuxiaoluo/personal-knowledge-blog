@@ -1,26 +1,5 @@
-/* Cross-page rules are available before any page is opened. */
-
-
-.action-row {
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-
-.action-row .action-row-main {
-  grid-column: 1;
-}
-
-.action-row .action-row-actions {
-  grid-column: 2;
-}
-
-@media (max-width: 720px) {
-
-  .action-row,
-  .action-row .action-row-actions {
-    grid-template-columns: minmax(0, 1fr);
-    grid-column: 1;
-  }
-}
+/* Cross-page rules are available before any page is opened.
+   Action card grid placement belongs to dashboard.css, including its breakpoints. */
 .desktop-workbench.theme-magic *,
 .desktop-workbench.theme-immersive * {
   backdrop-filter: none !important;

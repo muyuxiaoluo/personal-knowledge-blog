@@ -15,8 +15,10 @@ export function isAiResponseSettled(input: {
   return input.stableForMs >= requiredStability;
 }
 
-export function isMoreCompleteAiAnswer(local: string, official: string) {
+export function isMoreCompleteAiAnswer(local: string, official: string, legacyOfficial?: string) {
   if (local === official) return false;
+  // Only repair a lossy saved formula when the old serializer reproduces it exactly.
+  if (legacyOfficial && local === legacyOfficial) return true;
   const normalize = (value: string) => value
     .replace(/&#8203;|&ZeroWidthSpace;|\u200b/g, "")
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")

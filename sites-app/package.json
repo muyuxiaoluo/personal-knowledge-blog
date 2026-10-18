@@ -1,11 +1,14 @@
 {
   "name": "life-strategy-library-desktop",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
+    "mobile:dev": "vite --config mobile/vite.config.ts",
+    "mobile:build": "tsc -p mobile/tsconfig.json && vite build --config mobile/vite.config.ts",
+    "android:build": "powershell -NoProfile -File scripts/build-android-debug.ps1",
     "content:generate": "node scripts/generate-content.mjs",
     "dev": "npm run tauri:dev",
     "desktop:dev": "vite --config desktop/vite.config.ts",
@@ -26,22 +29,28 @@
     "@tauri-apps/plugin-autostart": "^2.5.1",
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-global-shortcut": "^2.3.0",
+    "@tauri-apps/plugin-notification": "2.4.0",
     "@tauri-apps/plugin-opener": "2.5.4",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-sql": "2.4.0",
     "@tauri-apps/plugin-updater": "^2.10.1",
+    "katex": "^0.16.47",
     "lunar-javascript": "1.7.7",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4",
+    "@types/jsdom": "^30.0.0",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
+    "jsdom": "^29.1.1",
     "tsx": "4.22.1",
     "typescript": "5.9.3",
     "vite": "8.2.0"

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  assertFinanceReportLanguage,
   buildFinanceInsightSnapshot,
   financeDuplicateFingerprint,
   summarizeFinanceMonth,
   validateFinanceAiReportContent,
 } from "../app/finance-analysis";
-import { emptyFinanceBudget, emptyFinanceSettings, type FinanceTransaction } from "../app/finance-types";
+import { emptyFinanceBudget, emptyFinanceSettings, type FinanceTransaction, type FinanceAiReportContent } from "../app/finance-types";
 
 function transaction(overrides: Partial<FinanceTransaction>): FinanceTransaction {
   const base: FinanceTransaction = {
@@ -111,4 +112,54 @@ test("redacts project names and rejects AI amounts outside local evidence", () =
     nextActions: [],
     questions: [],
   }, snapshot), /超出本地证据范围/);
+});
+
+const readableReport = (): FinanceAiReportContent => ({
+  overview: "先保障三餐和通勤，再减少不值得的消费。",
+  essentialStructure: "保留基本生活支出，比较替代方式的差价。",
+  pendingConfirmations: [], worthwhileSpending: [], opportunities: [],
+  scenarios: { currentCents: 0, moderateCents: 0, aggressiveCents: 0 },
+  nextActions: ["先确认每周哪些行程可换成公共交通。"], questions: [],
+});
+
+test("unconfirmed roles stay unknown and worthwhile spending is protected", () => {
+  const transactions = [
+    transaction({ budgetRole: "fixed-essential", budgetRoleConfirmed: false, amountCents: 5_000 }),
+    transaction({ budgetRole: "unknown", budgetRoleConfirmed: true, amountCents: 2_000 }),
+    transaction({ budgetRole: "optional", valueRating: "worthwhile", amountCents: 3_000 }),
+  ];
+  const summary = summarizeFinanceMonth("2026-08", transactions, emptyFinanceSettings);
+  const snapshot = buildFinanceInsightSnapshot(summary, emptyFinanceBudget("2026-08"), transactions, []);
+  assert.equal(summary.budgetRoleTotals["fixed-essential"], 0);
+  assert.equal(summary.budgetRoleTotals.unknown, 7_000);
+  assert.deepEqual(snapshot.pendingConfirmation, { count: 2, amountCents: 7_000 });
+  assert.equal(summary.savingCandidates.length, 0);
+});
+
+test("necessary and unreviewed expenses have no invented saving amount", () => {
+  const transactions = [
+    transaction({ category: "transport", valueRating: "regret", amountCents: 2_500 }),
+    transaction({ category: "daily", budgetRole: "optional", amountCents: 5_000 }),
+    transaction({ category: "daily", budgetRole: "optional", valueRating: "regret", amountCents: 1_000 }),
+  ];
+  const summary = summarizeFinanceMonth("2026-08", transactions, emptyFinanceSettings);
+  const snapshot = buildFinanceInsightSnapshot(summary, emptyFinanceBudget("2026-08"), transactions, []);
+  assert.equal(summary.savingCandidates.length, 3);
+  assert.equal(summary.scenarios.moderateCents, summary.scenarios.baselineCents);
+  assert.equal(summary.scenarios.aggressiveCents - summary.scenarios.baselineCents, 1_000);
+  const candidate = summary.savingCandidates.find((item) => item.category === "transport")!;
+  const content = readableReport();
+  content.opportunities = [{ title: "尝试公共交通", reason: "先确认哪些行程可以替代", evidenceIds: [candidate.evidenceId], minimumSavingCents: 0, maximumSavingCents: 1, confidence: "low", action: "比较两种方式的差价与耗时", tradeoff: "可能多花时间" }];
+  assert.throws(() => validateFinanceAiReportContent(content, snapshot), /超出本地证据范围/);
+  content.opportunities[0].maximumSavingCents = 0;
+  assert.equal(validateFinanceAiReportContent(content, snapshot).presentationVersion, 2);
+  content.opportunities.push({ ...content.opportunities[0] });
+  assert.throws(() => validateFinanceAiReportContent(content, snapshot), /重复计算/);
+});
+
+test("report prose rejects leaked fields, evidence ids and cent-denominated amounts", () => {
+  for (const overview of ["sampleInsufficient=true", "optional/food 支出", "支出119,418分", "证据 S-1UGWGTS", "pendingConfirmation.count=0"]) {
+    assert.throws(() => assertFinanceReportLanguage({ ...readableReport(), overview }), /内部字段/);
+  }
+  assert.doesNotThrow(() => assertFinanceReportLanguage({ ...readableReport(), overview: "支出1,194.18元；换乘可能多花20分钟。" }));
 });

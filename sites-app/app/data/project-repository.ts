@@ -1,6 +1,7 @@
 import type {
   Milestone,
   Project,
+  ProjectAccumulation,
   ProjectDetail,
   ProjectLog,
   ProjectProposal,
@@ -10,7 +11,7 @@ import type {
   ProjectTaskStatus,
   ProposalStatus,
 } from "../project-types";
-import type { ProjectAdjustmentDraft } from "../ai-api-types";
+import type { ProjectAdjustmentDraft, ProjectRouteDraft } from "../ai-api-types";
 
 export interface ProjectRepository {
   list(): Promise<ProjectSummary[]>;
@@ -34,8 +35,11 @@ export interface ProjectRepository {
   saveProposal(proposal: ProjectProposal): Promise<ProjectProposal>;
   updateProposalStatus(id: string, status: ProposalStatus, reviewNote: string): Promise<void>;
   removeProposal(id: string): Promise<void>;
+  saveAccumulation(accumulation: ProjectAccumulation): Promise<ProjectAccumulation>;
+  removeAccumulation(id: string): Promise<void>;
   addLog(projectId: string | null, body: string, taskId?: string | null, kind?: ProjectLog["kind"]): Promise<ProjectLog>;
   applyProjectAdjustment(draft: ProjectAdjustmentDraft): Promise<void>;
+  applyProjectRoute(draft: ProjectRouteDraft): Promise<void>;
   confirmProject(id: string): Promise<void>;
 }
 

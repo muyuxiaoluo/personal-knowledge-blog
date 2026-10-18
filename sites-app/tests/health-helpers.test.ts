@@ -7,6 +7,10 @@ import {
   calculateSleepMinutes,
   classifyBmi,
   formatHealthAiAdviceMarkdown,
+  formatSleepDurationEntry,
+  parseSleepDurationEntry,
+  resolveSleepMinutes,
+  updateSleepClock,
   validateHealthAiAdviceContent,
 } from "../app/health-helpers";
 import { emptyHealthDailyLog, emptyHealthProfile } from "../app/health-types";
@@ -15,6 +19,29 @@ test("calculates cross-midnight sleep and subtracts awake time", () => {
   assert.equal(calculateSleepMinutes("23:30", "07:15", 15), 450);
   assert.equal(calculateSleepMinutes("", "07:15", 0), null);
   assert.equal(calculateSleepMinutes("08:00", "08:00", 0), 1_440);
+  assert.equal(resolveSleepMinutes({ sleepMinutes: 435, sleepStart: "23:30", sleepEnd: "07:15", awakeMinutes: null }), 435);
+});
+
+test("sleep clock fills duration, allows manual correction, and clears only the derived value", () => {
+  const blank = emptyHealthDailyLog("2026-09-24");
+  const start = updateSleepClock(blank, "sleepStart", "23:30");
+  assert.equal(start.sleepMinutes, null);
+  const complete = updateSleepClock(start, "sleepEnd", "07:11");
+  assert.equal(complete.sleepMinutes, 461);
+  const corrected = { ...complete, sleepMinutes: 450 };
+  assert.equal(updateSleepClock(corrected, "sleepEnd", "").sleepMinutes, 450);
+  assert.equal(updateSleepClock(corrected, "sleepEnd", "07:20").sleepMinutes, 470);
+  assert.equal(updateSleepClock(complete, "sleepEnd", "").sleepMinutes, null);
+});
+
+test("converts sleep duration between minutes and the hours-and-minutes entry", () => {
+  assert.equal(formatSleepDurationEntry(null), "00:00");
+  assert.equal(formatSleepDurationEntry(460), "07:40");
+  assert.equal(parseSleepDurationEntry("07:40"), 460);
+  assert.equal(parseSleepDurationEntry("740"), 460);
+  assert.equal(parseSleepDurationEntry("24:00"), 1_440);
+  assert.equal(parseSleepDurationEntry("24:01"), null);
+  assert.equal(parseSleepDurationEntry("07:60"), null);
 });
 
 test("uses Chinese adult BMI bands", () => {
@@ -25,7 +52,7 @@ test("uses Chinese adult BMI bands", () => {
   assert.equal(classifyBmi(28), "obese");
 });
 
-test("describes only meal categories visible in the text", () => {
+test("bases the optional next-meal hint on the latest main meal without echoing exclusions", () => {
   const profile = { ...emptyHealthProfile, heightCm: 170, currentWeightKg: 60, allergies: "花生" };
   const daily = { ...emptyHealthDailyLog("2026-08-31"), sleepStart: "23:30", sleepEnd: "07:00", steps: 3_000 };
   const result = analyzeHealthDay(profile, daily, [
@@ -35,22 +62,25 @@ test("describes only meal categories visible in the text", () => {
   assert.equal(result.sleepMinutes, 450);
   assert.deepEqual(result.mealSignals, ["主食", "蔬菜", "优质蛋白"]);
   assert.deepEqual(result.missingMealSignals, ["水果"]);
-  assert.match(result.nextMealSuggestions[0], /水果/);
-  assert.match(result.nextMealSuggestions[0], /花生/);
+  assert.match(result.nextMealSuggestions[0], /结构已经较完整/);
+  assert.equal(result.nextMealSuggestions.join(" ").includes("花生"), false);
+  assert.equal(result.nextMealBasis, "参考最近一顿主餐");
+  assert.equal(result.dietaryPreferencesApplied, true);
 });
 
 test("builds structured AI input from only the selected health records", () => {
   const input = buildHealthAiInput({
     date: "2026-08-31",
     profile: { ...emptyHealthProfile, avoidFoods: "辣椒" },
-    daily: { ...emptyHealthDailyLog("2026-08-31"), steps: 8_000 },
+    daily: { ...emptyHealthDailyLog("2026-08-31"), sleepMinutes: 450, steps: 8_000 },
     meals: [],
     recentLogs: [],
   });
   assert.equal(input.date, "2026-08-31");
   assert.equal(input.profile.avoidFoods, "辣椒");
   assert.equal(input.today.steps, 8_000);
-  assert.equal(input.today.calculatedSleepMinutes, null);
+  assert.equal(input.today.reportedSleepMinutes, 450);
+  assert.equal(input.today.calculatedSleepMinutes, 450);
   assert.deepEqual(input.meals, []);
 });
 

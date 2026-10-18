@@ -118,15 +118,19 @@ test("sync round-trips dated situations, history and undated continuation plans"
   try {
     const sync = new UniversalSyncRepository(source.adapter); await sync.initialize();
     await source.task("reading");
-    const expectedPlan = await source.work.savePlan(plan("reading"));
+    const expectedPlan = await source.work.savePlan({ ...plan("reading"), source: "auto", skipAutoDate: "2026-09-03" });
     await source.work.saveDailySituation(situation(), [{ taskId: "reading", expectedPlan, plannedDate: "" }]);
+    assert.equal((await source.work.listPlanHistory())[0].source, "auto");
     const pending = (await sync.listPending()).filter((item) => ["task", "task_plan", "task_plan_history", "daily_situation"].includes(item.entityType));
     assert.ok(pending.some((item) => item.entityType === "daily_situation"));
     assert.ok(pending.some((item) => item.entityType === "task_plan_history"));
     const receiver = new UniversalSyncRepository(target.adapter); await receiver.initialize();
     await receiver.commit({ protocolVersion: 3, cursor: "4", hasMore: false, accepted: [], conflicts: [], failed: [], changes: pending.map((item, index) => ({ ...item, changeId: `remote-${index}`, version: 1, deletedAt: null, updatedAt: now })) });
     assert.equal((await target.work.listPlans())[0].plannedDate, "");
+    assert.equal((await target.work.listPlans())[0].source, "manual");
+    assert.equal((await target.work.listPlans())[0].skipAutoDate, "2026-09-05");
     assert.deepEqual(await target.work.listDailySituations(), await source.work.listDailySituations());
     assert.deepEqual(await target.work.listPlanHistory(), await source.work.listPlanHistory());
+    assert.equal((await target.work.listPlanHistory())[0].source, "auto");
   } finally { source.adapter.db.close(); target.adapter.db.close(); }
 });

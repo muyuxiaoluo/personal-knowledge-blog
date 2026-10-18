@@ -112,6 +112,38 @@ export type NextActionProposal = {
   };
 };
 
+export type ActionDaysEstimate = {
+  days: number | null;
+  reason: string;
+};
+
+export type ProjectRouteProposalNode = {
+  ref: string;
+  existingMilestoneId: string | null;
+  action: "keep" | "update" | "supersede" | "create";
+  title: string;
+  definitionOfDone: string;
+  dueDate: string;
+  status: "current" | "planned";
+  predecessorRefs: string[];
+};
+
+export type ProjectRouteProposal = {
+  summary: string;
+  nodes: ProjectRouteProposalNode[];
+  assumptions: string[];
+  risks: string[];
+};
+
+export type ProjectRouteDraft = {
+  projectId: string;
+  currentSituation: string;
+  requirements: string;
+  proposal: ProjectRouteProposal;
+  model: string;
+  tokenUsage: DeepSeekTokenUsage;
+};
+
 export type ProjectAdjustmentDraft = {
   projectId: string;
   trigger: string;

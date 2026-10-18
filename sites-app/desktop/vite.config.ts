@@ -52,9 +52,23 @@ function buildBudget(): Plugin {
   };
 }
 
+function reloadPersistentRuntime(): Plugin {
+  return {
+    name: "reload-persistent-desktop-runtime",
+    apply: "serve",
+    handleHotUpdate({ file, server }) {
+      // Repository instances outlive React refresh and must be recreated with their migrations.
+      if (file.replaceAll("\\", "/").includes("/app/data/")) {
+        server.ws.send({ type: "full-reload" });
+        return [];
+      }
+    },
+  };
+}
+
 export default defineConfig({
   root: "desktop",
-  plugins: [react(), buildBudget()],
+  plugins: [react(), reloadPersistentRuntime(), buildBudget()],
   clearScreen: false,
   server: {
     port: 1420,

@@ -13,6 +13,7 @@ export type SyncEntityType =
   | "task"
   | "log"
   | "proposal"
+  | "accumulation"
   | "task_plan"
   | "task_plan_history"
   | "daily_situation"
@@ -121,6 +122,7 @@ const mappings: EntityMapping[] = [
   { entityType: "task", table: "project_tasks", idColumn: "id", softDelete: true },
   { entityType: "log", table: "project_logs", idColumn: "id" },
   { entityType: "proposal", table: "project_proposals", idColumn: "id" },
+  { entityType: "accumulation", table: "project_accumulations", idColumn: "id" },
   { entityType: "task_plan", table: "task_plans", idColumn: "task_id" },
   { entityType: "task_plan_history", table: "task_plan_history", idColumn: "id" },
   { entityType: "daily_situation", table: "daily_situations", idColumn: "situation_date" },
@@ -500,6 +502,14 @@ export class UniversalSyncRepository {
     await this.database.execute(
       "UPDATE sync_outbox SET status = 'pending', error = NULL, updated_at = ? WHERE entity_type = ? AND entity_id = ?",
       [new Date().toISOString(), entityType, entityId],
+    );
+  }
+
+  async markError(changeId: string, error: string) {
+    await this.initialize();
+    await this.database.execute(
+      "UPDATE sync_outbox SET status = 'error', error = ?, updated_at = ? WHERE change_id = ?",
+      [error.slice(0, 1000), new Date().toISOString(), changeId],
     );
   }
 

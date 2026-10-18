@@ -3,6 +3,7 @@ import type { ArticleRepository } from "./article-repository";
 import type { SqliteDatabase } from "./sqlite-article-repository";
 
 const MAX_ORIGINAL_BYTES = 25 * 1024 * 1024;
+const MAX_PREVIEW_BYTES = 5 * 1024 * 1024;
 const MAX_PIXELS = 40_000_000;
 const KEEP_ANIMATED_GIF_BYTES = 5 * 1024 * 1024;
 const SMALL_IMAGE_BYTES = 350 * 1024;
@@ -163,6 +164,74 @@ async function storeBlob(blob: Blob, variant: "original" | "preview") {
     new Uint8Array(await blob.arrayBuffer()),
     { headers: { "x-attachment-variant": variant } },
   );
+}
+
+export function attachmentBlobEndpoint(serverUrl: string, hash: string) {
+  const endpoint = new URL(serverUrl);
+  if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") throw new Error("同步服务器地址无效。");
+  endpoint.pathname = `/v3/blobs/${hash.toLowerCase()}`;
+  endpoint.search = "";
+  endpoint.hash = "";
+  return endpoint.toString();
+}
+
+export function attachmentNativeTransportFailed(error: unknown) {
+  const message = typeof error === "string" ? error : error instanceof Error ? error.message : "";
+  return /sending request for url|无法连接同步服务器|检查云端附件.*(?:超时|中断)|附件(?:上传|下载).*(?:超时|中断)/i.test(message);
+}
+
+async function fetchBlob(endpoint: string, init: RequestInit, action: string) {
+  try {
+    return await fetch(endpoint, init);
+  } catch {
+    throw new Error(`${action}无法连接同步服务器，请检查网络或系统代理后重试。`);
+  }
+}
+
+async function uploadBlobThroughWebview(
+  serverUrl: string,
+  accessToken: string,
+  hash: string,
+  variant: "original" | "preview",
+  mimeType: string,
+) {
+  const endpoint = attachmentBlobEndpoint(serverUrl, hash);
+  const headers = { Authorization: `Bearer ${accessToken}` };
+  const exists = await fetchBlob(endpoint, { method: "HEAD", headers }, "检查云端附件");
+  if (exists.ok) return false;
+  if (exists.status !== 404) throw new Error(`云端附件检查失败：HTTP ${exists.status}`);
+  const response = await invoke<ArrayBuffer | Uint8Array>("attachment_read_blob", { hash, variant });
+  const bytes = response instanceof Uint8Array ? response : new Uint8Array(response);
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const uploaded = await fetchBlob(endpoint, {
+    method: "PUT",
+    headers: { ...headers, "Content-Type": mimeType },
+    body: new Blob([copy.buffer], { type: mimeType }),
+  }, "附件上传");
+  if (!uploaded.ok) throw new Error(`附件上传失败：HTTP ${uploaded.status}`);
+  return true;
+}
+
+async function downloadBlobThroughWebview(
+  serverUrl: string,
+  accessToken: string,
+  hash: string,
+  variant: "original" | "preview",
+) {
+  const response = await fetchBlob(attachmentBlobEndpoint(serverUrl, hash), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  }, "附件下载");
+  if (!response.ok) throw new Error(`附件下载失败：HTTP ${response.status}`);
+  const bytes = await response.arrayBuffer();
+  const maximum = variant === "original" ? MAX_ORIGINAL_BYTES : MAX_PREVIEW_BYTES;
+  if (!bytes.byteLength || bytes.byteLength > maximum) throw new Error("云端附件超过本机安全限制。");
+  const actualHash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
+    .map(value => value.toString(16).padStart(2, "0"))
+    .join("");
+  if (actualHash !== hash.toLowerCase()) throw new Error("下载附件的 SHA-256 校验失败。");
+  await invoke("attachment_store_blob", new Uint8Array(bytes), { headers: { "x-attachment-variant": variant } });
+  return true;
 }
 
 async function decodeImage(file: Blob) {
@@ -373,13 +442,18 @@ export class AttachmentRepository {
     for (const blob of blobs) {
       if (seen.has(blob.hash)) continue;
       seen.add(blob.hash);
-      if (await invoke<boolean>("attachment_upload_blob", {
-        serverUrl,
-        accessToken,
-        hash: blob.hash,
-        variant: blob.variant,
-        mimeType: blob.mimeType,
-      })) uploaded += 1;
+      try {
+        if (await invoke<boolean>("attachment_upload_blob", {
+          serverUrl,
+          accessToken,
+          hash: blob.hash,
+          variant: blob.variant,
+          mimeType: blob.mimeType,
+        })) uploaded += 1;
+      } catch (error) {
+        if (!attachmentNativeTransportFailed(error)) throw error;
+        if (await uploadBlobThroughWebview(serverUrl, accessToken, blob.hash, blob.variant, blob.mimeType)) uploaded += 1;
+      }
     }
     return uploaded;
   }
@@ -390,12 +464,19 @@ export class AttachmentRepository {
     manifest: AttachmentManifest,
     original = false,
   ) {
-    return invoke<boolean>("attachment_download_blob", {
-      serverUrl,
-      accessToken,
-      hash: original ? manifest.originalHash : manifest.previewHash,
-      variant: original ? "original" : "preview",
-    });
+    const hash = original ? manifest.originalHash : manifest.previewHash;
+    const variant = original ? "original" : "preview";
+    try {
+      return await invoke<boolean>("attachment_download_blob", {
+        serverUrl,
+        accessToken,
+        hash,
+        variant,
+      });
+    } catch (error) {
+      if (!attachmentNativeTransportFailed(error)) throw error;
+      return downloadBlobThroughWebview(serverUrl, accessToken, hash, variant);
+    }
   }
 
   async replaceArticleReferences(articleId: string, body: string) {

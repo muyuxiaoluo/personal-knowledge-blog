@@ -58,6 +58,7 @@ export type Project = {
 };
 
 export type Milestone = {
+  predecessorIds?: string[];
   id: string;
   projectId: string;
   title: string;
@@ -82,6 +83,8 @@ export type ProjectTask = {
   details: string;
   benefit: string;
   dueDate: string;
+  estimatedDays?: number;
+  autoSchedulePaused?: boolean;
   status: ProjectTaskStatus;
   waitingFor: string;
   resumeAction: string;
@@ -114,6 +117,17 @@ export type ProjectProposal = {
   updatedAt: string;
 };
 
+export type ProjectAccumulation = {
+  id: string;
+  projectId: string;
+  milestoneId: string | null;
+  title: string;
+  content: string;
+  reference: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ProjectSummary = Project & {
   currentMilestone: Milestone | null;
   nextTask: ProjectTask | null;
@@ -129,6 +143,7 @@ export type ProjectDetail = {
   tasks: ProjectTask[];
   logs: ProjectLog[];
   proposals: ProjectProposal[];
+  accumulations: ProjectAccumulation[];
 };
 
 export type ProjectSeed = {
@@ -137,4 +152,5 @@ export type ProjectSeed = {
   tasks: ProjectTask[];
   logs: ProjectLog[];
   proposals?: ProjectProposal[];
+  accumulations?: ProjectAccumulation[];
 };

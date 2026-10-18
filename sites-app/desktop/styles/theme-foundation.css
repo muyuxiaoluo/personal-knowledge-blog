@@ -223,6 +223,13 @@ body {
   padding: 15px 20px;
 }
 
+.task-list-shell > header > div{
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .task-list-shell > header strong{
   color: #3b406d;
   font-size: 15px;
@@ -346,6 +353,8 @@ body {
 
 .task-drawer textarea,
 .task-drawer select,
+.task-drawer input:not([type]),
+.task-drawer input[type="text"],
 .task-drawer input[type="number"] {
   width: 100%;
   border: 1px solid rgba(70, 80, 131, 0.18);
@@ -762,6 +771,8 @@ body {
 .desktop-app { grid-template-rows: minmax(0, 1fr); }
 
 .floating-system-alert {
+  --ui-primary: #f2f3ff;
+  --ui-surface-soft: rgba(255, 255, 255, 0.14);
   position: fixed;
   z-index: 300;
   top: 14px;
@@ -781,6 +792,8 @@ body {
 
 .floating-system-alert i { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--gold); }
 .floating-system-alert i.warning { background: #eca177; }
+.floating-system-alert > span { min-width: 0; overflow-wrap: anywhere; }
+.floating-system-alert > button { flex: 0 0 auto; }
 
 .desktop-workbench > .workspace-main-stage,
 .desktop-workbench > .project-workspace,

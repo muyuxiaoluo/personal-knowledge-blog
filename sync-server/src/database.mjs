@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { initializePrivateSync, syncPrivate, pairPrivate } from "./private-sync.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -132,6 +133,7 @@ export class SyncDatabase {
     this.database.exec("PRAGMA foreign_keys = ON");
     this.database.exec("PRAGMA busy_timeout = 5000");
     for (const statement of schema) this.database.exec(statement);
+    initializePrivateSync(this.database);
     ensureColumn(this.database, "users", "auth_version", "INTEGER NOT NULL DEFAULT 1");
     ensureColumn(this.database, "changes", "origin_device_id", "TEXT NOT NULL DEFAULT ''");
     ensureColumn(this.database, "changes", "change_id", "TEXT NOT NULL DEFAULT ''");
@@ -162,6 +164,9 @@ export class SyncDatabase {
       .run(username, hashPassword(password), now, now);
     return { id: Number(result.lastInsertRowid), username, authVersion: 1 };
   }
+
+  syncPrivate(userId, body) { return syncPrivate(this.database, userId, body); }
+  pairPrivate(userId, body) { return pairPrivate(this.database, userId, body); }
 
   async authenticate(username, password) {
     const user = this.database
@@ -608,6 +613,12 @@ export class SyncDatabase {
     if (!Number.isFinite(currentTime.getTime())) throw new Error("maintenance time is invalid");
     const historyCutoff = new Date(currentTime.getTime() - tombstoneRetentionDays * 86_400_000).toISOString();
     const blobCutoff = new Date(currentTime.getTime() - blobGraceHours * 3_600_000).toISOString();
+    // Apply the same history-retention window while retaining each latest encrypted
+    // envelope, including tombstones whose business operation is invisible here.
+    this.database.prepare(`DELETE FROM private_changes WHERE changed_at < ? AND EXISTS (
+      SELECT 1 FROM private_changes newer WHERE newer.user_id=private_changes.user_id
+      AND newer.id=private_changes.id AND newer.sequence>private_changes.sequence
+    )`).run(historyCutoff);
 
     const compactedChanges = Number(this.database.prepare(
       `DELETE FROM sync_changes
@@ -1074,6 +1085,7 @@ const syncEntityTypes = new Set([
   "task",
   "log",
   "proposal",
+  "accumulation",
   "task_plan",
   "task_plan_history",
   "daily_situation",

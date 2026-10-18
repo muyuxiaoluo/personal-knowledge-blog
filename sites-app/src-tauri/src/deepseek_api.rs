@@ -1,3 +1,4 @@
+use base64::Engine;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -174,6 +175,19 @@ pub async fn deepseek_api_project_replan(
 }
 
 #[tauri::command]
+pub async fn deepseek_api_project_route(
+    request: StructuredProjectRequest,
+) -> Result<StructuredApiResponse, String> {
+    generate_structured(
+        request,
+        "project_route",
+        "你是滚动项目的主线规划助手。只依据输入中的项目目标、已积累事实、已完成工作和用户约束，给出一张可编辑的检查点路线。nodes 必须逐一覆盖输入中的每个未完成节点：保留用 keep，需要修改用 update，不再适用用 supersede；新节点才用 create 且 existingMilestoneId 为 null。已完成节点是锁定历史，不能作为 existingMilestoneId 输出，但可以按其真实 ID 作为前置节点。ref 在本次草案内唯一，predecessorRefs 只能引用草案中未被 supersede 的 ref 或输入中的已完成节点 ID。允许并行与汇合，禁止循环。当前检查点写具体完成标准，未来候选只保留方向；不要生成具体行动、阅读清单或实验步骤。不得编造已读论文、实验结果、期限或资源。summary 说明推荐主线、关键取舍与为何这样衔接。",
+        project_route_schema(),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn deepseek_api_next_action(
     request: StructuredProjectRequest,
 ) -> Result<StructuredApiResponse, String> {
@@ -187,16 +201,137 @@ pub async fn deepseek_api_next_action(
 }
 
 #[tauri::command]
+pub async fn deepseek_api_estimate_action_days(
+    request: StructuredProjectRequest,
+) -> Result<StructuredApiResponse, String> {
+    generate_structured(
+        request,
+        "action_days_estimate",
+        "你只估计输入中这项行动需要跨越的日历天数，不安排任务、不修改截止日期。根据行动范围、完成标准、步骤与提供的项目背景做谨慎估计，不假定用户每天的空闲时间，也不要为了赶上截止日期压低估计。缺少足够信息时 days 返回 null，并在 reason 中指出最关键的缺失信息；否则 days 返回 1 到 365 的整数，并简短说明估计依据与不确定性。",
+        action_days_estimate_schema(),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn deepseek_api_health_advice(
     request: StructuredProjectRequest,
 ) -> Result<StructuredApiResponse, String> {
     generate_structured(
         request,
         "health_advice",
-        "你是谨慎、务实的日常生活方式助手，请用简洁中文回答。只能依据用户手动提供的记录：明确区分记录事实、建议和数据限制，不推断缺失数据，不把食物名称换算成精确热量或营养素。过敏、忌口和健康备注优先级最高，不得推荐其中明确排除的食物或行为。不得诊断疾病、建议药物或替代医生意见，不得鼓励激进减重；如果用户未满 18 岁、目标体重明显不合理，或记录显示持续异常与明显不适，应温和建议咨询监护人或专业人士。睡眠与活动建议要小而可执行，下一餐必须给出三个可相互替换、符合偏好与限制的方案。不要制造恐慌。",
+        "你是谨慎、务实的日常生活方式助手，请用简洁中文回答。只能依据用户手动提供的记录：明确区分记录事实、建议和数据限制，不推断缺失数据，不把食物名称换算成精确热量或营养素。过敏、忌口和健康备注优先级最高，不得推荐其中明确排除的食物或行为；这些限制只在后台用于筛选，不要在每条方案中重复列出用户不喜欢或避开的食物。不得诊断疾病、建议药物或替代医生意见，不得鼓励激进减重；如果用户未满 18 岁、目标体重明显不合理，或记录显示持续异常与明显不适，应温和建议咨询监护人或专业人士。睡眠与活动建议要小而可执行，下一餐必须给出三个可相互替换、符合偏好与限制的方案。不要制造恐慌。",
         health_advice_schema(),
     )
     .await
+}
+
+#[tauri::command]
+pub async fn deepseek_api_recognize_meal(
+    image_data_url: String,
+) -> Result<StructuredApiResponse, String> {
+    validate_meal_image(&image_data_url)?;
+    let api_key = deepseek_api_key()?;
+    let body = meal_recognition_request(&image_data_url);
+    let response = api_client()?
+        .post(format!("{API_ROOT}/responses"))
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(map_transport_error)?;
+    let status = response.status();
+    let response_body = response
+        .text()
+        .await
+        .map_err(|error| format!("无法读取餐食识别结果：{error}"))?;
+    ensure_success(status, "餐食识别", &response_body)?;
+    let parsed: ResponsesApiResponse = serde_json::from_str(&response_body)
+        .map_err(|_| "DeepSeek 返回了无法识别的餐食结果，现有记录未改动。".to_string())?;
+    let output_text = extract_output_text(&parsed)?;
+    if output_text.len() > 2048 {
+        return Err("餐食识别结果过长，现有记录未改动。".into());
+    }
+    let content: Value = serde_json::from_str(&output_text)
+        .map_err(|_| "餐食识别结果格式无效，现有记录未改动。".to_string())?;
+    validate_meal_result(&content)?;
+    Ok(StructuredApiResponse {
+        content,
+        model: if parsed.model.trim().is_empty() {
+            "deepseek-flash".into()
+        } else {
+            parsed.model
+        },
+        token_usage: TokenUsage {
+            input_tokens: parsed.usage.input_tokens,
+            output_tokens: parsed.usage.output_tokens,
+            total_tokens: parsed.usage.total_tokens,
+        },
+    })
+}
+
+fn meal_recognition_request(image_data_url: &str) -> Value {
+    json!({
+        "model": "deepseek-flash",
+        "input": [
+            {
+                "role": "system",
+                "content": [{
+                    "type": "input_text",
+                    "text": "你只负责从一张餐食照片写出简短中文记录。只写能看见的食物和有视觉依据的粗略份量（如半碗、一小份）；无法辨认时明确说无法辨认。不得猜测隐藏配料、烹调方式、克数、热量、营养素或健康效果。description 应是一句可直接用于个人饮食记录的文字，不超过 120 个汉字。"
+                }]
+            },
+            {
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "请识别这张照片中可见的餐食。" },
+                    { "type": "input_image", "image_url": image_data_url, "detail": "low" }
+                ]
+            }
+        ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "meal_recognition",
+                "schema": object(json!({ "description": string() }), &["description"])
+            }
+        },
+        "max_output_tokens": 500,
+        "reasoning": { "effort": "low" },
+        "stream": false
+    })
+}
+
+fn validate_meal_image(data_url: &str) -> Result<(), String> {
+    let encoded = data_url
+        .strip_prefix("data:image/jpeg;base64,")
+        .ok_or("请上传 JPG、PNG 或 WebP 图片。")?;
+    if encoded.len() > 1_400_000 {
+        return Err("压缩后的餐食图片仍超过 1 MB，请换一张照片。".into());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| "餐食图片编码无效。")?;
+    if bytes.len() < 64
+        || bytes.len() > 1_048_576
+        || !bytes.starts_with(&[0xff, 0xd8, 0xff])
+        || !bytes.ends_with(&[0xff, 0xd9])
+    {
+        return Err("餐食图片损坏或大小超出限制。".into());
+    }
+    Ok(())
+}
+
+fn validate_meal_result(content: &Value) -> Result<(), String> {
+    exact_object(content, &["description"])?;
+    let description = content["description"]
+        .as_str()
+        .ok_or("餐食识别结果缺少文字，现有记录未改动。")?
+        .trim();
+    if description.is_empty() || description.chars().count() > 240 {
+        return Err("餐食识别文字为空或过长，现有记录未改动。".into());
+    }
+    Ok(())
 }
 
 pub async fn generate_for_finance(
@@ -239,6 +374,8 @@ fn validate_planning_scope(schema_name: &str, content: &Value) -> Result<(), Str
         && (too_many("newTasks", 1) || too_many("newMilestones", 1))
     {
         return Err("AI 草案新增工作过多；每次最多展开一项行动和一个必要检查点。".into());
+    } else if schema_name == "project_route" && too_many("nodes", 30) {
+        return Err("AI 主线草案节点过多，请缩小规划范围后重试。".into());
     }
     Ok(())
 }
@@ -260,13 +397,13 @@ async fn generate_structured(
     let api_key = deepseek_api_key()?;
     let instructions = if matches!(
         schema_name,
-        "project_creation" | "project_replan" | "next_action"
+        "project_creation" | "project_replan" | "project_route" | "next_action"
     ) {
         format!("{instructions}{PRACTICAL_PLANNING_RULES}")
     } else {
         instructions.to_string()
     };
-    let max_output_tokens = if schema_name == "project_replan" {
+    let max_output_tokens = if matches!(schema_name, "project_replan" | "project_route") {
         8000
     } else {
         5000
@@ -488,6 +625,22 @@ fn validate_required_shape(schema_name: &str, content: &Value) -> Result<(), Str
                 ],
             )?;
         }
+        "project_route" => {
+            exact_object(content, &["summary", "nodes", "assumptions", "risks"])?;
+            exact_array_objects(
+                &content["nodes"],
+                &[
+                    "ref",
+                    "existingMilestoneId",
+                    "action",
+                    "title",
+                    "definitionOfDone",
+                    "dueDate",
+                    "status",
+                    "predecessorRefs",
+                ],
+            )?;
+        }
         "next_action" => {
             exact_object(content, &["reason", "action"])?;
             exact_object(
@@ -501,6 +654,17 @@ fn validate_required_shape(schema_name: &str, content: &Value) -> Result<(), Str
                     "dueDate",
                 ],
             )?;
+        }
+        "action_days_estimate" => {
+            exact_object(content, &["days", "reason"])?;
+            if !content["reason"].is_string()
+                || !(content["days"].is_null()
+                    || content["days"]
+                        .as_u64()
+                        .is_some_and(|days| (1..=365).contains(&days)))
+            {
+                return Err("AI 返回的预计天数无效，现有数据未改动。".into());
+            }
         }
         "finance_monthly_report" => {
             exact_object(
@@ -630,6 +794,45 @@ fn validate_references(
         if let Some(id) = content["action"]["milestoneId"].as_str() {
             if !allowed_milestones.contains(id) {
                 return Err("AI 建议引用了当前项目之外的检查点，已拒绝使用。".into());
+            }
+        }
+    }
+    if schema_name == "project_route" {
+        let nodes = content["nodes"]
+            .as_array()
+            .ok_or("AI 主线草案缺少节点列表。")?;
+        let mut refs = HashSet::new();
+        let mut existing_ids = HashSet::new();
+        for node in nodes {
+            let node_ref = node["ref"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or("AI 主线草案包含无效节点引用。")?;
+            if !refs.insert(node_ref) {
+                return Err("AI 主线草案包含重复节点引用，已拒绝使用。".into());
+            }
+            if let Some(id) = node["existingMilestoneId"].as_str() {
+                if !allowed_milestones.contains(id) || !existing_ids.insert(id) {
+                    return Err("AI 主线草案试图修改其他项目或重复的节点，已拒绝使用。".into());
+                }
+                if node["action"] == "create" {
+                    return Err("AI 主线草案把已有节点错误标为新建，已拒绝使用。".into());
+                }
+            } else if node["action"] != "create" {
+                return Err("AI 主线草案的新节点缺少新建标记，已拒绝使用。".into());
+            }
+        }
+        for node in nodes {
+            for predecessor in node["predecessorRefs"]
+                .as_array()
+                .ok_or("AI 主线草案缺少前置引用列表。")?
+            {
+                let id = predecessor
+                    .as_str()
+                    .ok_or("AI 主线草案包含无效前置引用。")?;
+                if !refs.contains(id) && !allowed_milestones.contains(id) {
+                    return Err("AI 主线草案引用了当前项目之外的前置节点，已拒绝使用。".into());
+                }
             }
         }
     }
@@ -848,6 +1051,40 @@ fn project_replan_schema() -> Value {
     )
 }
 
+fn project_route_schema() -> Value {
+    let node = object(
+        json!({
+            "ref": string(),
+            "existingMilestoneId": nullable_string(),
+            "action": { "type": "string", "enum": ["keep", "update", "supersede", "create"] },
+            "title": string(),
+            "definitionOfDone": string(),
+            "dueDate": string(),
+            "status": { "type": "string", "enum": ["current", "planned"] },
+            "predecessorRefs": { "type": "array", "items": { "type": "string" }, "maxItems": 30 }
+        }),
+        &[
+            "ref",
+            "existingMilestoneId",
+            "action",
+            "title",
+            "definitionOfDone",
+            "dueDate",
+            "status",
+            "predecessorRefs",
+        ],
+    );
+    object(
+        json!({
+            "summary": string(),
+            "nodes": { "type": "array", "items": node, "minItems": 1, "maxItems": 30 },
+            "assumptions": string_array(),
+            "risks": string_array()
+        }),
+        &["summary", "nodes", "assumptions", "risks"],
+    )
+}
+
 fn next_action_schema() -> Value {
     let action = object(
         json!({
@@ -866,6 +1103,16 @@ fn next_action_schema() -> Value {
     object(
         json!({ "reason": string(), "action": action }),
         &["reason", "action"],
+    )
+}
+
+fn action_days_estimate_schema() -> Value {
+    object(
+        json!({
+            "days": { "type": ["integer", "null"], "minimum": 1, "maximum": 365 },
+            "reason": string()
+        }),
+        &["days", "reason"],
     )
 }
 
@@ -910,10 +1157,24 @@ fn health_advice_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_output_text, validate_planning_scope, validate_references, validate_required_shape,
+        extract_output_text, meal_recognition_request, validate_meal_image, validate_meal_result,
+        validate_planning_scope, validate_references, validate_required_shape,
         ResponsesApiResponse,
     };
     use serde_json::json;
+
+    #[test]
+    fn meal_recognition_rejects_invalid_images_and_unusable_results() {
+        assert!(validate_meal_image("https://example.com/meal.jpg").is_err());
+        assert!(validate_meal_image("data:image/jpeg;base64,AA==").is_err());
+        assert!(validate_meal_result(&json!({ "description": "一小碗米饭和青菜" })).is_ok());
+        assert!(validate_meal_result(&json!({ "description": "" })).is_err());
+        assert!(validate_meal_result(&json!({ "description": "米饭", "calories": 300 })).is_err());
+        let request = meal_recognition_request("data:image/jpeg;base64,test");
+        assert_eq!(request["model"], "deepseek-flash");
+        assert_eq!(request["input"][1]["content"][1]["detail"], "low");
+        assert_eq!(request["max_output_tokens"], 500);
+    }
 
     #[test]
     fn rejects_unnecessary_stages_and_expanding_replans() {
@@ -1006,6 +1267,44 @@ mod tests {
     }
 
     #[test]
+    fn validates_project_route_ids_and_predecessor_references() {
+        let valid = json!({
+            "summary": "保留当前并新增汇合节点",
+            "nodes": [
+                {"ref":"m1","existingMilestoneId":"m1","action":"keep","title":"当前","definitionOfDone":"完成","dueDate":"","status":"current","predecessorRefs":["done"]},
+                {"ref":"new-1","existingMilestoneId":null,"action":"create","title":"汇合","definitionOfDone":"形成结论","dueDate":"","status":"planned","predecessorRefs":["m1"]}
+            ],
+            "assumptions": [],
+            "risks": []
+        });
+        assert!(validate_required_shape("project_route", &valid).is_ok());
+        assert!(
+            validate_references("project_route", &valid, &["m1".into(), "done".into()], &[])
+                .is_ok()
+        );
+
+        let mut outside = valid.clone();
+        outside["nodes"][1]["predecessorRefs"] = json!(["other-project"]);
+        assert!(validate_references(
+            "project_route",
+            &outside,
+            &["m1".into(), "done".into()],
+            &[]
+        )
+        .is_err());
+
+        let mut completed_edit = valid;
+        completed_edit["nodes"][0]["existingMilestoneId"] = json!("other-project");
+        assert!(validate_references(
+            "project_route",
+            &completed_edit,
+            &["m1".into(), "done".into()],
+            &[]
+        )
+        .is_err());
+    }
+
+    #[test]
     fn rejects_missing_or_unknown_structured_fields() {
         let valid = json!({
             "reason": "现在先确认答辩日期",
@@ -1030,6 +1329,31 @@ mod tests {
         let mut unknown = valid;
         unknown["action"]["projectId"] = json!("outside-project");
         assert!(validate_required_shape("next_action", &unknown).is_err());
+    }
+
+    #[test]
+    fn validates_action_days_estimate() {
+        assert!(validate_required_shape(
+            "action_days_estimate",
+            &json!({"days": 3, "reason": "包含三天的整理与校对"})
+        )
+        .is_ok());
+        assert!(validate_required_shape(
+            "action_days_estimate",
+            &json!({"days": null, "reason": "缺少工作范围"})
+        )
+        .is_ok());
+        assert!(validate_required_shape(
+            "action_days_estimate",
+            &json!({"days": 0, "reason": "过短"})
+        )
+        .is_err());
+        assert!(validate_required_shape(
+            "action_days_estimate",
+            &json!({"days": 366, "reason": "过长"})
+        )
+        .is_err());
+        assert!(validate_required_shape("action_days_estimate", &json!({"days": 3})).is_err());
     }
 
     #[test]

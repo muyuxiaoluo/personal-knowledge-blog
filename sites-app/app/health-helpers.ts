@@ -11,6 +11,8 @@ export type HealthDayAnalysis = {
   missingMealSignals: string[];
   observations: string[];
   nextMealSuggestions: string[];
+  nextMealBasis: string;
+  dietaryPreferencesApplied: boolean;
 };
 
 const mealSignalKeywords = [
@@ -41,13 +43,32 @@ export function bmiBandLabel(band: BmiBand | null) {
   return "待补充";
 }
 
-export function calculateSleepMinutes(start: string, end: string, awakeMinutes = 0) {
+export function calculateSleepMinutes(start: string, end: string, awakeMinutes: number | null = 0) {
   const startMinutes = parseClock(start);
   const endMinutes = parseClock(end);
   if (startMinutes === null || endMinutes === null) return null;
   let duration = endMinutes - startMinutes;
   if (duration <= 0) duration += 24 * 60;
-  return Math.max(0, duration - Math.max(0, awakeMinutes));
+  return Math.max(0, duration - Math.max(0, awakeMinutes ?? 0));
+}
+
+export function resolveSleepMinutes(daily: Pick<HealthDailyLog, "sleepMinutes" | "sleepStart" | "sleepEnd" | "awakeMinutes">) {
+  return daily.sleepMinutes ?? calculateSleepMinutes(daily.sleepStart, daily.sleepEnd, daily.awakeMinutes);
+}
+
+export function updateSleepClock(
+  daily: HealthDailyLog,
+  field: "sleepStart" | "sleepEnd",
+  value: string,
+): HealthDailyLog {
+  const previousEstimate = calculateSleepMinutes(daily.sleepStart, daily.sleepEnd, daily.awakeMinutes);
+  const next = { ...daily, [field]: value };
+  const nextEstimate = calculateSleepMinutes(next.sleepStart, next.sleepEnd, next.awakeMinutes);
+  if (nextEstimate !== null) return { ...next, sleepMinutes: nextEstimate };
+  if (previousEstimate !== null && daily.sleepMinutes === previousEstimate) {
+    return { ...next, sleepMinutes: null };
+  }
+  return next;
 }
 
 export function formatSleepDuration(minutes: number | null) {
@@ -55,6 +76,25 @@ export function formatSleepDuration(minutes: number | null) {
   const hours = Math.floor(minutes / 60);
   const remainder = minutes % 60;
   return remainder ? `${hours} 小时 ${remainder} 分` : `${hours} 小时`;
+}
+
+export function formatSleepDurationEntry(minutes: number | null) {
+  const safeMinutes = minutes ?? 0;
+  return `${String(Math.floor(safeMinutes / 60)).padStart(2, "0")}:${String(safeMinutes % 60).padStart(2, "0")}`;
+}
+
+export function parseSleepDurationEntry(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return 0;
+  const normalized = /^\d{1,4}$/.test(trimmed)
+    ? trimmed.padStart(4, "0").replace(/^(\d{2})(\d{2})$/, "$1:$2")
+    : trimmed;
+  const match = normalized.match(/^(\d{1,2}):([0-5]\d)$/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 24 || (hours === 24 && minutes > 0)) return null;
+  return hours * 60 + minutes;
 }
 
 export function analyzeHealthDay(
@@ -65,7 +105,7 @@ export function analyzeHealthDay(
   const weight = daily.weightKg ?? profile.currentWeightKg;
   const bmi = calculateBmi(weight, profile.heightCm);
   const bmiBand = classifyBmi(bmi);
-  const sleepMinutes = calculateSleepMinutes(daily.sleepStart, daily.sleepEnd, daily.awakeMinutes);
+  const sleepMinutes = resolveSleepMinutes(daily);
   const mealText = meals.map((meal) => meal.description.trim()).filter(Boolean).join(" ");
   const mealSignals = mealSignalKeywords
     .filter((signal) => signal.words.some((word) => mealText.includes(word)))
@@ -75,7 +115,7 @@ export function analyzeHealthDay(
     .filter((label) => !mealSignals.includes(label));
   const observations: string[] = [];
 
-  if (sleepMinutes === null) observations.push("补充入睡和起床时间后，才能判断睡眠时长。 ");
+  if (sleepMinutes === null) observations.push("补充实际睡眠时长，或填写入睡和起床时间后，才能判断睡眠时长。 ");
   else if (sleepMinutes < 7 * 60) observations.push("本次记录的睡眠不足 7 小时，今晚可优先预留更完整的休息窗口。 ");
   else if (sleepMinutes > 8 * 60) observations.push("本次记录的睡眠超过成年人常见的 7—8 小时参考，可结合白天精神状态继续观察。 ");
   else observations.push("本次记录的睡眠时长处于成年人常见的 7—8 小时参考区间。 ");
@@ -85,12 +125,16 @@ export function analyzeHealthDay(
   else if (daily.steps <= 10_000) observations.push("今天的步数处于常见日常活动参考范围，继续关注久坐间隔和身体感受即可。 ");
   else observations.push("今天的步数已经超过常见日常活动参考，不必为追求数字额外勉强运动。 ");
 
-  if (!mealText) observations.push("还没有餐食文字，暂时无法分析饮食结构。 ");
-  else if (missingMealSignals.length) observations.push(`当前文字记录中未明显看到：${missingMealSignals.join("、")}。`);
-  else observations.push("当前文字记录覆盖了主食、蔬菜、蛋白质和水果等主要类别。 ");
+  if (!mealText) observations.push("还没有餐食文字，暂时不判断饮食结构。 ");
+  else observations.push(`当前文字记录涉及：${mealSignals.length ? mealSignals.join("、") : "暂未识别出主要类别"}。`);
 
-  const avoid = [profile.allergies, profile.avoidFoods].filter(Boolean).join("、");
-  const nextMealSuggestions = buildMealSuggestions(missingMealSignals, avoid);
+  const latestMainMeal = [...meals]
+    .filter((meal) => meal.slot !== "snack" && meal.description.trim())
+    .sort((left, right) => mainMealOrder(left.slot) - mainMealOrder(right.slot))
+    .at(-1);
+  const latestSignals = latestMainMeal ? signalsInMeal(latestMainMeal.description) : [];
+  const nextMealMissing = (["蔬菜", "优质蛋白", "主食"] as const).filter((label) => !latestSignals.includes(label));
+  const nextMealSuggestions = buildMealSuggestions(nextMealMissing, Boolean(latestMainMeal));
   return {
     bmi,
     bmiBand,
@@ -100,6 +144,8 @@ export function analyzeHealthDay(
     missingMealSignals,
     observations,
     nextMealSuggestions,
+    nextMealBasis: latestMainMeal ? "参考最近一顿主餐" : "尚无主餐记录，先采用基础搭配",
+    dietaryPreferencesApplied: Boolean(profile.dietPreferences.trim() || profile.avoidFoods.trim() || profile.allergies.trim()),
   };
 }
 
@@ -116,7 +162,7 @@ export function buildHealthAiInput(input: {
     .slice(0, 7)
     .map((item) => ({
       date: item.date,
-      sleepMinutes: calculateSleepMinutes(item.sleepStart, item.sleepEnd, item.awakeMinutes),
+      sleepMinutes: resolveSleepMinutes(item),
       steps: item.steps,
       weightKg: item.weightKg,
       energyLevel: item.energyLevel,
@@ -140,7 +186,8 @@ export function buildHealthAiInput(input: {
       sleepStart: daily.sleepStart,
       sleepEnd: daily.sleepEnd,
       awakeMinutes: daily.awakeMinutes,
-      calculatedSleepMinutes: calculateSleepMinutes(daily.sleepStart, daily.sleepEnd, daily.awakeMinutes),
+      reportedSleepMinutes: daily.sleepMinutes,
+      calculatedSleepMinutes: resolveSleepMinutes(daily),
       sleepQuality: daily.sleepQuality,
       energyLevel: daily.energyLevel,
       steps: daily.steps,
@@ -226,14 +273,29 @@ function markdownList(title: string, items: string[]) {
   return `## ${title}\n\n${items.length ? items.map((item) => `- ${item}`).join("\n") : "- 暂无"}`;
 }
 
-function buildMealSuggestions(missing: string[], avoid: string) {
+function signalsInMeal(description: string) {
+  return mealSignalKeywords
+    .filter((signal) => signal.words.some((word) => description.includes(word)))
+    .map((signal) => signal.label);
+}
+
+function mainMealOrder(slot: HealthMeal["slot"]) {
+  if (slot === "breakfast") return 1;
+  if (slot === "lunch") return 2;
+  if (slot === "dinner") return 3;
+  return 4;
+}
+
+function buildMealSuggestions(missing: string[], hasMainMeal: boolean) {
   const suggestions: string[] = [];
-  if (missing.includes("蔬菜")) suggestions.push("在下一餐加一份颜色丰富的蔬菜");
-  if (missing.includes("优质蛋白")) suggestions.push("选择一份适合你的蛋、豆制品、鱼或瘦肉");
-  if (missing.includes("主食")) suggestions.push("搭配一份适量主食，优先考虑粗细搭配");
-  if (missing.includes("水果")) suggestions.push("把水果放在两餐之间，按实际饥饿感选择");
-  if (!suggestions.length) suggestions.push("保持荤素搭配，并根据饥饿感调整份量");
-  return suggestions.slice(0, 3).map((item) => avoid ? `${item}（避开${avoid}）` : item);
+  if (!hasMainMeal) {
+    return ["用平时愿意吃的食物搭配一份蔬菜、一份蛋白质和适量主食即可"];
+  }
+  if (missing.includes("蔬菜")) suggestions.push("补一份蔬菜，具体品种按已保存的偏好选择");
+  if (missing.includes("优质蛋白")) suggestions.push("补一份常吃且方便准备的蛋白质");
+  if (missing.includes("主食")) suggestions.push("如果仍有饥饿感，再搭配适量主食");
+  if (!suggestions.length) suggestions.push("上一顿结构已经较完整，下一顿按饥饿感正常搭配即可");
+  return suggestions.slice(0, 3);
 }
 
 function parseClock(value: string) {

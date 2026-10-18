@@ -2,6 +2,7 @@ import type {
   FocusSession,
   FocusSessionInput,
   FocusSessionStopInput,
+  FocusSessionUpdateInput,
   DailyCloseout,
   TaskPlan,
   WeeklyFocus,
@@ -17,11 +18,16 @@ export interface WorkRepository {
   saveDailySituation(situation: DailySituation, changes?: SituationPlanChange[]): Promise<void>;
   listPlans(): Promise<TaskPlan[]>;
   savePlan(plan: TaskPlan): Promise<TaskPlan>;
+  autoScheduleDueTasks(today: string): Promise<number>;
+  pauseAutoSchedule(taskId: string, today: string): Promise<void>;
+  resumeAutoSchedule(taskId: string): Promise<void>;
   removePlan(taskId: string): Promise<void>;
   listSessions(from?: string, limit?: number, before?: string): Promise<FocusSession[]>;
   getActiveSession(): Promise<FocusSession | null>;
   startSession(input: FocusSessionInput): Promise<FocusSession>;
   stopSession(input: string | FocusSessionStopInput): Promise<FocusSession>;
+  updateSession(input: FocusSessionUpdateInput): Promise<FocusSession>;
+  deleteSession(id: string): Promise<void>;
   getWeeklyFocus(weekStart: string): Promise<WeeklyFocus | null>;
   saveWeeklyFocus(focus: WeeklyFocus): Promise<WeeklyFocus>;
   getWeeklyReview(weekStart: string): Promise<WeeklyReview | null>;

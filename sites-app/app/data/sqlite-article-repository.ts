@@ -361,7 +361,8 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
       const search = query.trim();
       const summaryColumns = articleColumns.replace("body,", "'' AS body,");
       let rows: ArticleRow[];
-      if (search && this.ftsAvailable && Array.from(search).length >= 3) {
+      const hasCjk = /[\u3400-\u9fff]/u.test(search);
+      if (search && this.ftsAvailable && !hasCjk && Array.from(search).length >= 3) {
         const expression = `"${search.replaceAll('"', '""')}"`;
         rows = await this.database.select<ArticleRow>(
           `SELECT ${summaryColumns}

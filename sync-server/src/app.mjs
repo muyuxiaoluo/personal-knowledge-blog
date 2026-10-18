@@ -123,6 +123,16 @@ export function createSyncServer({
         return;
       }
 
+      if (request.method === "POST" && url.pathname === "/v4/private/sync") {
+        sendJson(response, 200, database.syncPrivate(Number(user.sub), await readJson(request)));
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/v4/private/pair") {
+        sendJson(response, 200, database.pairPrivate(Number(user.sub), await readJson(request)));
+        return;
+      }
+
       const blobMatch = /^\/v3\/blobs\/([a-f\d]{64})$/i.exec(url.pathname);
       if (blobMatch && request.method === "HEAD") {
         const blob = database.getBlob(Number(user.sub), blobMatch[1]);
@@ -189,6 +199,12 @@ export function createSyncServer({
 
       sendJson(response, 404, { error: "接口不存在。" });
     } catch (error) {
+      if (url.pathname.startsWith("/v4/private/")) {
+        const status = error instanceof RequestTooLargeError ? 413 : error instanceof ClientInputError || error instanceof SyntaxError ? 400 : 500;
+        if (status === 500) logger.error("private_request_failed");
+        sendJson(response, status, { error: "私人同步请求未完成，请检查恢复码、网络和客户端版本。" });
+        return;
+      }
       if (error instanceof ClientInputError || error instanceof SyntaxError) {
         sendJson(response, 400, { error: error.message || "请求格式不正确。" });
         return;

@@ -4,9 +4,11 @@ import type { DeepSeekModeOptions, DeepSeekSnapshot } from "../app/ai-types";
 import type {
   DeepSeekModel,
   DeepSeekStructuredResponse,
+  ActionDaysEstimate,
   NextActionProposal,
   ProjectCreationProposal,
   ProjectReplanProposal,
+  ProjectRouteProposal,
 } from "../app/ai-api-types";
 import type {
   GitHubRepositorySnapshot,
@@ -50,8 +52,11 @@ export const desktopApi = {
     apiModels: () => { requireTauri(); return invoke<DeepSeekModel[]>("deepseek_api_list_models"); },
     createProjectPlan: (request: { model: string; input: unknown; allowedMilestoneIds?: string[]; allowedTaskIds?: string[] }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<ProjectCreationProposal>>("deepseek_api_project_create", { request }); },
     replanProject: (request: { model: string; input: unknown; allowedMilestoneIds: string[]; allowedTaskIds: string[] }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<ProjectReplanProposal>>("deepseek_api_project_replan", { request }); },
+    planProjectRoute: (request: { model: string; input: unknown; allowedMilestoneIds: string[]; allowedTaskIds: string[] }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<ProjectRouteProposal>>("deepseek_api_project_route", { request }); },
     suggestNextAction: (request: { model: string; input: unknown; allowedMilestoneIds: string[]; allowedTaskIds: string[] }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<NextActionProposal>>("deepseek_api_next_action", { request }); },
+    estimateActionDays: (request: { model: string; input: unknown; allowedMilestoneIds: string[]; allowedTaskIds: string[] }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<ActionDaysEstimate>>("deepseek_api_estimate_action_days", { request }); },
     healthAdvice: (request: { model: string; input: unknown }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<HealthAiAdviceContent>>("deepseek_api_health_advice", { request }); },
+    recognizeMeal: (imageDataUrl: string) => { requireTauri(); return invoke<DeepSeekStructuredResponse<{ description: string }>>("deepseek_api_recognize_meal", { imageDataUrl }); },
     prepare: () => { requireTauri(); return invoke<DeepSeekSnapshot>("deepseek_prepare"); },
     status: () => { requireTauri(); return invoke<DeepSeekSnapshot>("deepseek_get_status"); },
     configureModes: (options: DeepSeekModeOptions) => { requireTauri(); return invoke<DeepSeekSnapshot>("deepseek_configure_modes", options); },

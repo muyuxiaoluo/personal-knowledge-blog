@@ -1,10 +1,11 @@
 import "./styles/ai-tools.css";
+import "katex/dist/katex.min.css";
 import { isTauri } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { AiMarkdown } from "./AiMarkdown";
+import { useAiMessageScroll } from "./useAiMessageScroll";
 import { isAiResponseSettled, isMoreCompleteAiAnswer, shouldConfirmAiConversationDeletion } from "../app/ai-response-settling";
-import type { AiConversation, AiMessage, DeepSeekModeOptions, DeepSeekPrimaryMode, DeepSeekSnapshot } from "../app/ai-types";
+import type { AiConversation, AiMessage, DeepSeekModeOptions, DeepSeekSnapshot } from "../app/ai-types";
 import type { SqliteAiRepository } from "../app/data/sqlite-ai-repository";
 import { BrandLogo } from "./BrandLogo";
 import { desktopApi } from "./integrationApi";
@@ -34,18 +35,15 @@ const preparingSnapshot: DeepSeekSnapshot = {
   error: "",
   deepThinkingAvailable: false,
   deepThinkingEnabled: false,
-  expertModeAvailable: false,
-  expertModeEnabled: false,
   smartSearchAvailable: false,
   smartSearchEnabled: false,
   visionAvailable: false,
   attachmentName: "",
-  adapterVersion: 5,
+  adapterVersion: 12,
 };
 
 const defaultModeOptions: DeepSeekModeOptions = {
   deepThinking: true,
-  expertMode: false,
   smartSearch: false,
 };
 
@@ -73,6 +71,7 @@ export function AiAssistantDialog({ open, repository, onClose, embedded = false,
   const pending = useRef<PendingAnswer | null>(null);
   const selectedIdRef = useRef("");
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const { scrollRef, contentRef, onScroll, scrollToLatest, showLatest } = useAiMessageScroll(open, selectedId);
 
   const setPendingAnswer = useCallback((value: PendingAnswer | null) => {
     pending.current = value;
@@ -97,7 +96,7 @@ export function AiAssistantDialog({ open, repository, onClose, embedded = false,
       if (sameConversationRef(next.conversationRef, expectedRef) && next.ready && !next.generating && next.text) {
         const localMessages = await repository.listMessages(conversationId);
         const latestAssistant = [...localMessages].reverse().find((message) => message.role === "assistant");
-        const richerAnswer = latestAssistant && isMoreCompleteAiAnswer(latestAssistant.content, next.text);
+        const richerAnswer = latestAssistant && isMoreCompleteAiAnswer(latestAssistant.content, next.text, next.legacyText);
         const richerReasoning = latestAssistant && Boolean(next.reasoningText && next.reasoningText !== latestAssistant.reasoning);
         if (latestAssistant && (richerAnswer || richerReasoning)) {
           await repository.updateMessageContent(latestAssistant.id, richerAnswer ? next.text : latestAssistant.content, next.reasoningText || latestAssistant.reasoning);
@@ -267,9 +266,6 @@ export function AiAssistantDialog({ open, repository, onClose, embedded = false,
         "官网模式切换超时，请重新连接后再试。",
       );
       if (next.status === "adapter_error" && next.error) throw new Error(next.error);
-      if (next.expertModeAvailable && next.expertModeEnabled !== nextOptions.expertMode) {
-        throw new Error(`官网仍处于${next.expertModeEnabled ? "专家模式" : "快速模式"}。`);
-      }
       setSnapshot(next);
       setModeOptions(modesFromSnapshot(next, nextOptions));
       return true;
@@ -279,26 +275,6 @@ export function AiAssistantDialog({ open, repository, onClose, embedded = false,
     } finally {
       setModeBusy(false);
     }
-  }
-
-  async function selectPrimaryMode(mode: DeepSeekPrimaryMode) {
-    if (!snapshot.ready || pending.current || modeBusy) return;
-    if (mode === "vision") {
-      imageInputRef.current?.click();
-      return;
-    }
-    const currentMode: DeepSeekPrimaryMode = snapshot.attachmentName ? "vision" : modeOptions.expertMode ? "expert" : "quick";
-    if (mode === currentMode) return;
-    const shouldStartFresh = messages.length > 0 || Boolean(draftAnswer);
-    if (shouldStartFresh) {
-      await createConversation();
-    } else {
-      const freshSnapshot = await desktopApi.deepseek.newConversation();
-      setSnapshot(freshSnapshot);
-      setModeOptions(modesFromSnapshot(freshSnapshot, defaultModeOptions));
-    }
-    const changed = await updateModes({ expertMode: mode === "expert" });
-    if (changed && shouldStartFresh) setNotice(`已保留原对话，并为${mode === "expert" ? "专家模式" : "快速模式"}开启新对话。`);
   }
 
   async function attachImage(file: File | undefined) {
@@ -315,25 +291,6 @@ export function AiAssistantDialog({ open, repository, onClose, embedded = false,
     setModeBusy(true);
     setNotice("");
     try {
-      const nextConversation = await desktopApi.deepseek.newConversation();
-      setSnapshot(nextConversation);
-      if (messages.length > 0 || draftAnswer || modeOptions.expertMode) {
-        const created = await repository.createConversation();
-        selectedIdRef.current = created.id;
-        setSelectedId(created.id);
-        setMessages([]);
-        setDraftAnswer("");
-        setDraftReasoning("");
-        await refreshConversations(created.id);
-      }
-      const quickOptions = { ...modeOptions, expertMode: false };
-      const quickSnapshot = await withTimeout(
-        desktopApi.deepseek.configureModes(quickOptions),
-        modeOperationTimeoutMs,
-        "切换到识图所需模式超时，请重新连接后再试。",
-      );
-      if (quickSnapshot.status === "adapter_error" && quickSnapshot.error) throw new Error(quickSnapshot.error);
-      setModeOptions(modesFromSnapshot(quickSnapshot, quickOptions));
       const next = await desktopApi.deepseek.attachImage(file.name, mime, await readFileAsDataUrl(file));
       if (next.status === "adapter_error" && next.error) throw new Error(next.error);
       setSnapshot(next);
@@ -370,6 +327,7 @@ export function AiAssistantDialog({ open, repository, onClose, embedded = false,
     setNotice("");
     const activeSnapshot = snapshot;
     const userMessage = await repository.addMessage(selectedId, "user", body);
+    scrollToLatest();
     setMessages((value) => [...value, userMessage]);
     setPrompt("");
     setPendingAnswer({
@@ -456,16 +414,6 @@ export function AiAssistantDialog({ open, repository, onClose, embedded = false,
   if (!open) return null;
   const selected = conversations.find((item) => item.id === selectedId) ?? null;
   const status = statusLabel(snapshot, Boolean(draftReasoning && !draftAnswer));
-  const primaryMode: DeepSeekPrimaryMode = snapshot.attachmentName ? "vision" : modeOptions.expertMode ? "expert" : "quick";
-  const primaryModeSelector = <PrimaryModeSelector
-    mode={primaryMode}
-    ready={snapshot.ready}
-    expertAvailable={snapshot.expertModeAvailable}
-    visionAvailable={snapshot.visionAvailable}
-    busy={modeBusy || Boolean(pending.current)}
-    compact={messages.length > 0 || Boolean(draftAnswer) || Boolean(draftReasoning)}
-    onSelect={(mode) => void selectPrimaryMode(mode)}
-  />;
 
   const assistant = (
       <section className={`ai-assistant-dialog${embedded ? " embedded" : ""}`} role={embedded ? "region" : "dialog"} aria-modal={embedded ? undefined : true} aria-label="DeepSeek AI 助手">
@@ -486,30 +434,34 @@ export function AiAssistantDialog({ open, repository, onClose, embedded = false,
             <nav><Button variant="secondary" type="button" onClick={() => void desktopApi.deepseek.prepare().then(setSnapshot).catch((error) => setNotice(describeError(error)))}>重新连接</Button><Button variant="secondary" type="button" onClick={() => void desktopApi.deepseek.showOfficial().catch((error) => setNotice(describeError(error)))}>{snapshot.status === "login_required" ? "前往登录" : "打开官网"}</Button>{!embedded && <Button variant="secondary" size="small" iconOnly type="button" className="close" onClick={onClose} disabled={Boolean(pending.current)}>×</Button>}</nav>
           </header>
 
-          <div className="ai-message-scroll">
-            {!messages.length && !draftAnswer && !draftReasoning && <div className="ai-empty-state">{primaryModeSelector}<p>这里使用你自己的 DeepSeek 网页会话，不会调用付费模型 API。</p></div>}
-            {messages.map((message) => <article className={`ai-message ${message.role}`} key={message.id}>
-              <span className="ai-message-avatar" aria-label={message.role === "user" ? "你" : "DeepSeek"}>{message.role === "user" ? "你" : <BrandLogo brand="deepseek" />}</span>
-              <div>{message.role === "assistant" ? <AssistantMessageContent content={message.content} reasoning={message.reasoning} /> : <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>}</div>
-            </article>)}
-            {(draftAnswer || draftReasoning) && <article className="ai-message assistant streaming"><span className="ai-message-avatar" aria-label="DeepSeek"><BrandLogo brand="deepseek" /></span><div><AssistantMessageContent content={draftAnswer} reasoning={draftReasoning} streaming /></div></article>}
+          <div className="ai-message-viewport">
+            <div className="ai-message-scroll" ref={scrollRef} onScroll={onScroll} tabIndex={0} aria-label="对话消息">
+              <div className="ai-message-content" ref={contentRef}>
+                {!messages.length && !draftAnswer && !draftReasoning && <div className="ai-empty-state"><BrandLogo brand="deepseek" /><h1>我是 DeepSeek</h1><p>有什么可以帮你？</p><small>使用你自己的 DeepSeek 网页会话，不会调用付费模型 API。</small></div>}
+                {messages.map((message) => <article className={`ai-message ${message.role}`} key={message.id}>
+                  <span className="ai-message-avatar" aria-label={message.role === "user" ? "你" : "DeepSeek"}>{message.role === "user" ? "你" : <BrandLogo brand="deepseek" />}</span>
+                  <div>{message.role === "assistant" ? <AssistantMessageContent content={message.content} reasoning={message.reasoning} /> : <AiMarkdown>{message.content}</AiMarkdown>}</div>
+                </article>)}
+                {(draftAnswer || draftReasoning) && <article className="ai-message assistant streaming"><span className="ai-message-avatar" aria-label="DeepSeek"><BrandLogo brand="deepseek" /></span><div><AssistantMessageContent content={draftAnswer} reasoning={draftReasoning} streaming /></div></article>}
+              </div>
+            </div>
+            {showLatest && <Button variant="secondary" size="small" type="button" className="ai-scroll-latest" onClick={scrollToLatest}>↓ 回到最新</Button>}
           </div>
 
-          {(messages.length > 0 || draftAnswer || draftReasoning) && primaryModeSelector}
           {notice && <div className="ai-notice" role="alert"><span>{notice}</span><Button variant="secondary" size="small" iconOnly aria-label="关闭" type="button" onClick={() => setNotice("")}>×</Button></div>}
           <form className="ai-composer" onSubmit={send}>
             <input ref={imageInputRef} className="ai-image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => void attachImage(event.target.files?.[0])} />
             <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
-            }} placeholder={snapshot.status === "login_required" ? "请先在官网窗口完成登录…" : "问一个简单的问题，Enter 发送，Shift + Enter 换行"} disabled={!snapshot.ready || Boolean(pending.current)} />
+            }} placeholder={snapshot.status === "login_required" ? "请先在官网窗口完成登录…" : "给 DeepSeek 发送消息，Enter 发送，Shift + Enter 换行"} disabled={!snapshot.ready || Boolean(pending.current)} />
             <footer>
               <div className="ai-capability-tools" aria-label="回答能力">
-                <button type="button" className={snapshot.deepThinkingAvailable && modeOptions.deepThinking ? "active" : ""} disabled={!snapshot.ready || !snapshot.deepThinkingAvailable || modeBusy || Boolean(pending.current)} title={snapshot.deepThinkingAvailable ? "使用 DeepSeek 官网的深度思考" : "官网当前未提供或适配器尚未识别"} onClick={() => void updateModes({ deepThinking: !modeOptions.deepThinking })}>◉ 深度思考</button>
-                <button type="button" className={snapshot.smartSearchAvailable && modeOptions.smartSearch ? "active" : ""} disabled={!snapshot.ready || !snapshot.smartSearchAvailable || modeBusy || Boolean(pending.current)} title={snapshot.smartSearchAvailable ? "使用 DeepSeek 官网的智能搜索" : "官网当前未提供或适配器尚未识别"} onClick={() => void updateModes({ smartSearch: !modeOptions.smartSearch })}>◎ 智能搜索</button>
+                {snapshot.deepThinkingAvailable && <button type="button" className={modeOptions.deepThinking ? "active" : ""} disabled={!snapshot.ready || modeBusy || Boolean(pending.current)} title="使用 DeepSeek 官网的思考能力" onClick={() => void updateModes({ deepThinking: !modeOptions.deepThinking })}>◉ 思考</button>}
+                {snapshot.smartSearchAvailable && <button type="button" className={modeOptions.smartSearch ? "active" : ""} disabled={!snapshot.ready || modeBusy || Boolean(pending.current)} title="使用 DeepSeek 官网的联网搜索" onClick={() => void updateModes({ smartSearch: !modeOptions.smartSearch })}>◎ 联网搜索</button>}
                 {snapshot.attachmentName && <span className="ai-attachment-chip"><span>{snapshot.attachmentName}</span><Button variant="secondary" size="small" iconOnly type="button" aria-label="移除图片" title="移除图片" onClick={() => void removeAttachment()} disabled={modeBusy || Boolean(pending.current)}>×</Button></span>}
               </div>
               <div className="ai-composer-actions">
-                <Button variant="secondary" size="small" iconOnly type="button" className="ai-attach-button" aria-label="添加图片" title="添加图片" disabled={!snapshot.ready || !snapshot.visionAvailable || modeBusy || Boolean(pending.current)} onClick={() => imageInputRef.current?.click()}>📎</Button>
+                {snapshot.visionAvailable && <Button variant="secondary" size="small" iconOnly type="button" className="ai-attach-button" aria-label="添加图片" title="添加图片" disabled={!snapshot.ready || modeBusy || Boolean(pending.current)} onClick={() => imageInputRef.current?.click()}>📎</Button>}
                 {pending.current ? <Button variant="secondary" type="button" className="stop" onClick={() => void stop()}>■ 停止</Button> : <Button variant="primary" type="submit" className="send" disabled={!prompt.trim() || !snapshot.ready || modeBusy}>发送 ↑</Button>}
               </div>
             </footer>
@@ -541,34 +493,14 @@ export function AiAssistantDialog({ open, repository, onClose, embedded = false,
   );
 }
 
-function PrimaryModeSelector({ mode, ready, expertAvailable, visionAvailable, busy, compact, onSelect }: {
-  mode: DeepSeekPrimaryMode;
-  ready: boolean;
-  expertAvailable: boolean;
-  visionAvailable: boolean;
-  busy: boolean;
-  compact: boolean;
-  onSelect: (mode: DeepSeekPrimaryMode) => void;
-}) {
-  const label = mode === "expert" ? "专家模式" : mode === "vision" ? "识图模式" : "快速模式";
-  return <section className={`ai-primary-mode${compact ? " compact" : ""}`} aria-label="对话主模式">
-    <div className="ai-primary-mode-heading"><BrandLogo brand="deepseek" /><strong>{compact ? `当前：${label}` : `使用${label}开始对话`}</strong>{compact && <small>切换模式会保留当前内容并开启新对话</small>}</div>
-    <div className="ai-primary-mode-tabs" role="tablist" aria-label="选择对话模式">
-      <button type="button" role="tab" aria-selected={mode === "quick"} className={mode === "quick" ? "active" : ""} disabled={!ready || busy} onClick={() => onSelect("quick")}><span>ϟ</span>快速模式</button>
-      <button type="button" role="tab" aria-selected={mode === "expert"} className={mode === "expert" ? "active" : ""} disabled={!ready || !expertAvailable || busy} title={expertAvailable ? "使用官网专家模式" : "官网模式区尚未识别"} onClick={() => onSelect("expert")}><span>◇</span>专家模式</button>
-      <button type="button" role="tab" aria-selected={mode === "vision"} className={mode === "vision" ? "active" : ""} disabled={!ready || !visionAvailable || busy} title={visionAvailable ? "选择图片进入识图模式" : "官网附件入口尚未识别"} onClick={() => onSelect("vision")}><span>▧</span>识图模式</button>
-    </div>
-  </section>;
-}
-
 function AssistantMessageContent({ content, reasoning, streaming = false }: { content: string; reasoning: string; streaming?: boolean }) {
   return <>
     {reasoning && <details className="ai-reasoning" open={streaming || undefined}>
       <summary><span>{streaming && !content ? "正在思考…" : "思考过程"}</span><small>{streaming && !content ? "内容持续生成中" : "点击展开或收起"}</small></summary>
-      <div className="ai-reasoning-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{reasoning}</ReactMarkdown></div>
+      <div className="ai-reasoning-content"><AiMarkdown>{reasoning}</AiMarkdown></div>
     </details>}
     {reasoning && content && <div className="ai-final-answer-label">最终回答</div>}
-    {content && <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>}
+    {content && <AiMarkdown>{content}</AiMarkdown>}
     {streaming && <i />}
   </>;
 }
@@ -596,7 +528,6 @@ function sameConversationRef(left: string, right: string) {
 function modesFromSnapshot(snapshot: DeepSeekSnapshot, fallback: DeepSeekModeOptions): DeepSeekModeOptions {
   return {
     deepThinking: snapshot.deepThinkingAvailable ? snapshot.deepThinkingEnabled : fallback.deepThinking,
-    expertMode: snapshot.expertModeAvailable ? snapshot.expertModeEnabled : fallback.expertMode,
     smartSearch: snapshot.smartSearchAvailable ? snapshot.smartSearchEnabled : fallback.smartSearch,
   };
 }
