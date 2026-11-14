@@ -1,0 +1,3 @@
+[default]
+description = "交易通知采集设置、提醒授权与补全入口"
+permissions = ["allow-initialize", "allow-status", "allow-configure", "allow-open-access-settings", "allow-request-notifications", "allow-test-reminder", "allow-open-reminder-settings", "allow-take-open-request"]

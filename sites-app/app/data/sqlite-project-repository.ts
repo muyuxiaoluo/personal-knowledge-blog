@@ -24,8 +24,29 @@ import { normalizeLifeDomain } from "../domain-taxonomy";
 import {
   ProjectRepositoryError,
   type ProjectRepository,
+  type ProjectWeekState,
+  type ProjectWeekWrite,
 } from "./project-repository";
 import { executeSqliteTransaction, type SqliteDatabase, type SqliteStatement } from "./sqlite-article-repository";
+import { projectWeekKey, readWeekSettings, type WeekAction } from "../project-week";
+
+const projectWeekSnapshot = `SELECT json_object(
+  'settings', (SELECT value FROM app_meta WHERE key = '${projectWeekKey}'),
+  'rest', json((SELECT json_group_array(rest_date) FROM (SELECT rest_date FROM rest_days ORDER BY rest_date))),
+  'actions', json((SELECT json_group_array(json_array(id, project_id, title, status, due, planned, minutes, source, active, updated, plan_updated, project_updated, stage_updated))
+    FROM (SELECT t.id, t.project_id, t.title, t.status,
+      min(coalesce(nullif(t.due_date, ''), '9999'), coalesce(nullif(m.due_date, ''), '9999'), coalesce(nullif(p.target_date, ''), '9999')) AS due,
+      coalesce(tp.planned_date, '') AS planned, coalesce(nullif(tp.estimate_minutes, 0), 30) AS minutes,
+      coalesce(tp.source, '') AS source, EXISTS (SELECT 1 FROM focus_sessions f WHERE f.task_id = t.id AND f.ended_at IS NULL) AS active,
+      t.updated_at AS updated, tp.updated_at AS plan_updated, p.updated_at AS project_updated, m.updated_at AS stage_updated
+      FROM project_tasks t LEFT JOIN projects p ON p.id = t.project_id
+      LEFT JOIN project_milestones m ON m.id = t.milestone_id LEFT JOIN task_plans tp ON tp.task_id = t.id
+      WHERE t.deleted_at IS NULL AND (t.project_id IS NULL OR (p.status = 'active' AND p.is_draft = 0))
+      ORDER BY t.sort_order, t.id))),
+  'projects', json((SELECT json_group_array(json_array(id, status, updated_at)) FROM (SELECT id, status, updated_at FROM projects ORDER BY id))),
+  'stages', json((SELECT json_group_array(json_array(id, status, updated_at)) FROM (SELECT id, status, updated_at FROM project_milestones ORDER BY id))),
+  'focus', (SELECT id FROM focus_sessions WHERE ended_at IS NULL LIMIT 1)
+) AS revision`;
 
 const PROJECT_SEED_VERSION = "4";
 
@@ -239,6 +260,67 @@ const migrations = [
 ] as const;
 
 export class SqliteProjectRepository implements ProjectRepository {
+  async readProjectWeek(): Promise<ProjectWeekState> {
+    await this.initialize();
+    const [{ revision }] = await this.database.select<{ revision: string }>(projectWeekSnapshot);
+    const data = JSON.parse(revision) as {
+      settings: string | null; rest: string[];
+      actions: [string, string | null, string, ProjectTaskStatus, string, string, number, string, number][];
+    };
+    const settings = readWeekSettings(data.settings);
+    const actions = data.actions.map(([id, projectId, title, status, due, date, minutes, source, active]): WeekAction => ({
+      id, projectId, title, status, due: due === "9999" ? "" : due, date, minutes,
+      after: settings.managed[id]?.after ?? [],
+      fixed: Boolean(active) || ["done", "waiting", "cancelled"].includes(status) ||
+        Boolean(date && source === "manual" && (settings.managed[id]?.date !== date || settings.managed[id]?.locked)),
+    }));
+    return { revision, settings, rest: data.rest, actions };
+  }
+
+  async applyProjectWeek(write: ProjectWeekWrite): Promise<void> {
+    const { revision, settings, project, milestones = [], tasks, placements, reason } = write;
+    const changedMessage = "安排已变化，请刷新预览后再确认。";
+    if ((await this.readProjectWeek()).revision !== revision) throw new Error(changedMessage);
+    const now = this.now();
+    const statements: SqliteStatement[] = [{
+      sql: `SELECT json_extract(CASE WHEN (${projectWeekSnapshot}) = ? THEN '{}' ELSE 'schedule changed' END, '$.guard')`,
+      bindValues: [revision],
+    }];
+    if (project) statements.push(projectWriteStatement(project), ...milestones.map(milestoneWriteStatement));
+    statements.push(...tasks.map(taskWriteStatement));
+    const managed = { ...settings.managed };
+    for (const [index, { action, date }] of placements.entries()) {
+      managed[action.id] = { date, after: action.after };
+      statements.push({
+        sql: "UPDATE project_tasks SET auto_schedule_paused = 1, updated_at = ? WHERE id = ? AND auto_schedule_paused = 0",
+        bindValues: [now, action.id],
+      }, {
+        sql: `INSERT INTO task_plans (task_id, planned_date, source, skip_auto_date, priority, estimate_minutes, sort_order, updated_at)
+          VALUES (?, ?, 'manual', '', 'normal', ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET
+          planned_date = excluded.planned_date, source = 'manual', skip_auto_date = '', estimate_minutes = excluded.estimate_minutes, updated_at = excluded.updated_at`,
+        bindValues: [action.id, date, action.minutes, index, now],
+      });
+      if (reason && action.projectId && action.date !== date) {
+        statements.push({
+          sql: "INSERT INTO project_logs(id, project_id, task_id, kind, body, created_at) VALUES (?, ?, ?, 'plan_revision', ?, ?)",
+          bindValues: [`log-week-${globalThis.crypto.randomUUID()}`, action.projectId, action.id,
+            `${reason}。安排：${action.date || "待安排"} → ${date || "待安排"}`, now],
+        });
+      }
+    }
+    statements.push({
+      sql: "INSERT INTO app_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      bindValues: [projectWeekKey, JSON.stringify({ ...settings, managed })],
+    });
+    try {
+      await executeSqliteTransaction(this.database, statements);
+      this.indexCache.clear();
+    } catch (error) {
+      if ((await this.readProjectWeek()).revision !== revision) throw new Error(changedMessage);
+      throw error;
+    }
+  }
+
   private initialization: Promise<void> | null = null;
   private indexCache = new Map<string, Pick<ProjectDetail, "project" | "milestones" | "tasks">>();
 
@@ -540,6 +622,41 @@ export class SqliteProjectRepository implements ProjectRepository {
       proposals: [],
       accumulations: [],
     }));
+  }
+
+  async listPlanningDetails(): Promise<ProjectDetail[]> {
+    try {
+      const details = await this.listIndexDetails();
+      const [logs, accumulations] = await Promise.all([
+        this.database.select<ProjectLogRow>(
+          `SELECT * FROM (
+             SELECT l.*, ROW_NUMBER() OVER (PARTITION BY l.project_id ORDER BY l.created_at DESC, l.id DESC) AS recent_rank,
+               ROW_NUMBER() OVER (PARTITION BY l.project_id, l.kind ORDER BY l.created_at DESC, l.id DESC) AS kind_rank
+             FROM project_logs l JOIN projects p ON p.id = l.project_id
+             WHERE p.status != 'completed' AND p.is_draft = 0
+           ) WHERE recent_rank <= 12 OR (kind_rank = 1 AND kind IN ('task_progress', 'task_completed', 'continuation'))
+           ORDER BY created_at DESC, id DESC`,
+        ),
+        this.database.select<ProjectAccumulationRow>(
+          `SELECT a.* FROM project_accumulations a JOIN projects p ON p.id = a.project_id
+           WHERE p.status != 'completed' AND p.is_draft = 0 ORDER BY a.updated_at DESC, a.id DESC`,
+        ),
+      ]);
+      const logsByProject = new Map<string, ProjectLog[]>();
+      for (const row of logs) {
+        if (!row.project_id) continue;
+        const group = logsByProject.get(row.project_id) ?? [];
+        group.push(rowToLog(row)); logsByProject.set(row.project_id, group);
+      }
+      const accumulationsByProject = new Map<string, ProjectAccumulation[]>();
+      for (const row of accumulations) {
+        const group = accumulationsByProject.get(row.project_id) ?? [];
+        group.push(rowToAccumulation(row)); accumulationsByProject.set(row.project_id, group);
+      }
+      return details.map((detail) => ({ ...detail, logs: logsByProject.get(detail.project.id) ?? [], accumulations: accumulationsByProject.get(detail.project.id) ?? [] }));
+    } catch (error) {
+      throw new ProjectRepositoryError("读取全局规划所需的项目进展失败", "read_failed", error);
+    }
   }
 
   async listStandaloneTasks(): Promise<ProjectTask[]> {

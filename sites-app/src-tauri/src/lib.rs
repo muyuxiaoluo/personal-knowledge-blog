@@ -27,8 +27,14 @@ mod finance;
 mod focus_reminders;
 #[cfg(desktop)]
 mod integrations;
+#[cfg(desktop)]
+mod xiaomi_health;
+#[cfg(desktop)]
+mod xiaomi_protocol;
 #[cfg(windows)]
 mod ollama_runtime;
+#[cfg(windows)]
+mod developer_mode;
 #[cfg(desktop)]
 mod reminders;
 #[cfg(desktop)]
@@ -43,6 +49,22 @@ mod work_observer_analysis;
 mod work_observer_files;
 #[cfg(desktop)]
 mod work_observer_screen;
+#[cfg(desktop)]
+mod companion;
+#[cfg(desktop)]
+mod companion_codex;
+#[cfg(desktop)]
+mod asaba;
+#[cfg(windows)]
+mod companion_capture;
+#[cfg(desktop)]
+mod companion_worker;
+#[cfg(desktop)]
+mod companion_tts;
+#[cfg(desktop)]
+mod companion_stage;
+#[cfg(desktop)]
+mod companion_dictation;
 
 #[cfg(desktop)]
 #[derive(Serialize)]
@@ -225,6 +247,8 @@ fn reveal_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "未找到主窗口".to_string())?;
+    #[cfg(windows)]
+    developer_mode::record("main_restore_requested");
     window
         .unminimize()
         .map_err(|error| format!("无法恢复主窗口：{error}"))?;
@@ -234,6 +258,8 @@ fn reveal_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     window
         .set_focus()
         .map_err(|error| format!("无法聚焦主窗口：{error}"))?;
+    #[cfg(windows)]
+    developer_mode::record("main_restore_completed");
     Ok(())
 }
 
@@ -246,6 +272,8 @@ fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 #[cfg(desktop)]
 fn quit_app(app: tauri::AppHandle) {
+    #[cfg(windows)]
+    developer_mode::record("app_quit_requested");
     app.exit(0);
 }
 
@@ -257,9 +285,16 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_companion_secrets::init())
         .manage(deepseek::DeepSeekBridgeState::default())
+        .manage(xiaomi_health::XiaomiHealthState::default())
         .manage(webviews::ToolWindowState::default())
         .manage(webviews::EntertainmentCaptureState::default())
         .manage(work_observer::ObserverState::default())
+        .manage(companion::CompanionState::default())
+        .manage(asaba::AsabaObserver::default())
+        .manage(companion_worker::AsabaWorkers::default())
+        .manage(companion_tts::QianyuVoice::default())
+        .manage(companion_stage::PetStage::default())
+        .manage(companion_dictation::Dictation::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -348,13 +383,50 @@ pub fn run() {
                     tray = tray.icon(icon.clone());
                 }
                 tray.build(app)?;
+                #[cfg(windows)]
+                developer_mode::record("app_setup_completed");
                 reminders::start_health_reminder_monitor(app.handle().clone());
                 focus_reminders::start_focus_reminder_monitor(app.handle().clone());
                 work_observer::start(app.handle().clone());
+                companion::start(app.handle().clone());
+                companion_stage::start(app.handle().clone());
+                asaba::start(app.handle().clone());
+                companion_worker::recover(app.handle().clone());
+                companion::register_voice_shortcut(app.handle());
             }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            #[cfg(windows)]
+            developer_mode::developer_mode_active,
+            #[cfg(windows)]
+            developer_mode::developer_mode_crashes,
+            #[cfg(windows)]
+            developer_mode::developer_mode_open_logs,
+            companion::companion_status,
+            companion::companion_update_context,
+            companion::companion_set_enabled,
+            companion::companion_pause_all,
+            companion::companion_refresh,
+            companion::companion_ask,
+            companion::companion_action,
+            companion::companion_window,
+            companion_tts::asaba_synthesize,
+            companion_stage::asaba_stage,
+            companion_dictation::asaba_dictation,
+            companion::asaba_recap,
+            companion::asaba_cancel_recap,
+            asaba::asaba_observation,
+            asaba::asaba_activity,
+            asaba::asaba_shot,
+            asaba::asaba_restore_source,
+            companion_worker::asaba_jobs,
+            companion_worker::asaba_repository,
+            companion_worker::asaba_repository_status,
+            companion_worker::asaba_polish_delegation,
+            companion_worker::asaba_bind_repository,
+            companion_worker::asaba_delegate,
+            companion_worker::asaba_job_action,
             work_observer::work_observer_status,
             work_observer::work_observer_configure,
             work_observer::work_observer_set_enabled,
@@ -392,13 +464,25 @@ pub fn run() {
             deepseek::deepseek_release,
             deepseek_api::deepseek_api_list_models,
             deepseek_api::deepseek_api_project_create,
+            deepseek_api::deepseek_api_project_week,
+            deepseek_api::deepseek_api_week_change,
             deepseek_api::deepseek_api_project_replan,
             deepseek_api::deepseek_api_project_route,
             deepseek_api::deepseek_api_next_action,
+            deepseek_api::deepseek_api_global_planning,
             deepseek_api::deepseek_api_estimate_action_days,
             deepseek_api::deepseek_api_health_advice,
             deepseek_api::deepseek_api_recognize_meal,
             finance::finance_preview_import,
+            xiaomi_health::xiaomi_health_status,
+            xiaomi_health::xiaomi_health_qr_start,
+            xiaomi_health::xiaomi_health_qr_poll,
+            xiaomi_health::xiaomi_health_terminal_login,
+            xiaomi_health::xiaomi_health_login,
+            xiaomi_health::xiaomi_health_verify,
+            xiaomi_health::xiaomi_health_diagnostics,
+            xiaomi_health::xiaomi_health_fetch,
+            xiaomi_health::xiaomi_health_disconnect,
             finance::finance_generate_monthly_report,
             dashboard::dashboard_search_cities,
             dashboard::dashboard_fetch_weather,
@@ -428,7 +512,9 @@ pub fn run() {
         .run(|app, event| {
             #[cfg(windows)]
             if matches!(event, tauri::RunEvent::Exit) {
+                developer_mode::record("app_exit");
                 app.state::<ollama_runtime::OllamaRuntime>().stop();
+                companion::stop(app);
             }
             #[cfg(not(windows))]
             let _ = (app, event);
@@ -457,6 +543,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_companion_secrets::init())
+        .plugin(tauri_plugin_companion_finance::init())
         .invoke_handler(tauri::generate_handler![execute_sqlite_transaction])
         .run(tauri::generate_context!())
         .expect("unable to start companion");

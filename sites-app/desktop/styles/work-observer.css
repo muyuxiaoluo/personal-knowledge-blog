@@ -1,3 +1,4 @@
+@layer pages.observer {
 .observer-page > * { width: min(1060px, 100%); margin-inline: auto; }
 .observer-status { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding: 15px 20px; background: var(--surface, #fff); border: 1px solid var(--border, #ddd); border-radius: 12px; margin-bottom: 18px; }
 .observer-status span, .observer-settings small, .observer-policy, .observer-note, .observer-record small { color: var(--muted, #707774); font-size: 12px; line-height: 1.6; }
@@ -57,3 +58,5 @@
 .observer-indicator { position: fixed; right: 26px; bottom: 20px; z-index: 40; box-shadow: 0 4px 18px #0001; }
 .observer-indicator span { color: var(--accent); margin-right: 8px; }
 @media (max-width: 1000px) { .observer-setting-grid, .observer-diff { grid-template-columns: minmax(0, 1fr); } }
+
+}

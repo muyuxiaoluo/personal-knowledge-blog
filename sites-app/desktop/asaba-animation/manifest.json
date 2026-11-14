@@ -1,0 +1,30 @@
+{
+  "cell": [
+    256,
+    320
+  ],
+  "sourceFrames": 48,
+  "scale": 1.5934959349593496,
+  "clips": {
+    "blink": {
+      "durationMs": 1200,
+      "frames": 34,
+      "fps": 30
+    },
+    "thinking": {
+      "durationMs": 1850,
+      "frames": 34,
+      "fps": 30
+    },
+    "stretch": {
+      "durationMs": 1500,
+      "frames": 34,
+      "fps": 30
+    },
+    "spin": {
+      "durationMs": 1200,
+      "frames": 34,
+      "fps": 30
+    }
+  }
+}

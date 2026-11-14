@@ -34,10 +34,10 @@ import { WorkspacePreferencesRepository } from "../app/data/workspace-preference
 import { SqliteAiRepository } from "../app/data/sqlite-ai-repository";
 import { IntegrationRepository } from "../app/data/integration-repository";
 import { DashboardRepository } from "../app/data/dashboard-repository";
-import { HealthRepository } from "../app/data/health-repository";
-import { FinanceRepository } from "../app/data/finance-repository";
+import type { HealthRepository } from "../app/data/health-repository";
+import type { FinanceRepository } from "../app/data/finance-repository";
 import type { PrivateRepository } from "../app/data/private-repository";
-import { PrivateSyncClient } from "../app/data/private-sync-client";
+import { PrivateRequestError, PrivateSyncClient } from "../app/data/private-sync-client";
 import { systemSecrets } from "../app/data/secret-store";
 const PrivateSyncPanel = lazy(async () => ({ default: (await import("../app/PrivateSyncPanel")).PrivateSyncPanel }));
 const AccountPasswordForm = lazy(async () => ({ default: (await import("./AccountPasswordForm")).AccountPasswordForm }));
@@ -122,6 +122,10 @@ let attachmentMigration: Promise<Awaited<ReturnType<typeof migrateLegacyInlineIm
 function initializeDesktopRuntime() {
   desktopRuntimeInitialization ??= Database.load("sqlite:mind-garden.db")
     .then(async (database) => {
+      const [{ HealthRepository }, { FinanceRepository }] = await Promise.all([
+        import("../app/data/health-repository"),
+        import("../app/data/finance-repository"),
+      ]);
       const { default: seedArticles } = await import("../app/generated/articles.json");
       const transactionalDatabase = database as TauriSqliteDatabase;
       transactionalDatabase.transaction = async (statements) => {
@@ -227,6 +231,11 @@ export function DesktopApp() {
   const [runtime, setRuntime] = useState<DesktopRuntime | null>(null);
   const [startupError, setStartupError] = useState("");
   const [showAccount, setShowAccount] = useState(false);
+  const [lastSyncAccount, setLastSyncAccount] = useState(() => {
+    const savedUsername = localStorage.getItem("mind-garden.username");
+    const savedServer = localStorage.getItem("mind-garden.server-url");
+    return savedUsername && savedServer ? { username: savedUsername, serverUrl: savedServer } : null;
+  });
   const [username, setUsername] = useState(
     () => localStorage.getItem("mind-garden.username") || "owner",
   );
@@ -510,13 +519,13 @@ export function DesktopApp() {
       const state = await runtime.privateRepository.status();
       setPrivateStatus(state.enabled ? state.conflicts ? "私人同步有冲突" : state.pending ? "私人记录待同步" : "私人数据已同步" : "私人同步未开启");
       setRevision(value => value + 1);
-    } catch { setPrivateStatus("私人同步失败，可重试；普通同步不受影响。"); }
+    } catch (error) { setPrivateStatus(error instanceof PrivateRequestError ? error.message : "私人同步失败，可重试；普通同步不受影响。"); }
   }, [privateClient, runtime, workbenchEditing]);
   useEffect(() => {
     const resume = () => { if (!document.hidden) void syncPrivate(); };
     void syncPrivate();
-    window.addEventListener("online", resume); document.addEventListener("visibilitychange", resume);
-    return () => { window.removeEventListener("online", resume); document.removeEventListener("visibilitychange", resume); };
+    window.addEventListener("online", resume); window.addEventListener("focus", resume); document.addEventListener("visibilitychange", resume);
+    return () => { window.removeEventListener("online", resume); window.removeEventListener("focus", resume); document.removeEventListener("visibilitychange", resume); };
   }, [syncPrivate, mutationRevision]);
 
   useEffect(() => {
@@ -681,6 +690,7 @@ export function DesktopApp() {
       await storeRefreshSession(result);
       localStorage.setItem("mind-garden.username", result.username);
       localStorage.setItem("mind-garden.server-url", serverUrl);
+      setLastSyncAccount({ username: result.username, serverUrl });
       setSession(result);
       setPassword("");
       setShowAccount(false);
@@ -899,7 +909,7 @@ export function DesktopApp() {
             session={session}
             pendingCount={pendingCount}
             syncing={syncing}
-            onSync={() => session ? void syncNow() : setShowAccount(true)}
+            onSync={() => void syncNow()}
             onAccount={() => setShowAccount(true)}
           />
         }
@@ -929,7 +939,7 @@ export function DesktopApp() {
             <header className="account-dialog-heading">
               <span>个人同步</span>
               <h2 id="account-title">
-                {session ? "账户设置" : "登录后同步"}
+                {session ? "账户设置" : "登录与账户"}
               </h2>
               <p>
                 不登录也可以继续写。登录只会把本地变更推送到你的服务器，并拉取其他设备的内容。
@@ -987,7 +997,14 @@ export function DesktopApp() {
               </div>
             ) : (
               <form onSubmit={login}>
-                <p>同步账户由服务器首次部署时创建，没有公开注册入口。请在手机和电脑使用同一账户；忘记密码时需由服务器管理员重置，已有记录会保留。</p>
+                <p>手机和电脑使用同一服务器、同一账户，即可同步原账户中的记录。</p>
+                <details className="account-recovery">
+                  <summary>忘记账户或密码？</summary>
+                  {lastSyncAccount ? <p>本机上次成功登录的账户：<strong>{lastSyncAccount.username}</strong><br />服务器：<span>{lastSyncAccount.serverUrl}</span></p> : <p>本机没有保存成功登录的账户信息。首次部署的默认账户为 owner；如果曾修改部署配置，请由服务器管理员确认原用户名。</p>}
+                  <p>密码不会保存在本机，服务器只保存密码校验值，无法显示原密码。忘记密码时，需要服务器管理员先备份，再为原账户重置密码；原账户和已有记录会保留。</p>
+                  <p>登录后，在“账户设置 → 修改密码”中更改密码，需要输入当前密码。</p>
+                  <p>私人数据同步还需要原恢复码，可在已配对的设备上查看。恢复码与登录密码分别保存，重置密码不会恢复加密密钥。</p>
+                </details>
                 <label>
                   <span>账户</span>
                   <input
@@ -1136,8 +1153,8 @@ function AccountDock({
       {open && <section className="account-dock-menu">
         <header><span>账户与更新</span><strong>{session ? session.username : "仅保存在本机"}</strong></header>
         <nav>
-          <button disabled={syncing} onClick={onSync}><i>↻</i><span><strong>{session ? syncing ? "正在同步" : "立即同步" : "登录同步"}</strong><small>{session ? pendingCount ? `${pendingCount} 条本地变更` : "当前没有待同步变更" : "连接自己的服务器"}</small></span></button>
-          <button onClick={onAccount}><i>◉</i><span><strong>账户设置</strong><small>管理登录状态与同步服务器</small></span></button>
+          {session && <button disabled={syncing} onClick={onSync}><i>↻</i><span><strong>{syncing ? "正在同步" : "立即同步"}</strong><small>{pendingCount ? `${pendingCount} 条本地变更` : "当前没有待同步变更"}</small></span></button>}
+          <button onClick={() => { setOpen(false); onAccount(); }}><i>◉</i><span><strong>{session ? "账户设置" : "登录与账户"}</strong><small>{session ? "修改密码与管理同步服务器" : "登录、找回账户与修改密码"}</small></span></button>
           <div className="account-update-entry"><Suspense fallback={<span>正在加载更新入口…</span>}><AppUpdater /></Suspense></div>
         </nav>
       </section>}

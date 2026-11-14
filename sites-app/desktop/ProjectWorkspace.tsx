@@ -1,6 +1,8 @@
 import { ProjectRouteGraph } from "./ProjectRouteGraph";
+import { ProjectTargetDate, StageDeadlineControls } from "./ProjectDeadlineControls";
 import "./styles/project-refinements.css";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { decodeTaskProgressLog } from "../app/home-workflow";
 import type { ProjectRepository } from "../app/data/project-repository";
 import { classifyDeadlineUrgency, localDate } from "../app/date-helpers";
 import { LIFE_DOMAIN_LABELS, LIFE_DOMAIN_OPTIONS, normalizeLifeDomain } from "../app/domain-taxonomy";
@@ -23,6 +25,7 @@ import { rootProjectStatusCounts } from "../app/project-selectors";
 import { Button, DateField, IconButton, SearchField, SelectMenu, useConfirmDialog } from "./DesktopControls";
 import { ActionChecklist, ActionStepEditor } from "./ActionStructure";
 import { ActionEstimateField } from "./ActionEstimateField";
+import { ActionOptionalFields } from "./ActionOptionalFields";
 import { ThemeSticker } from "./DesktopThemes";
 import { desktopApi } from "./integrationApi";
 import type {
@@ -39,13 +42,23 @@ import {
 } from "../app/ai-model-settings";
 import { buildBranchAiContext, buildRouteAiContext, collectMilestoneAndAncestors } from "../app/project-ai-context";
 import { prepareProjectRoute } from "../app/project-route-proposal";
+import type { StoredArticle } from "../app/types";
+import { ProjectRecent } from "./ProjectRecent";
 
-type ProjectTab = "overview" | "stages" | "accumulations" | "proposals";
+type ProjectTab = "overview" | "planning" | "stages" | "accumulations" | "proposals";
 type ProjectDomainFilter = "all" | ProjectCategory;
 
 type ProjectWorkspaceProps = {
+  onCreateWeek: (manual: () => void) => void;
+  onContinueWeek: (projectId: string) => void;
+  onChangeWeek: () => void;
+  weekRevision: number;
+  plannedDates: Record<string, string>;
+  today: string;
   repository: ProjectRepository;
   projects: ProjectSummary[];
+  articles: StoredArticle[];
+  onOpenArticle: (article: StoredArticle) => Promise<void>;
   initialProjectId?: string | null;
   onProjectsChange: () => Promise<ProjectSummary[]>;
   /** 用户从项目详情返回项目大厅时通知父组件，用于清除外部传入的 initialProjectId。 */
@@ -110,8 +123,16 @@ const planningModeDescriptions: Record<ProjectPlanningMode, { title: string; sum
 };
 
 export function ProjectWorkspace({
+  onCreateWeek,
+  onContinueWeek,
+  onChangeWeek,
+  weekRevision,
+  plannedDates,
+  today,
   repository,
   projects,
+  articles,
+  onOpenArticle,
   initialProjectId,
   onProjectsChange,
   onBackToHall,
@@ -206,7 +227,7 @@ export function ProjectWorkspace({
     return () => {
       active = false;
     };
-  }, [repository, selectedId]);
+  }, [repository, selectedId, weekRevision]);
 
   function showMessage(text: string) {
     setMessage(text);
@@ -302,10 +323,6 @@ export function ProjectWorkspace({
       showMessage(`请为${planningModeLabels[draft.project.planningMode]}填写一个${draft.project.planningMode === "adaptive" ? "当前检查点" : "当前阶段"}。`);
       return;
     }
-    if (draft.task.title.trim() && (!draft.task.currentFocus.trim() || !draft.task.definitionOfDone.trim())) {
-      showMessage("请补全第一步的本次推进和完成标志。");
-      return;
-    }
     setSaving(true);
     try {
       const project = await repository.saveWorkspace(
@@ -328,7 +345,7 @@ export function ProjectWorkspace({
 
   async function createStandaloneFromAi(proposal: ProjectCreationProposal) {
     const action = proposal.firstAction;
-    if (!action.title.trim() || !action.currentFocus.trim() || !action.definitionOfDone.trim()) {
+    if (!action.title.trim()) {
       showMessage("AI 草案中的行动信息不完整，请先编辑后再确认。");
       return false;
     }
@@ -733,6 +750,8 @@ export function ProjectWorkspace({
             onConfirm={() => void confirmProject()}
             onEdit={startEditing}
             onComplete={() => void changeProjectCompletion()}
+            articles={articles}
+            onOpenArticle={onOpenArticle}
             onOpenProject={(projectId) => { setSelectedId(projectId); setEditing(false); setTab("overview"); }}
             onBack={() => {
               // 通知父组件清除 initialProjectId：否则 effect 会立刻用它重新选中该项目，
@@ -757,13 +776,17 @@ export function ProjectWorkspace({
             onRemoveTask={(task) => void removeCurrentTask(task)}
             onApplyAiAdjustment={applyAiAdjustment}
             onApplyAiRoute={applyAiRoute}
+            onContinueWeek={() => onContinueWeek(detail.project.id)}
+            onChangeWeek={onChangeWeek}
+            plannedDates={plannedDates}
+            today={today}
           />
         ) : (
           <div className="project-gallery workspace-scroll">
             <header className="workspace-page-heading project-gallery-heading">
               <div><h1>项目大厅</h1><p>{projects.filter((project) => !project.parentProjectId && project.status === "active").length} 条主线正在推进 · {projects.filter((project) => !project.parentProjectId).length} 个主项目</p></div>
               <ThemeSticker section="projects" />
-              <Button variant="secondary" type="button" onClick={startNewProject}>＋ 新建项目</Button>
+              <Button variant="secondary" type="button" onClick={() => onCreateWeek(startNewProject)}>＋ 新建项目</Button>
             </header>
             <div className="project-gallery-controls">
               <nav aria-label="项目状态">
@@ -800,6 +823,8 @@ export function ProjectWorkspace({
 
 function ProjectPage({
   detail,
+  articles,
+  onOpenArticle,
   branches,
   parentProject,
   saving,
@@ -827,8 +852,14 @@ function ProjectPage({
   onRemoveTask,
   onApplyAiAdjustment,
   onApplyAiRoute,
+  onContinueWeek,
+  onChangeWeek,
+  plannedDates,
+  today,
 }: {
   detail: ProjectDetail;
+  articles: StoredArticle[];
+  onOpenArticle: (article: StoredArticle) => Promise<void>;
   branches: ProjectSummary[];
   parentProject: ProjectSummary | null;
   saving: boolean;
@@ -856,6 +887,10 @@ function ProjectPage({
   onRemoveTask: (task: ProjectTask) => void;
   onApplyAiAdjustment: (adjustment: ProjectAdjustmentDraft) => Promise<boolean>;
   onApplyAiRoute: (draft: ProjectRouteDraft) => Promise<boolean>;
+  onContinueWeek: () => void;
+  onChangeWeek: () => void;
+  plannedDates: Record<string, string>;
+  today: string;
 }) {
   const { project, milestones, tasks, logs, proposals, accumulations } = detail;
   const [selectedMilestoneId, setSelectedMilestoneId] = useState<string | null>(null);
@@ -867,6 +902,10 @@ function ProjectPage({
   const continuationTargetId = nextTask?.id || currentMilestone?.id || project.id;
   const latestContinuation = logs.map((log) => ({ log, continuation: decodeContinuationLog(log.body) }))
     .find((entry) => entry.continuation?.targetId === continuationTargetId) ?? null;
+  const upcoming = tasks.filter((task) => !["done", "cancelled", "waiting"].includes(task.status) && (plannedDates[task.id] || "") >= today)
+    .sort((left, right) => plannedDates[left.id].localeCompare(plannedDates[right.id]) || left.sortOrder - right.sortOrder);
+  const scheduledNext = upcoming[0] ?? nextTask;
+  const latestResult = logs.find((log) => log.kind === "task_completed" || log.kind === "task_progress");
 
   return (
     <article className="project-page">
@@ -882,7 +921,7 @@ function ProjectPage({
         <div>
           {project.isDraft && <Button variant="primary" size="small" type="button" disabled={saving} onClick={onConfirm}>确认项目</Button>}
           <Button variant="ghost" size="small" type="button" onClick={onEdit}>编辑信息</Button>
-          {!project.isDraft && <button className={project.status === "completed" ? "project-reopen-button" : "project-complete-button"} disabled={saving} onClick={onComplete}>{project.status === "completed" ? `重新开启${project.parentProjectId ? "支线" : "项目"}` : `✓ 完结${project.parentProjectId ? "支线" : "项目"}`}</button>}
+          {!project.isDraft && <Button variant="secondary" size="small" disabled={saving} onClick={onComplete}>{project.status === "completed" ? `重新开启${project.parentProjectId ? "支线" : "项目"}` : `✓ 完结${project.parentProjectId ? "支线" : "项目"}`}</Button>}
         </div>
       </header>
 
@@ -892,21 +931,39 @@ function ProjectPage({
           {parentProject && <span>↳ {projectTypeLabels[project.projectType]} · 服务于主线「{parentProject.title}」</span>}
           <h1>{project.title}</h1>
           <p>{project.outcome}</p>
-          <div className="project-hero-meta">
+          {tab !== "overview" && <div className="project-hero-meta">
             <span>{project.planningMode === "adaptive" ? "滚动项目 · 多条任务线独立推进" : project.planningMode === "staged" ? `${milestones.filter((item) => item.status !== "superseded").length} 个阶段的确定路线` : "直接推进 · 按下一行动前进"}</span>
             {project.targetDate && <time>目标日期 · {formatDueDate(project.targetDate)}</time>}
             {project.planningMode === "adaptive" && project.reviewDate && <time>下次校准 · {formatDueDate(project.reviewDate)}</time>}
-          </div>
+          </div>}
           <ThemeSticker section="projects" placement="project-hero" />
         </header>
 
         <nav className="project-tabs" aria-label="项目视图">
-          {([ ["overview", parentProject ? "支线概览" : "项目概览"], ["stages", parentProject ? "执行步骤" : project.planningMode === "adaptive" ? "项目路线" : project.planningMode === "direct" ? "历史节点" : "阶段路线"], ["accumulations", `已积累 ${accumulations.length || ""}`], ["proposals", `想法与提案 ${proposals.filter((item) => item.status === "pending").length || ""}`] ] as const).map(([value, label]) => <button className={tab === value ? "active" : ""} key={value} onClick={() => onTabChange(value)}>{label}</button>)}
+          {([ ["overview", "动态"], ["planning", "规划"], ["accumulations", `已积累 ${accumulations.length || ""}`], ["proposals", `想法与提案 ${proposals.filter((item) => item.status === "pending").length || ""}` ] ] as const).map(([value, label]) => <button className={tab === value || (value === "planning" && tab === "stages") ? "active" : ""} key={value} onClick={() => onTabChange(value)}>{label}</button>)}
         </nav>
 
-        {project.planningMode === "adaptive" && <div className={tab === "stages" ? "project-route-assist-tools" : "project-planning-tools"}><ProjectAiPlanningPanel detail={detail} saving={saving} onApplyAdjustment={onApplyAiAdjustment} />{tab === "stages" && <ProjectRoutePlanningAssistant detail={detail} saving={saving} onApply={onApplyAiRoute} />}</div>}
+        {(tab === "overview" || tab === "planning") && <section className="project-week-summary workspace-card">
+          <div className="project-week-heading">
+            <h2>{tab === "overview" ? "当前推进" : "接下来的安排"}</h2>
+            {project.status === "active" && !project.isDraft && <div>
+              <Button size="small" onClick={onContinueWeek}>{upcoming.length <= 1 ? "安排未来 7 天" : "查看未来 7 天"}</Button>
+              <Button size="small" variant="secondary" onClick={onChangeWeek}>计划有变</Button>
+            </div>}
+          </div>
+          {currentMilestone && <p><strong>阶段结果</strong> · {currentMilestone.definitionOfDone || currentMilestone.title}</p>}
+          {latestResult && <p><strong>最近进展</strong> · {decodeTaskProgressLog(latestResult.body)?.result ?? latestResult.body}</p>}
+          {accumulations[0] && <p><Button size="small" variant="ghost" onClick={() => onTabChange("accumulations")}>最近积累 · {accumulations[0].title}</Button></p>}
+          {scheduledNext && <p><strong>下次从这里开始</strong> · {scheduledNext.currentFocus || scheduledNext.title}</p>}
+          {upcoming.length > 0 && tab === "planning" && <ul>{upcoming.map((task) => <li key={task.id}>{plannedDates[task.id]} · {task.title}</li>)}</ul>}
+        </section>}
 
-        {tab === "overview" && <>
+        {project.planningMode === "adaptive" && (tab === "planning" || tab === "stages") && <div className={tab === "stages" ? "project-route-assist-tools" : "project-planning-tools"}><ProjectAiPlanningPanel detail={detail} saving={saving} onApplyAdjustment={onApplyAiAdjustment} />{tab === "stages" && <ProjectRoutePlanningAssistant detail={detail} saving={saving} onApply={onApplyAiRoute} />}</div>}
+
+        {tab === "overview" && <ProjectRecent key={project.id} detail={detail} articles={articles} onOpenArticle={onOpenArticle} onPlan={() => onTabChange("planning")} />}
+
+        {tab === "planning" && <>
+          <Button size="small" onClick={() => onTabChange("stages")}>{project.planningMode === "direct" ? "查看历史节点" : "打开路线与阶段"}</Button>
           <ProjectBackground detail={detail} />
           {currentMilestones.length > 1 && <nav className="project-parallel-switcher" aria-label="并行检查点"><strong>并行推进 · {currentMilestones.length} 项</strong>{currentMilestones.map((item) => <Button key={item.id} variant={item.id === currentMilestone?.id ? "primary" : "secondary"} type="button" aria-pressed={item.id === currentMilestone?.id} onClick={() => { setSelectedMilestoneId(item.id); onLogTextChange(""); }}>{item.title}</Button>)}</nav>}
           <ProjectCurrentProgress key={currentMilestone?.id || project.id}
@@ -928,12 +985,11 @@ function ProjectPage({
             onRemoveTask={onRemoveTask}
             onCompleteMilestone={onCompleteMilestone}
             onEditProject={onEdit}
-            onCompleteProject={onComplete}
             onOpenRoute={() => onTabChange("stages")}
           />
         </>}
 
-        {tab === "stages" && (project.planningMode === "adaptive" ? <ProjectRouteGraph projectId={project.id} milestones={milestones} tasks={tasks} saving={saving} onSave={onSaveMilestone} onComplete={onCompleteMilestone} onRemove={onRemoveMilestone} onFocus={(node) => { setSelectedMilestoneId(node.id); onTabChange("overview"); }} /> : <StageRouteEditor projectId={project.id} planningMode={project.planningMode} milestones={milestones} tasks={tasks} branches={branches} saving={saving} onSave={onSaveMilestone} onComplete={onCompleteMilestone} onRemove={onRemoveMilestone} onMove={onMoveMilestone} onOpenProject={onOpenProject} />)}
+        {tab === "stages" && (project.planningMode === "adaptive" ? <ProjectRouteGraph projectId={project.id} milestones={milestones} tasks={tasks} saving={saving} onSave={onSaveMilestone} onComplete={onCompleteMilestone} onRemove={onRemoveMilestone} onFocus={(node) => { setSelectedMilestoneId(node.id); onTabChange("planning"); }} /> : <StageRouteEditor projectId={project.id} planningMode={project.planningMode} milestones={milestones} tasks={tasks} branches={branches} saving={saving} onSave={onSaveMilestone} onComplete={onCompleteMilestone} onRemove={onRemoveMilestone} onMove={onMoveMilestone} onOpenProject={onOpenProject} />)}
 
         {tab === "accumulations" && <ProjectAccumulationBoard projectId={project.id} milestones={milestones} accumulations={accumulations} saving={saving} onSave={onSaveAccumulation} onRemove={onRemoveAccumulation} />}
 
@@ -944,7 +1000,7 @@ function ProjectPage({
   );
 }
 
-function ProjectCurrentProgress({ detail, project, milestones, currentMilestone, nextTask, recentTaskCompleted, otherTasks, latestContinuation, saving, logText, onLogTextChange, onAddContinuation, onTaskStatus, onSaveTask, onSaveMilestone, onRemoveTask, onCompleteMilestone, onEditProject, onCompleteProject, onOpenRoute }: {
+function ProjectCurrentProgress({ detail, project, milestones, currentMilestone, nextTask, recentTaskCompleted, otherTasks, latestContinuation, saving, logText, onLogTextChange, onAddContinuation, onTaskStatus, onSaveTask, onSaveMilestone, onRemoveTask, onCompleteMilestone, onEditProject, onOpenRoute }: {
   detail: ProjectDetail;
   project: Project;
   milestones: Milestone[];
@@ -963,7 +1019,6 @@ function ProjectCurrentProgress({ detail, project, milestones, currentMilestone,
   onRemoveTask: (task: ProjectTask) => void;
   onCompleteMilestone: (milestone: Milestone) => void;
   onEditProject: () => void;
-  onCompleteProject: () => void;
   onOpenRoute: () => void;
 }) {
   const [editingAction, setEditingAction] = useState<ProjectTask | "new" | null>(null);
@@ -981,70 +1036,32 @@ function ProjectCurrentProgress({ detail, project, milestones, currentMilestone,
     recentTaskCompleted ? "刚完成了一项当前行动" : "",
   ].filter(Boolean) : [];
   return <section className="project-current-progress">
-    {calibrationReasons.length > 0 && <aside className="adaptive-calibration-notice"><div><span>现在适合校准计划</span><strong>{calibrationReasons.join("；")}</strong><p>先记录已经发生的事实，再决定是否调整检查点和下一行动；系统不会自动改动项目。</p></div><Button variant="secondary" onClick={() => document.getElementById("project-ai-planning")?.scrollIntoView({ behavior: "smooth", block: "center" })}>前往报告变化</Button></aside>}
+    {calibrationReasons.length > 0 && <aside className="adaptive-calibration-notice"><div><span>计划提醒</span><strong>{calibrationReasons.join("；")}</strong></div><Button variant="ghost" size="small" onClick={() => document.getElementById("project-ai-planning")?.scrollIntoView({ behavior: "smooth", block: "center" })}>报告变化 ↗</Button></aside>}
     <header className={`project-current-stage ${currentMilestone ? "has-stage" : routeComplete ? "route-complete" : routeWaiting ? "route-waiting" : "lightweight"}`}>
       <div><span>{currentMilestone ? adaptive ? "当前检查点" : "当前阶段" : routeComplete ? "路线已完成" : routeWaiting ? "等待选择" : "当前推进"}</span><h2>{currentMilestone?.title || (routeComplete ? adaptive ? "当前路线已经校验完成" : "所有阶段已经验收" : routeWaiting ? adaptive ? "尚未指定当前检查点" : "尚未指定当前阶段" : "直接推进，不必拆分阶段")}</h2><p>{currentMilestone?.definitionOfDone || (routeComplete ? "现在检查项目整体结果：可以完结归档，也可以按新的情况建立下一检查点。" : routeWaiting ? `前往${adaptive ? "候选节点" : "阶段路线"}，选择此刻真正要推进的一站。` : "只保留一个明确结果和下一步；路径变复杂时再切换推进方式。")}</p></div>
-      <div className="project-current-stage-side">
-        <div className="project-stage-primary-actions">
-          {currentMilestone && <Button variant="secondary" type="button" className="project-stage-complete-button" disabled={saving} onClick={() => onCompleteMilestone(currentMilestone)}>✓ 完成{adaptive ? "检查点" : "阶段"}</Button>}
-          {routeComplete && project.status !== "completed" && <Button variant="secondary" type="button" className="project-stage-complete-button" disabled={saving} onClick={onCompleteProject}>✓ 完结项目</Button>}
-          <button className="project-stage-route-link" onClick={onOpenRoute}>{adaptive ? "任务分支" : currentIndex >= 0 ? `第 ${currentIndex + 1}/${orderedMilestones.length} 阶段` : routeComplete ? "查看已完成路线" : "添加阶段路线"}<span>{routeComplete ? "查看或继续 →" : "查看路线 →"}</span></button>
-        </div>
-        {currentMilestone?.dueDate && <StageDeadlineNotice milestone={currentMilestone} hasCurrentAction={Boolean(nextTask)} saving={saving} onComplete={() => onCompleteMilestone(currentMilestone)} onSave={onSaveMilestone} onPlanAction={() => setEditingAction("new")} />}
-        {!currentMilestone && !milestones.length && project.targetDate && project.status !== "completed" && <ProjectTargetNotice dueDate={project.targetDate} hasCurrentAction={Boolean(nextTask)} onComplete={onCompleteProject} onAdjust={onEditProject} onPlanAction={() => setEditingAction("new")} />}
-      </div>
+      <nav className="project-stage-primary-actions" aria-label={adaptive ? "检查点操作" : "阶段操作"}>
+        <Button variant="ghost" size="small" onClick={onOpenRoute}>{adaptive ? "查看任务分支 ↗" : currentIndex >= 0 ? `阶段路线 · ${currentIndex + 1}/${orderedMilestones.length} ↗` : routeComplete ? "查看已完成路线 ↗" : "添加阶段路线"}</Button>
+        {currentMilestone && <Button variant="secondary" size="small" disabled={saving} onClick={() => onCompleteMilestone(currentMilestone)}>✓ 完成{adaptive ? "检查点" : "阶段"}</Button>}
+      </nav>
+      {currentMilestone?.dueDate && <StageDeadlineControls key={currentMilestone.id} milestone={currentMilestone} adaptive={adaptive} hasCurrentAction={Boolean(nextTask)} saving={saving} onSave={onSaveMilestone} />}
+      {!currentMilestone && !milestones.length && project.targetDate && project.status !== "completed" && <ProjectTargetDate dueDate={project.targetDate} saving={saving} onAdjust={onEditProject} />}
     </header>
     <div className="project-focus-grid">
       <article className={`project-current-action ${nextTask ? "has-action" : "empty"}`}>
-        <header><div><span>当前行动</span><small>现在最值得推进的一件事</small></div>{nextTask && (nextTask.status !== "next" || nextTask.dueDate) && <em>{nextTask.status !== "next" ? taskStatusLabels[nextTask.status] : ""}{nextTask.status !== "next" && nextTask.dueDate ? " · " : ""}{nextTask.dueDate ? formatDueDate(nextTask.dueDate) : ""}</em>}</header>
+        <header><div><span>当前行动</span><small>现在最值得推进的一件事</small></div>{!nextTask && !editingAction && <Button variant="primary" size="small" disabled={saving} onClick={() => setEditingAction("new")}>＋ 安排行动</Button>}{nextTask && (nextTask.status !== "next" || nextTask.dueDate) && <em>{nextTask.status !== "next" ? taskStatusLabels[nextTask.status] : ""}{nextTask.status !== "next" && nextTask.dueDate ? " · " : ""}{nextTask.dueDate ? formatDueDate(nextTask.dueDate) : ""}</em>}</header>
         {nextTask && editingAction !== nextTask ? <div className="project-current-action-row">
           <ProjectActionStructure task={nextTask} saving={saving} onSave={onSaveTask} />
-          <div className="project-action-buttons">{nextTask.status !== "next" && <Button variant="secondary" type="button" disabled={saving} onClick={() => onTaskStatus(nextTask, "next")}>设为当前</Button>}<Button variant="secondary" type="button" disabled={saving} onClick={() => setEditingAction(nextTask)}>编辑行动</Button><Button variant="danger" disabled={saving} onClick={() => onRemoveTask(nextTask)}>删除</Button><Button variant="primary" disabled={saving} onClick={() => onTaskStatus(nextTask, "done")}>完成行动</Button></div>
-        </div> : editingAction ? <InlineActionComposer key={editingAction === "new" ? "new" : editingAction.id} detail={detail} projectId={project.id} milestone={currentMilestone} initialTask={editingAction === "new" ? undefined : editingAction} saving={saving} onCancel={() => setEditingAction(null)} onSave={onSaveTask} /> : <div className="project-current-action-empty"><span>尚未安排当前行动，需要时再补充即可。</span><Button variant="secondary" type="button" onClick={() => setEditingAction("new")}>安排一项行动</Button></div>}
+          <div className="project-action-buttons"><Button variant="primary" size="small" disabled={saving} onClick={() => onTaskStatus(nextTask, "done")}>完成行动</Button><Button variant="secondary" size="small" disabled={saving} onClick={() => setEditingAction(nextTask)}>编辑行动</Button>{nextTask.status !== "next" && <Button variant="secondary" size="small" disabled={saving} onClick={() => onTaskStatus(nextTask, "next")}>设为当前</Button>}<details className="project-action-more"><summary>更多操作</summary><Button variant="danger" size="small" disabled={saving} onClick={() => onRemoveTask(nextTask)}>删除行动</Button></details></div>
+        </div> : editingAction ? <InlineActionComposer key={editingAction === "new" ? "new" : editingAction.id} detail={detail} projectId={project.id} milestone={currentMilestone} initialTask={editingAction === "new" ? undefined : editingAction} saving={saving} onCancel={() => setEditingAction(null)} onSave={onSaveTask} /> : <p className="project-current-action-empty">还没有当前行动，可添加一个具体的下一步。</p>}
       </article>
       <section className="project-continuation-card">
         <header><div><span>接续记录</span><h3>为下一次打开留下起点</h3></div>{latestContinuation?.continuation && <time>{formatProjectDate(latestContinuation.log.createdAt)}</time>}</header>
         {latestContinuation?.continuation ? <div className="continuation-latest"><small>上次做到</small><p>{latestContinuation.continuation.text}</p></div> : <p className="project-continuation-empty">离开项目前记下一句话，下次无需重新回忆上下文。</p>}
-        <form onSubmit={onAddContinuation}><textarea value={logText} onChange={(event) => onLogTextChange(event.target.value)} placeholder="今天做到哪里了？下一次从哪里继续？" /><Button variant="primary" disabled={saving || !logText.trim()} type="submit">保存接续点</Button></form>
+        <form onSubmit={onAddContinuation}><textarea rows={3} aria-label="项目接续记录" value={logText} onChange={(event) => onLogTextChange(event.target.value)} placeholder="今天做到哪里了？下一次从哪里继续？" /><div className="project-continuation-actions"><Button variant="primary" size="small" disabled={saving || !logText.trim()} type="submit">保存接续点</Button></div></form>
       </section>
     </div>
     {otherTasks.length > 0 && <details className="project-other-actions"><summary>本阶段还有 {otherTasks.length} 项行动</summary>{otherTasks.map((task) => <div key={task.id}><span>{taskStatusLabels[task.status]}</span><strong>{projectTaskDisplayTitle(task)}</strong><Button variant="danger" disabled={saving} onClick={() => onRemoveTask(task)}>删除</Button>{task.status !== "next" && <Button variant="secondary" type="button" disabled={saving} onClick={() => onTaskStatus(task, "next")}>设为下一步</Button>}</div>)}</details>}
   </section>;
-}
-
-function StageDeadlineNotice({ milestone, hasCurrentAction, saving, onComplete, onSave, onPlanAction }: { milestone: Milestone; hasCurrentAction: boolean; saving: boolean; onComplete: () => void; onSave: (milestone: Milestone) => Promise<boolean>; onPlanAction: () => void }) {
-  const { dueDate } = milestone;
-  const [editingDate, setEditingDate] = useState(false);
-  const [draftDate, setDraftDate] = useState(dueDate);
-  const urgency = classifyDeadlineUrgency(dueDate);
-  if (!urgency) return <div className="project-stage-deadline"><time>截止 · {formatDueDate(dueDate)}</time></div>;
-  const { daysRemaining, tone, label: title } = urgency;
-  const message = daysRemaining < 0
-    ? "阶段已经超过期限，请立即推进或重新调整截止时间。"
-    : hasCurrentAction
-      ? "截止日期临近，请优先推进当前行动。"
-      : "截止日期临近，请尽快安排一项当前行动。";
-  async function saveDate(event: FormEvent) {
-    event.preventDefault();
-    if (!draftDate || draftDate === dueDate) return;
-    if (await onSave({ ...milestone, dueDate: draftDate })) setEditingDate(false);
-  }
-  return <div className={`project-stage-deadline ${tone}`}>
-    <time>截止 · {formatDueDate(dueDate)}</time>
-    <aside className="project-stage-deadline-alert" role="status"><i aria-hidden="true">!</i><span><b>{title}</b><small>{message}</small>{editingDate ? <form className="project-stage-date-editor" onSubmit={(event) => void saveDate(event)}><DateField label="新的截止日期" optional={false} value={draftDate} onChange={setDraftDate} /><div><Button variant="secondary" type="button" disabled={saving} onClick={() => { setDraftDate(dueDate); setEditingDate(false); }}>取消</Button><Button variant="primary" type="submit" disabled={saving || !draftDate || draftDate === dueDate}>{saving ? "保存中…" : "保存日期"}</Button></div></form> : <em><Button variant="secondary" type="button" disabled={saving} onClick={onComplete}>完成阶段</Button><Button variant="secondary" type="button" disabled={saving} onClick={() => { setDraftDate(dueDate); setEditingDate(true); }}>调整日期</Button>{!hasCurrentAction && <Button variant="secondary" type="button" disabled={saving} onClick={onPlanAction}>安排行动</Button>}</em>}</span></aside>
-  </div>;
-}
-
-function ProjectTargetNotice({ dueDate, hasCurrentAction, onComplete, onAdjust, onPlanAction }: { dueDate: string; hasCurrentAction: boolean; onComplete: () => void; onAdjust: () => void; onPlanAction: () => void }) {
-  const urgency = classifyDeadlineUrgency(dueDate);
-  if (!urgency) return <div className="project-stage-deadline project-target-date"><time>项目目标 · {formatDueDate(dueDate)}</time></div>;
-  const message = urgency.daysRemaining < 0
-    ? "项目目标日期已经过去，请决定完结、调整日期或继续推进。"
-    : hasCurrentAction ? "目标日期临近，优先推进当前行动。" : "目标日期临近，先安排一个可以立即开始的行动。";
-  return <div className={`project-stage-deadline project-target-date ${urgency.tone}`}>
-    <time>项目目标 · {formatDueDate(dueDate)}</time>
-    <aside className="project-stage-deadline-alert" role="status"><i aria-hidden="true">!</i><span><b>{urgency.label}</b><small>{message}</small><em><Button variant="secondary" type="button" onClick={onComplete}>完结项目</Button><Button variant="secondary" type="button" onClick={onAdjust}>调整日期</Button>{!hasCurrentAction && <Button variant="secondary" type="button" onClick={onPlanAction}>安排行动</Button>}</em></span></aside>
-  </div>;
 }
 
 
@@ -1062,8 +1079,8 @@ function ProjectActionStructure({ task, saving, onSave }: {
   }
   return <div className="project-action-structure">
     <h3>{projectTaskDisplayTitle(task)}</h3>
-    <section className="project-action-focus"><span>本次推进</span><strong>{task.currentFocus || "尚未拆出这一次具体推进什么"}</strong></section>
-    <section className="project-action-done"><span>完成标志</span><p>{task.definitionOfDone || "尚未填写，完成边界可能不够清楚。"}</p></section>
+    {task.currentFocus && <section className="project-action-focus"><span>本次推进</span><strong>{task.currentFocus}</strong></section>}
+    {task.definitionOfDone && <section className="project-action-done"><span>完成标志</span><p>{task.definitionOfDone}</p></section>}
     <ActionChecklist steps={task.steps} onToggle={(stepId) => void toggleStep(stepId)} />
     {(task.details || task.waitingFor) && <details className="project-action-details"><summary>补充说明</summary>{task.details && <p>{task.details}</p>}{task.waitingFor && <small>正在等待 · {task.waitingFor}</small>}</details>}
   </div>;
@@ -1117,7 +1134,7 @@ function InlineActionComposer({ detail, projectId, milestone, initialTask, savin
   }
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!task.title.trim() || !task.currentFocus.trim() || !task.definitionOfDone.trim()) return;
+    if (!task.title.trim()) return;
     if (await onSave({ ...task, projectId, milestoneId: milestone?.id || null })) onCancel();
   }
   return <form className={`inline-action-composer ${tone}`} onSubmit={(event) => void submit(event)}>
@@ -1127,12 +1144,14 @@ function InlineActionComposer({ detail, projectId, milestone, initialTask, savin
       <label className="inline-action-title"><span>行动名称 <b>必填</b></span><input autoFocus value={task.title} onChange={(event) => update("title", event.target.value)} placeholder="例如：精读论文并形成一页方法笔记" /></label>
       <DateField className="inline-action-date" label="截止日期" value={task.dueDate} onChange={(value) => setTask((current) => ({ ...current, dueDate: value, autoSchedulePaused: false }))} />
       <ActionEstimateField dueDate={task.dueDate} estimatedDays={task.estimatedDays || 0} title={task.title} currentFocus={task.currentFocus} definitionOfDone={task.definitionOfDone} steps={task.steps} details={task.details} projectTitle={detail.project.title} stageTitle={milestone?.title || ""} paused={Boolean(task.autoSchedulePaused)} onChange={(days) => setTask((current) => ({ ...current, estimatedDays: days, autoSchedulePaused: false }))} onPauseChange={(paused) => update("autoSchedulePaused", paused)} />
-      <label className="inline-action-focus"><span>本次推进 <b>必填</b></span><textarea value={task.currentFocus} onChange={(event) => update("currentFocus", event.target.value)} placeholder="这一次先推进到哪里？例如：读完方法部分并画出流程" /></label>
-      <label className="inline-action-done"><span>完成标志 <b>必填</b></span><textarea value={task.definitionOfDone} onChange={(event) => update("definitionOfDone", event.target.value)} placeholder="看到什么结果时，这条行动才算完成？例如：能不看原文讲清输入、方法和结论" /></label>
+      <ActionOptionalFields hasContent={Boolean(task.currentFocus || task.definitionOfDone || task.steps.length || task.details || aiReason)}>
+      <label className="inline-action-focus"><span>本次推进 · 可选</span><textarea value={task.currentFocus} onChange={(event) => update("currentFocus", event.target.value)} placeholder="名称已说清要做什么时，可以留空" /></label>
+      <label className="inline-action-done"><span>完成标志 · 可选</span><textarea value={task.definitionOfDone} onChange={(event) => update("definitionOfDone", event.target.value)} placeholder="需要额外约定停止条件时再填写" /></label>
       <ActionStepEditor steps={task.steps} onChange={(steps) => update("steps", steps)} />
       <label className="inline-action-details"><span>补充说明 <em>可选</em></span><textarea value={task.details} onChange={(event) => update("details", event.target.value)} placeholder="记录资料位置、注意事项，或真正开始时容易忘记的上下文。" /></label>
+      </ActionOptionalFields>
     </div>
-    <footer><Button variant="secondary" type="button" disabled={saving} onClick={onCancel}>取消</Button><Button variant="primary" disabled={saving || !task.title.trim() || !task.currentFocus.trim() || !task.definitionOfDone.trim()} type="submit">{saving ? "正在保存…" : "保存行动"}</Button></footer>
+    <footer><Button variant="secondary" type="button" disabled={saving} onClick={onCancel}>取消</Button><Button variant="primary" disabled={saving || !task.title.trim()} type="submit">{saving ? "正在保存…" : "保存行动"}</Button></footer>
   </form>;
 }
 
@@ -1670,7 +1689,7 @@ function ProjectEditor({
             {draft.project.planningMode === "adaptive" && <DateField label="下次校准日期 · 留空自动计算" value={draft.project.reviewDate} onChange={(value) => updateProject("reviewDate", value)} />}
           </div>
 
-          {draft.project.id && <section className="project-editor-scope-note"><span>这里保存项目的稳定边界</span><p>当前行动直接在项目概览安排；只有出现明显的推进节点时，才需要前往“阶段路线”拆分阶段。</p></section>}
+          {draft.project.id && <section className="project-editor-scope-note"><span>这里保存项目的基本信息</span><p>可以在「规划」里安排当前行动、路线和阶段。</p></section>}
 
           {parentProject && <section className="project-editor-parent">
             <span>{projectTypeLabels[draft.project.projectType]}</span>
@@ -1686,10 +1705,12 @@ function ProjectEditor({
                 <DateField label="截止时间" value={draft.task.dueDate} onChange={(value) => updateTask("dueDate", value)} />
               </div>
               <label><span>行动名称</span><input value={draft.task.title} onChange={(event) => updateTask("title", event.target.value)} placeholder="例如：精读论文并形成一页方法笔记" /></label>
+              <ActionOptionalFields hasContent={Boolean(draft.task.currentFocus || draft.task.definitionOfDone || draft.task.steps.length || draft.task.details)}>
               <label><span>本次推进</span><textarea value={draft.task.currentFocus} onChange={(event) => updateTask("currentFocus", event.target.value)} placeholder="这一次先推进到哪里？" /></label>
               <label><span>完成标志</span><textarea value={draft.task.definitionOfDone} onChange={(event) => updateTask("definitionOfDone", event.target.value)} placeholder="看到什么结果时，这条行动才算完成？" /></label>
               <ActionStepEditor steps={draft.task.steps} onChange={(steps) => updateTask("steps", steps)} />
               <label><span>补充说明 · 可选</span><textarea value={draft.task.details} onChange={(event) => updateTask("details", event.target.value)} placeholder="记录资料位置、注意事项，或其他上下文。" /></label>
+              </ActionOptionalFields>
               <ActionEstimateField dueDate={draft.task.dueDate} estimatedDays={draft.task.estimatedDays || 0} title={draft.task.title} currentFocus={draft.task.currentFocus} definitionOfDone={draft.task.definitionOfDone} steps={draft.task.steps} details={draft.task.details} projectTitle={draft.project.title} onChange={(days) => updateTask("estimatedDays", days)} />
             </section>
 

@@ -1,6 +1,12 @@
-import "./styles/wealth.css";
+import "./wealth-entry.css";
+import { FinanceCaptureInbox } from "../app/FinanceCaptureInbox";
+import { financeNeedsConfirmation } from "../app/finance-consumption";
+import { financeQuickRole, isManualFinanceTransaction } from "../app/finance-classification";
+import { FinanceSpendingFields } from "./FinanceSpendingFields";
+import { DeleteFinanceTransactionDialog } from "./DeleteFinanceTransactionDialog";
 import { WealthCalendar } from "./WealthCalendar";
-import { FinanceClassificationGuide, FinanceGoalSummary, FinanceReportContent } from "./WealthReport";
+import { FinanceMonthlyReview, ImportCaptureReview } from "./FinanceMonthlyReview";
+import { FinanceGoalSummary, FinanceReportContent } from "./WealthReport";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { LIFE_DOMAIN_OPTIONS, type LifeDomain } from "../app/domain-taxonomy";
@@ -8,12 +14,11 @@ import type { FinanceRepository } from "../app/data/finance-repository";
 import {
   buildFinanceInsightSnapshot,
   countFinanceImportRecords,
+  financeCategorySpending,
   fingerprintFinanceSnapshot,
   validateFinanceAiReportContent,
 } from "../app/finance-analysis";
 import {
-  FINANCE_BUDGET_ROLES,
-  FINANCE_BUDGET_ROLE_LABELS,
   FINANCE_CATEGORIES,
   FINANCE_CATEGORY_LABELS,
   emptyFinanceBudget,
@@ -37,12 +42,12 @@ import { Button, SelectMenu } from "./DesktopControls";
 import { desktopApi, openInternalUrl } from "./integrationApi";
 import { ThemeSticker } from "./DesktopThemes";
 
-type WealthView = "overview" | "calendar" | "transactions" | "budget" | "report";
+type WealthView = "overview" | "review" | "calendar" | "transactions" | "budget" | "report";
 
 const transactionKindLabels: Record<FinanceTransaction["kind"], string> = {
   expense: "支出",
   income: "收入",
-  transfer: "转账",
+  transfer: "资金往来",
   refund: "退款",
   repayment: "还款",
   adjustment: "调整",
@@ -56,8 +61,8 @@ const sourceLabels: Record<FinanceSource, string> = {
 };
 
 const financeSourceOptions = Object.entries(sourceLabels).map(([value, label]) => ({ value, label }));
-const financeCategoryOptions = FINANCE_CATEGORIES.map(({ value, label }) => ({ value, label }));
-const financeBudgetRoleOptions = FINANCE_BUDGET_ROLES.map(({ value, label }) => ({ value, label }));
+const financeKindOptions = Object.entries(transactionKindLabels).map(([value, label]) => ({ value, label: value === "transfer" ? "资金往来（借还款 / 转账，不计消费）" : label }));
+const financeDirectionOptions = [{ value: "out", label: "转出 / 借出 / 还款" }, { value: "in", label: "转入 / 借入 / 收回" }, { value: "neutral", label: "本人账户间转移" }];
 const financeLifeDomainOptions = [{ value: "", label: "不指定" }, ...LIFE_DOMAIN_OPTIONS.map(({ value, label }) => ({ value, label }))];
 const financeValueRatingOptions = [
   { value: "", label: "暂不评价" },
@@ -96,8 +101,14 @@ export function WealthPage({ repository, projects, today, onNotice, quickCapture
   const [preview, setPreview] = useState<FinanceImportPreview | null>(null);
   const [importing, setImporting] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
+  const [deleting, setDeleting] = useState<FinanceTransaction | null>(null);
+  const [captureFocus, setCaptureFocus] = useState<string | null>(null);
+  const [matchedCaptureIds, setMatchedCaptureIds] = useState<string[]>([]);
   const [classification, setClassification] = useState<{
     transaction: FinanceTransaction;
+    kind: FinanceTransaction["kind"];
+    direction: FinanceTransaction["direction"];
+    relatedTransactionId: string;
     category: FinanceCategory;
     budgetRole: FinanceBudgetRole;
     remember: boolean;
@@ -105,11 +116,15 @@ export function WealthPage({ repository, projects, today, onNotice, quickCapture
     lifeDomain: LifeDomain | "";
     valueRating: FinanceValueRating | "";
   } | null>(null);
+  const [refundCandidates, setRefundCandidates] = useState<FinanceTransaction[]>([]);
+  const [classificationSaving, setClassificationSaving] = useState(false);
+  const [classificationError, setClassificationError] = useState("");
   const [showSendPreview, setShowSendPreview] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [reportStale, setReportStale] = useState(false);
   const monthRef = useRef(month);
   const reportRequestRef = useRef(0);
+  const dataReady = !loading || summary !== null;
   monthRef.current = month;
 
   useEffect(() => {
@@ -122,21 +137,23 @@ export function WealthPage({ repository, projects, today, onNotice, quickCapture
     const requestedMonth = month;
     setLoading(true);
     try {
-      const [nextSettings, nextBudget, nextTransactions, nextBatches, nextSummary, nextReport, keyAvailable, nextCalendarExpenses] = await Promise.all([
+      const [nextSettings, nextBudget, nextTransactions, nextBatches, nextSummary, nextReport, keyAvailable, nextCalendarExpenses, nextMatchedIds] = await Promise.all([
         repository.getSettings(),
         repository.getBudget(requestedMonth),
-        repository.listTransactions(requestedMonth),
+        repository.listTransactions(requestedMonth, 50_000),
         repository.listBatches(),
         repository.monthlySummary(requestedMonth),
         repository.getReport(requestedMonth),
         desktopApi.secrets.status("deepseek_api_key").catch(() => false),
         repository.listCalendarExpenses(requestedMonth),
+        repository.matchedCaptureIds(),
       ]);
       if (monthRef.current !== requestedMonth) return;
       setSettings(nextSettings);
       setBudget(nextBudget);
       setTransactions(nextTransactions);
       setCalendarExpenses(nextCalendarExpenses);
+      setMatchedCaptureIds(nextMatchedIds);
       setBatches(nextBatches);
       setSummary(nextSummary);
       setReport(nextReport);
@@ -150,12 +167,23 @@ export function WealthPage({ repository, projects, today, onNotice, quickCapture
 
   useEffect(() => { void refresh(); }, [refresh]);
 
+  const editingTransaction = classification?.transaction;
+  useEffect(() => {
+    let active = true;
+    setRefundCandidates([]);
+    setClassificationError("");
+    if (editingTransaction) void repository.listRefundCandidates(editingTransaction).then(items => {
+      if (active) setRefundCandidates(items);
+    }).catch(error => { if (active) setClassificationError(errorMessage(error, "原付款暂时无法读取")); });
+    return () => { active = false; };
+  }, [editingTransaction, repository]);
+
   const snapshot = useMemo(() => summary ? buildFinanceInsightSnapshot(
     summary,
     budget,
-    transactions,
+    calendarExpenses,
     projects.map((project) => ({ id: project.id, category: project.category, status: project.status })),
-  ) : null, [budget, projects, summary, transactions]);
+  ) : null, [budget, projects, summary, calendarExpenses]);
 
   useEffect(() => {
     let active = true;
@@ -214,6 +242,16 @@ export function WealthPage({ repository, projects, today, onNotice, quickCapture
     setPreview({ ...preview, records, counts: countFinanceImportRecords(records) });
   }
 
+  function toggleCaptureMatch(rowNumber: number, captureId: string) {
+    if (!preview || importing) return;
+    const records = preview.records.map(record => {
+      const ids = record.matchedCaptureIds ?? [];
+      if (record.rowNumber === rowNumber) return { ...record, matchedCaptureIds: ids.includes(captureId) ? ids.filter(id => id !== captureId) : [...ids, captureId] };
+      return { ...record, matchedCaptureIds: ids.filter(id => id !== captureId) };
+    });
+    setPreview({ ...preview, records });
+  }
+
   async function confirmImport() {
     if (!preview) return;
     setImporting(true);
@@ -222,7 +260,10 @@ export function WealthPage({ repository, projects, today, onNotice, quickCapture
       onNotice(`已导入 ${batch.statistics.importable || preview.records.filter((record) => record.selected).length} 笔流水`);
       setPreview(null);
       setImportSource(null);
-      await refresh();
+      setView("review");
+      const importMonth = batch.periodEnd.slice(0, 7);
+      if (/^\d{4}-\d{2}$/.test(importMonth) && importMonth !== monthRef.current) selectMonth(importMonth);
+      else await refresh();
     } catch (error) {
       onNotice(errorMessage(error, "账单导入失败，原数据未改变"));
     } finally {
@@ -242,7 +283,9 @@ export function WealthPage({ repository, projects, today, onNotice, quickCapture
   }
 
   async function saveClassification() {
-    if (!classification) return;
+    if (!classification || classificationSaving) return;
+    setClassificationSaving(true);
+    setClassificationError("");
     try {
       await repository.updateClassification(
         classification.transaction.id,
@@ -253,13 +296,18 @@ export function WealthPage({ repository, projects, today, onNotice, quickCapture
           projectId: classification.projectId || null,
           lifeDomain: classification.lifeDomain || null,
           valueRating: classification.valueRating || null,
+          kind: classification.kind,
+          direction: classification.direction,
+          relatedTransactionId: classification.relatedTransactionId || null,
         },
       );
       setClassification(null);
-      onNotice(classification.remember ? "分类已确认，后续相似流水会沿用" : "分类已确认");
+      onNotice(classification.remember && classification.kind === "expense" ? "流水已保存，后续相似流水会沿用分类" : "流水已保存");
       await refresh();
     } catch (error) {
-      onNotice(errorMessage(error, "分类保存失败"));
+      setClassificationError(errorMessage(error, "流水保存失败"));
+    } finally {
+      setClassificationSaving(false);
     }
   }
 
@@ -299,18 +347,18 @@ export function WealthPage({ repository, projects, today, onNotice, quickCapture
   return (
     <section className="wealth-page">
       <header className="wealth-header">
-        <div><span>本地财富台账</span><h1>看清钱去了哪里，再决定怎么优化</h1><p>账单文件只在本机解析；收入基线、预算与 AI 建议彼此分开。</p></div>
+        <div><span>本地财富台账</span><h1>每月导入账单，集中整理消费</h1><p>导入微信账单 → 按组确认分类 → 补记少量银行卡支出 → 查看月度总结。</p></div>
         <ThemeSticker section="wealth" placement="wealth-hero" />
         <div className="wealth-header-actions">
           <label><span>查看月份</span><input type="month" value={month} disabled={generating} onChange={(event) => selectMonth(event.target.value)} /></label>
           <Button variant="secondary" onClick={() => setManualOpen(true)}>补记一笔</Button>
-          <Button variant="primary" onClick={() => setImportSource("alipay")}>导入账单</Button>
+          <Button variant="primary" onClick={() => setImportSource("wechat")}>导入月度账单</Button>
         </div>
       </header>
 
       {!settings.backupNoticeAcknowledged && (
         <aside className="wealth-privacy-notice">
-          <div><strong>财务数据只保存在这台设备</strong><p>它会进入现有完整备份，但当前 .mgbak 备份包尚未加密。请把备份文件放在可信位置；财务数据不会加入云同步。</p></div>
+          <div><strong>财务数据默认保存在本机</strong><p>完整备份包含财务数据，当前 .mgbak 备份包尚未加密，请存放在可信位置。开启私人同步后，手工消费与交易通知记录会加密同步；导入账单仍保留在本机。</p></div>
           <Button variant="secondary" type="button" onClick={() => void acknowledgeBackupNotice()}>我已了解</Button>
         </aside>
       )}
@@ -318,19 +366,27 @@ export function WealthPage({ repository, projects, today, onNotice, quickCapture
       <nav className="wealth-tabs" aria-label="财富视图">
         {([[
           "overview", "总览",
-        ], ["calendar", "消费日历"], ["transactions", "流水"], ["budget", "预算"], ["report", "AI 月报"]] as Array<[WealthView, string]>).map(([id, label]) => (
+        ], ["review", "月度整理"], ["calendar", "消费日历"], ["transactions", "流水"], ["budget", "预算"], ["report", "AI 月报"]] as Array<[WealthView, string]>).map(([id, label]) => (
           <button className={view === id ? "active" : ""} key={id} onClick={() => setView(id)}>{label}</button>
         ))}
       </nav>
 
+      {view === "overview" && <section className="wealth-panel wealth-monthly-launcher"><div><strong>每月整理一次</strong><p className="wealth-muted">导入上月账单，集中确认新商户。银行卡的小额支出可在总结时补记。</p></div><Button variant="secondary" onClick={() => setView("review")}>开始月度整理</Button></section>}
+
+      <details className="wealth-optional-captures" open={captureFocus ? true : undefined}><summary>通知记录（可选）</summary><FinanceCaptureInbox repository={repository.captures} focusId={captureFocus} hiddenIds={matchedCaptureIds} onChanged={refresh} /></details>
+
       {loading && !summary ? <div className="wealth-loading">正在整理本地账目…</div> : null}
-      {!loading && view === "calendar" && <WealthCalendar key={month} month={month} today={today} transactions={calendarExpenses} />}
-      {!loading && summary && view === "overview" && (
+      {dataReady && view === "calendar" && <WealthCalendar key={month} month={month} today={today} transactions={calendarExpenses} />}
+      {dataReady && view === "review" && <FinanceMonthlyReview transactions={calendarExpenses} onImport={() => setImportSource("wechat")} onManual={() => setManualOpen(true)} onConfirm={async (key, ids, category, remember) => { const count = await repository.confirmClassificationGroup(month, key, ids, category, remember); onNotice(`已确认 ${count} 笔分类${remember ? "，下次相似账单会沿用" : ""}`); await refresh(); }} />}
+      {dataReady && summary && view === "overview" && (
         <OverviewView summary={summary} budget={budget} transactions={transactions} batches={batches} onImport={setImportSource} onRollback={rollbackBatch} />
       )}
-      {!loading && view === "transactions" && (
-        <TransactionsView transactions={transactions} onImport={setImportSource} onManual={() => setManualOpen(true)} onClassify={(transaction) => setClassification({
+      {dataReady && view === "transactions" && (
+        <TransactionsView key={month} transactions={transactions} consumption={calendarExpenses} onImport={setImportSource} onManual={() => setManualOpen(true)} onDelete={setDeleting} onClassify={(transaction) => transaction.status === "通知待补全" ? setCaptureFocus(transaction.id.slice("finance-capture-".length)) : setClassification({
           transaction,
+          kind: transaction.kind,
+          direction: transaction.direction,
+          relatedTransactionId: transaction.relatedTransactionId ?? "",
           category: transaction.category,
           budgetRole: transaction.budgetRole,
           remember: false,
@@ -339,10 +395,10 @@ export function WealthPage({ repository, projects, today, onNotice, quickCapture
           valueRating: transaction.valueRating ?? "",
         })} />
       )}
-      {!loading && summary && view === "budget" && (
+      {dataReady && summary && view === "budget" && (
         <BudgetView repository={repository} month={month} settings={settings} budget={budget} summary={summary} onSaved={async () => { onNotice("收入基线和本月预算已保存"); await refresh(); }} onNotice={onNotice} />
       )}
-      {!loading && summary && view === "report" && snapshot && (
+      {dataReady && summary && view === "report" && snapshot && (
         <ReportView
           report={report}
           reportStale={reportStale}
@@ -364,27 +420,39 @@ export function WealthPage({ repository, projects, today, onNotice, quickCapture
           onSwitchSource={(nextSource) => { setImportSource(nextSource); setPreview(null); }}
           onChoose={() => void chooseImportFile()}
           onToggle={toggleImportRecord}
+          onMatch={toggleCaptureMatch}
           onConfirm={() => void confirmImport()}
           onClose={() => { if (!importing) { setImportSource(null); setPreview(null); } }}
         />
       )}
-      {manualOpen && <ManualEntryDialog repository={repository} projects={projects} today={today} onClose={() => setManualOpen(false)} onSaved={async () => { setManualOpen(false); onNotice("这笔消费已经补记"); await refresh(); }} onNotice={onNotice} />}
-      {classification && (
-        <div className="wealth-modal-backdrop"><section className="wealth-dialog compact" role="dialog" aria-modal="true" aria-label="确认流水分类">
-          <header><div><span>确认分类</span><h2>{classification.transaction.merchant || classification.transaction.description}</h2></div><Button variant="secondary" size="small" iconOnly aria-label="关闭" type="button" onClick={() => setClassification(null)}>×</Button></header>
-          <p className="wealth-muted">只有你确认过的必要性才会进入正式统计。AI 建议不会替你修改。</p>
+      {manualOpen && <ManualEntryDialog repository={repository} projects={projects} today={month === today.slice(0, 7) ? today : `${month}-${new Date(Number(month.slice(0, 4)), Number(month.slice(5)), 0).getDate()}`} onClose={() => setManualOpen(false)} onSaved={async () => { setManualOpen(false); onNotice("这笔消费已经补记"); await refresh(); }} onNotice={onNotice} />}
+      {classification && !deleting && (
+        <div className="wealth-modal-backdrop"><section className="wealth-dialog compact" role="dialog" aria-modal="true" aria-label="确认流水">
+          <header><div><span>确认流水 · {money(classification.transaction.amountCents)}</span><h2>{classification.transaction.merchant || classification.transaction.description}</h2></div><Button variant="secondary" size="small" iconOnly aria-label="关闭" type="button" disabled={classificationSaving} onClick={() => setClassification(null)}>×</Button></header>
+          <p className="wealth-muted wealth-edit-intro">选一个大致用途就好，拿不准可选“其他”。</p>
+          <fieldset className="wealth-edit-fields" disabled={classificationSaving}>
           <div className="wealth-form-grid">
-            <label><span>用途分类</span><SelectMenu label="用途分类" value={classification.category} onChange={(value) => setClassification({ ...classification, category: value as FinanceCategory })} options={financeCategoryOptions} /></label>
-            <label><span>消费性质</span><SelectMenu label="消费性质" value={classification.budgetRole} onChange={(value) => setClassification({ ...classification, budgetRole: value as FinanceBudgetRole })} options={financeBudgetRoleOptions} /></label>
+            <label className="wide"><span>交易类型</span><SelectMenu label="交易类型" value={classification.kind} onChange={(value) => setClassification({ ...classification, kind: value as FinanceTransaction["kind"] })} options={financeKindOptions} /></label>
+            {(classification.kind === "transfer" || classification.kind === "adjustment") && <label className="wide"><span>收支方向</span><SelectMenu label="收支方向" value={classification.direction} onChange={value => setClassification({ ...classification, direction: value as FinanceTransaction["direction"] })} options={financeDirectionOptions} /></label>}
+            {classification.kind === "refund" && <label className="wide"><span>关联原付款（支持退押金 / 部分退款）</span><SelectMenu label="关联原付款" value={classification.relatedTransactionId} onChange={value => setClassification({ ...classification, relatedTransactionId: value })} options={[{ value: "", label: "暂不关联" }, ...refundCandidates.map(item => ({ value: item.id, label: `${formatDateTime(item.occurredAt)} · ${item.merchant || item.description} · ${money(item.amountCents)} · ${sourceLabels[item.source]}` }))]} /></label>}
+          </div>
+          <FinanceSpendingFields category={classification.category} budgetRole={classification.budgetRole} showRole={classification.kind === "expense"} onCategory={category => setClassification({ ...classification, category })} onRole={budgetRole => setClassification({ ...classification, budgetRole })} />
+          <details className="wealth-manual-advanced"><summary>更多选项</summary><div className="wealth-form-grid">
             <label><span>关联项目</span><SelectMenu label="关联项目" value={classification.projectId} onChange={(value) => setClassification({ ...classification, projectId: value })} options={financeProjectOptions(projects)} /></label>
             <label><span>生活领域</span><SelectMenu label="生活领域" value={classification.lifeDomain} onChange={(value) => setClassification({ ...classification, lifeDomain: value as LifeDomain | "" })} options={financeLifeDomainOptions} /></label>
             <label><span>是否值得</span><SelectMenu label="是否值得" value={classification.valueRating} onChange={(value) => setClassification({ ...classification, valueRating: value as FinanceValueRating | "" })} options={financeValueRatingOptions} /></label>
           </div>
-          <FinanceClassificationGuide role={classification.budgetRole} />
-          <label className="wealth-check"><input type="checkbox" checked={classification.remember} onChange={(event) => setClassification({ ...classification, remember: event.target.checked })} /><span>相同商户或描述通常用途一致时，才记住此分类</span></label>
-          <footer><Button variant="secondary" type="button" onClick={() => setClassification(null)}>暂不调整</Button><Button variant="primary" disabled={classification.budgetRole === "unknown"} onClick={() => void saveClassification()}>确认分类</Button></footer>
+          {classification.kind === "expense" && <label className="wealth-check"><input type="checkbox" checked={classification.remember} onChange={(event) => setClassification({ ...classification, remember: event.target.checked })} /><span>记住这类分类</span></label>}
+          <p className="wealth-muted wealth-original-record">{classification.transaction.description} · 原状态：{classification.transaction.status || "未提供"}</p>
+          </details>
+          {classification.kind === "transfer" && <p className="wealth-muted">借出、借入、归还和收回借款都记为资金往来，保留流水，排除消费、收入、预算和消费日历。</p>}
+          {classification.kind === "refund" && <p className="wealth-muted">关联后按退款金额抵扣原付款所在月份的消费。美团券与另付的锅底费分别保留，退押金关联到含押金的付款即可。</p>}
+          </fieldset>
+          {classificationError && <p role="alert">{classificationError}</p>}
+          <footer>{isManualFinanceTransaction(classification.transaction) && <Button className="wealth-delete-entry" variant="danger" disabled={classificationSaving} onClick={() => setDeleting(classification.transaction)}>删除这笔补记</Button>}<Button variant="secondary" type="button" disabled={classificationSaving} onClick={() => setClassification(null)}>暂不调整</Button><Button variant="primary" disabled={classificationSaving} onClick={() => void saveClassification()}>{classificationSaving ? "正在保存…" : "保存流水"}</Button></footer>
         </section></div>
       )}
+      {deleting && <DeleteFinanceTransactionDialog key={deleting.id} transaction={deleting} repository={repository} onClose={() => setDeleting(null)} onDeleted={async () => { setDeleting(null); if (classification?.transaction.id === deleting.id) setClassification(null); onNotice("补记账单已删除"); await refresh(); }} />}
     </section>
   );
 }
@@ -400,9 +468,9 @@ function OverviewView({ summary, budget, transactions, batches, onImport, onRoll
   const budgetTotal = Object.values(budget.categoryLimits).reduce<number>((total, value) => total + (value ?? 0), 0);
   return <div className="wealth-content">
     <section className="wealth-stat-grid">
-      <MoneyCard label="本月普通消费" value={summary.ordinaryExpenseCents} note={`退款 ${money(summary.refundCents)} 已单列`} />
+      <MoneyCard label="本月实际消费" value={summary.ordinaryExpenseCents} note="已抵扣关联退款，资金往来已剔除" />
       <MoneyCard label="实际收入" value={summary.actualIncomeCents} note="来自导入流水，不覆盖规划基线" positive />
-      <MoneyCard label="实际结余" value={summary.actualNetCents} note="收入 + 退款 − 普通消费" positive={summary.actualNetCents >= 0} />
+      <MoneyCard label="实际结余" value={summary.actualNetCents} note={`按本月收付款计算；含退款 ${money(summary.refundCents)}`} positive={summary.actualNetCents >= 0} />
       <MoneyCard label="规划收入基线" value={summary.stableIncomeCents} note={`储蓄目标 ${money(budget.savingsTargetCents)}`} positive />
     </section>
     {!transactions.length ? <section className="wealth-empty-import"><div><span>从已有账单开始</span><h2>先导入大头，再补记零碎消费</h2><p>无需连接支付账户。请从官方应用导出并自行解压，确认预览后才会写入。</p></div><div className="wealth-import-cards"><ImportCard source="alipay" onClick={onImport} /><ImportCard source="wechat" onClick={onImport} /></div></section> : null}
@@ -417,15 +485,43 @@ function OverviewView({ summary, budget, transactions, batches, onImport, onRoll
   </div>;
 }
 
-function TransactionsView({ transactions, onImport, onManual, onClassify }: {
+function TransactionsView({ transactions, consumption, onImport, onManual, onClassify, onDelete }: {
   transactions: FinanceTransaction[];
+  consumption: FinanceTransaction[];
   onImport: (source: FinanceImportSource) => void;
   onManual: () => void;
   onClassify: (transaction: FinanceTransaction) => void;
+  onDelete: (transaction: FinanceTransaction) => void;
 }) {
-  return <div className="wealth-content"><section className="wealth-panel wealth-table-panel"><header><div><span>标准化流水</span><h2>{transactions.length ? `${transactions.length} 笔` : "这个月还没有流水"}</h2></div></header>{transactions.length ? <div className="wealth-table-wrap"><table><thead><tr><th>时间</th><th>说明</th><th>类型</th><th>分类</th><th>消费性质</th><th>金额</th><th /></tr></thead><tbody>{transactions.map((transaction) => <tr key={transaction.id}><td>{formatDateTime(transaction.occurredAt)}</td><td><strong>{transaction.merchant || transaction.description || "未命名流水"}</strong><small>{sourceLabels[transaction.source]}{transaction.projectId ? " · 已关联项目" : ""}</small></td><td>{transactionKindLabels[transaction.kind]}</td><td>{FINANCE_CATEGORY_LABELS[transaction.category]}</td><td><span className={transaction.budgetRoleConfirmed ? "confirmed-role" : "pending-role"}>{transaction.budgetRoleConfirmed ? FINANCE_BUDGET_ROLE_LABELS[transaction.budgetRole] : "待确认"}</span></td><td className={`money-cell ${transaction.direction === "in" ? "income" : ""}`}>{transaction.direction === "in" ? "+" : transaction.direction === "out" ? "−" : ""}{money(transaction.amountCents)}</td><td>{transaction.kind === "expense" ? <Button variant="secondary" type="button" onClick={() => onClassify(transaction)}>{transaction.budgetRoleConfirmed ? "调整" : "确认"}</Button> : null}</td></tr>)}</tbody></table></div> : <div className="wealth-table-empty"><p className="wealth-muted">可以导入支付宝或微信账单；银行卡等低频消费直接补记即可。</p><div><Button variant="secondary" type="button" onClick={() => onImport("alipay")}>导入支付宝</Button><Button variant="secondary" type="button" onClick={() => onImport("wechat")}>导入微信</Button><Button variant="primary" type="button" onClick={onManual}>补记银行卡 / 其他</Button></div></div>}</section></div>;
+  const [filter, setFilter] = useState<"all" | "expense" | "pending" | "manual">("all");
+  const netAmounts = new Map(consumption.map(transaction => [transaction.id, transaction.amountCents]));
+  const pending = transactions.filter(transaction => financeNeedsConfirmation(transaction) && (netAmounts.get(transaction.id) ?? 0) > 0);
+  const shown = filter === "pending" ? pending : filter === "expense" ? transactions.filter(transaction => (netAmounts.get(transaction.id) ?? 0) > 0) : filter === "manual" ? transactions.filter(isManualFinanceTransaction) : transactions;
+  return <div className="wealth-content"><section className="wealth-panel wealth-table-panel">
+    <header><div><span>标准化流水</span><h2>{transactions.length ? `${shown.length} 笔` : "这个月还没有流水"}</h2></div>
+      <div className="wealth-transaction-filters" aria-label="流水筛选">
+        <Button variant={filter === "all" ? "primary" : "secondary"} aria-pressed={filter === "all"} onClick={() => setFilter("all")}>全部流水</Button>
+        <Button variant={filter === "expense" ? "primary" : "secondary"} aria-pressed={filter === "expense"} onClick={() => setFilter("expense")}>实际消费</Button>
+        <Button variant={filter === "manual" ? "primary" : "secondary"} aria-pressed={filter === "manual"} onClick={() => setFilter("manual")}>手工补记</Button>
+        <Button variant={filter === "pending" ? "primary" : "secondary"} aria-pressed={filter === "pending"} onClick={() => setFilter("pending")}>待确认 {pending.length}</Button>
+      </div>
+    </header>
+    {transactions.length > 0 && <p className="wealth-muted wealth-table-note">借还款可点“调整”设为“资金往来”。实际消费按关联退款抵扣后的金额展示。</p>}
+    {shown.length ? <div className="wealth-table-wrap"><table><thead><tr><th>时间</th><th>说明</th><th>类型</th><th>分类</th><th>消费性质</th><th>金额</th><th>操作</th></tr></thead><tbody>{shown.map(transaction => {
+      const netAmount = netAmounts.get(transaction.id) ?? 0;
+      const needsConfirmation = financeNeedsConfirmation(transaction) && netAmount > 0;
+      const refunded = transaction.kind === "expense" ? transaction.amountCents - netAmount : 0;
+      return <tr key={transaction.id}>
+        <td>{formatDateTime(transaction.occurredAt)}</td>
+        <td><strong>{transaction.merchant || transaction.description || "未命名流水"}</strong><small>{sourceLabels[transaction.source]}{isManualFinanceTransaction(transaction) ? " · 手工补记" : ""}{transaction.projectId ? " · 已关联项目" : ""}{transaction.relatedTransactionId ? " · 已关联原付款" : ""}</small></td>
+        <td>{transactionKindLabels[transaction.kind]}</td><td>{FINANCE_CATEGORY_LABELS[transaction.category]}{needsConfirmation && <small>待分类</small>}</td>
+        <td><span className="confirmed-role">{transaction.kind === "expense" ? netAmount === 0 ? "已全额退回" : financeQuickRole(transaction.budgetRole).label : "不计消费"}</span></td>
+        <td className={`money-cell ${transaction.direction === "in" ? "income" : ""}`}>{transaction.direction === "in" ? "+" : transaction.direction === "out" ? "−" : ""}{money(filter === "expense" ? netAmount : transaction.amountCents)}{refunded > 0 && <small>{filter === "expense" ? `原付 ${money(transaction.amountCents)} · 已退 ${money(refunded)}` : `已退 ${money(refunded)} · 实际 ${money(netAmount)}`}</small>}</td>
+        <td><div className="wealth-row-actions"><Button variant="secondary" type="button" onClick={() => onClassify(transaction)}>{needsConfirmation ? "确认" : "调整"}</Button>{isManualFinanceTransaction(transaction) && <Button variant="danger" size="small" aria-label={`删除补记：${transaction.merchant || transaction.description}`} onClick={() => onDelete(transaction)}>删除</Button>}</div></td>
+      </tr>;
+    })}</tbody></table></div> : <div className="wealth-table-empty"><p className="wealth-muted">{transactions.length ? filter === "manual" ? "这个月还没有手工补记的账单。" : filter === "pending" ? "当前没有待确认的消费。退款和资金往来可在全部流水中调整。" : "当前没有实际消费，资金往来和已全额退回的付款已排除。" : "可以导入支付宝或微信账单；银行卡等低频消费直接补记即可。"}</p>{!transactions.length && <div><Button variant="secondary" onClick={() => onImport("alipay")}>导入支付宝</Button><Button variant="secondary" onClick={() => onImport("wechat")}>导入微信</Button><Button variant="primary" onClick={onManual}>补记银行卡 / 其他</Button></div>}</div>}
+  </section></div>;
 }
-
 function BudgetView({ repository, month, settings, budget, summary, onSaved, onNotice }: {
   repository: FinanceRepository;
   month: string;
@@ -501,7 +597,7 @@ function BudgetView({ repository, month, settings, budget, summary, onSaved, onN
       <Button variant="secondary" size="small" type="button" aria-expanded={categoryLimitsOpen} onClick={() => setCategoryLimitsOpen((open) => !open)}>{categoryLimitsOpen ? "收起" : "按需设置"}</Button>
       {categoryLimitsOpen ? <div className="wealth-budget-category-editor">
         {availableCategoryOptions.length > 1 ? <SelectMenu label="添加分类额度" value="" onChange={addCategory} options={availableCategoryOptions} /> : null}
-        {selectedCategories.length ? <div className="wealth-budget-category-list">{selectedCategories.map((category) => <div className="wealth-budget-category-row" key={category}><span><strong>{FINANCE_CATEGORY_LABELS[category]}</strong><small>本月已花 {money(summary.categoryTotals[category])}</small></span><span className="wealth-budget-limit-actions"><span className="yuan-input"><i>¥</i><input aria-label={`${FINANCE_CATEGORY_LABELS[category]}额度`} inputMode="decimal" value={limits[category]} onChange={(event) => setLimits({ ...limits, [category]: event.target.value })} /></span><Button variant="ghost" size="small" type="button" aria-label={`移除${FINANCE_CATEGORY_LABELS[category]}额度`} onClick={() => setSelectedCategories(selectedCategories.filter((entry) => entry !== category))}>移除</Button></span></div>)}</div> : <p className="wealth-muted">只有你主动添加的类别，才会显示额度提醒。</p>}
+        {selectedCategories.length ? <div className="wealth-budget-category-list">{selectedCategories.map((category) => <div className="wealth-budget-category-row" key={category}><span><strong>{FINANCE_CATEGORY_LABELS[category]}</strong><small>本月已花 {money(financeCategorySpending(summary.categoryTotals, category))}</small></span><span className="wealth-budget-limit-actions"><span className="yuan-input"><i>¥</i><input aria-label={`${FINANCE_CATEGORY_LABELS[category]}额度`} inputMode="decimal" value={limits[category]} onChange={(event) => setLimits({ ...limits, [category]: event.target.value })} /></span><Button variant="ghost" size="small" type="button" aria-label={`移除${FINANCE_CATEGORY_LABELS[category]}额度`} onClick={() => setSelectedCategories(selectedCategories.filter((entry) => entry !== category))}>移除</Button></span></div>)}</div> : <p className="wealth-muted">只有你主动添加的类别，才会显示额度提醒。</p>}
       </div> : null}
     </section>
   </form></div>;
@@ -540,18 +636,19 @@ function ReportView({ report, reportStale, snapshot, hasDeepSeekKey, showSendPre
   </div>;
 }
 
-function ImportDialog({ source, preview, busy, onSwitchSource, onChoose, onToggle, onConfirm, onClose }: {
+function ImportDialog({ source, preview, busy, onSwitchSource, onChoose, onToggle, onMatch, onConfirm, onClose }: {
   source: FinanceImportSource;
   preview: FinanceImportPreview | null;
   busy: boolean;
   onSwitchSource: (source: FinanceImportSource) => void;
   onChoose: () => void;
   onToggle: (rowNumber: number) => void;
+  onMatch: (rowNumber: number, captureId: string) => void;
   onConfirm: () => void;
   onClose: () => void;
 }) {
   const label = sourceLabels[source];
-  return <div className="wealth-modal-backdrop"><section className="wealth-dialog import" role="dialog" aria-modal="true" aria-label={`导入${label}账单`}><header><div><span>{preview ? "第 4 步 · 预览识别结果" : "导入向导"}</span><h2>{preview ? `${label}账单预览` : "先从官方应用取得账单"}</h2></div><Button variant="secondary" size="small" iconOnly aria-label="关闭" type="button" disabled={busy} onClick={onClose}>×</Button></header>{!preview ? <><div className="wealth-source-switch"><button className={source === "alipay" ? "active" : ""} onClick={() => onSwitchSource("alipay")}>支付宝</button><button className={source === "wechat" ? "active" : ""} onClick={() => onSwitchSource("wechat")}>微信</button></div><ol className="wealth-guide-steps">{source === "wechat" ? <><li><strong>进入微信支付账单</strong><span>通常位于“我 → 服务 → 钱包 → 账单”，再从帮助或常见问题中选择下载账单。</span></li><li><strong>选择用于个人对账</strong><span>选择时间范围并发送到自己的邮箱。官方入口名称和可选范围可能随版本变化。</span></li><li><strong>下载并自行解压</strong><span>压缩包密码由微信提示。本版不读取带密码 ZIP，只选择解压后的 CSV/XLS/XLSX。</span></li></> : <><li><strong>进入支付宝官方账单导出入口</strong><span>从账单或交易流水页面选择明细与时间范围；入口可能随客户端版本变化。</span></li><li><strong>导出 Excel 或 CSV</strong><span>本版支持 XLS、XLSX、CSV；若只得到 PDF，请改选可编辑明细格式。</span></li><li><strong>解压后再选择文件</strong><span>不要提交真实账单到项目仓库，应用也不会保存原文件或真实文件名。</span></li></>}</ol><div className="wealth-guide-note"><strong>入口可能变化</strong><p>教程采用可维护文字，不复用旧应用截图。找不到入口时可查看官方帮助中心。</p><Button variant="secondary" type="button" onClick={() => void openInternalUrl(source === "wechat" ? "https://kf.qq.com/product/weixin.html" : "https://help.alipay.com/")}>打开{label}官方帮助</Button></div><footer><Button variant="secondary" type="button" onClick={onClose}>取消</Button><Button variant="primary" disabled={busy} onClick={onChoose}>{busy ? "正在本机解析…" : "选择解压后的账单"}</Button></footer></> : <><div className="wealth-import-counts">{(["expense", "income", "refund", "transfer", "skipped", "duplicate", "suspected", "uncertain"] as const).map((key) => <div key={key}><strong>{preview.counts[key]}</strong><span>{{ expense: "支出", income: "收入", refund: "退款", transfer: "转账", skipped: "跳过", duplicate: "重复", suspected: "疑似重复", uncertain: "待确认" }[key]}</span></div>)}</div>{preview.alreadyImported ? <p className="wealth-import-warning">相同文件指纹已经导入过，本次不能重复入账。</p> : null}<div className="wealth-preview-table"><table><thead><tr><th>导入</th><th>时间</th><th>说明</th><th>类型 / 状态</th><th>金额</th></tr></thead><tbody>{preview.records.slice(0, 300).map((record) => <tr className={`decision-${record.decision}`} key={`${record.rowNumber}-${record.externalTransactionId}`}><td><input type="checkbox" checked={record.selected} disabled={record.decision === "skipped" || record.decision === "duplicate" || !record.amountCents || !record.occurredAt} onChange={() => onToggle(record.rowNumber)} /></td><td>{formatDateTime(record.occurredAt)}</td><td><strong>{record.merchant || record.description || "无法识别"}</strong><small>{record.reason || FINANCE_CATEGORY_LABELS[record.category]}</small></td><td>{transactionKindLabels[record.kind]}<small>{record.status}</small></td><td>{money(record.amountCents)}</td></tr>)}</tbody></table></div>{preview.records.length > 300 ? <p className="wealth-muted">为保证页面流畅，只展示前 300 条；确认时会按全部选择状态入账。</p> : null}<footer><Button variant="secondary" type="button" disabled={busy} onClick={() => onSwitchSource(source)}>重新选文件</Button><Button variant="primary" disabled={busy || preview.alreadyImported || !preview.records.some((record) => record.selected)} onClick={onConfirm}>{busy ? "正在事务写入…" : `确认导入 ${preview.records.filter((record) => record.selected).length} 笔`}</Button></footer></>}</section></div>;
+  return <div className="wealth-modal-backdrop"><section className="wealth-dialog import" role="dialog" aria-modal="true" aria-label={`导入${label}账单`}><header><div><span>{preview ? "第 4 步 · 预览识别结果" : "导入向导"}</span><h2>{preview ? `${label}账单预览` : "先从官方应用取得账单"}</h2></div><Button variant="secondary" size="small" iconOnly aria-label="关闭" type="button" disabled={busy} onClick={onClose}>×</Button></header>{!preview ? <><div className="wealth-source-switch"><button className={source === "alipay" ? "active" : ""} onClick={() => onSwitchSource("alipay")}>支付宝</button><button className={source === "wechat" ? "active" : ""} onClick={() => onSwitchSource("wechat")}>微信</button></div><ol className="wealth-guide-steps">{source === "wechat" ? <><li><strong>进入微信支付账单</strong><span>通常位于“我 → 服务 → 钱包 → 账单”，再从帮助或常见问题中选择下载账单。</span></li><li><strong>选择用于个人对账</strong><span>选择时间范围并发送到自己的邮箱。官方入口名称和可选范围可能随版本变化。</span></li><li><strong>下载并自行解压</strong><span>压缩包密码由微信提示。本版不读取带密码 ZIP，只选择解压后的 CSV/XLS/XLSX。</span></li></> : <><li><strong>进入支付宝官方账单导出入口</strong><span>从账单或交易流水页面选择明细与时间范围；入口可能随客户端版本变化。</span></li><li><strong>导出 Excel 或 CSV</strong><span>本版支持 XLS、XLSX、CSV；若只得到 PDF，请改选可编辑明细格式。</span></li><li><strong>解压后再选择文件</strong><span>不要提交真实账单到项目仓库，应用也不会保存原文件或真实文件名。</span></li></>}</ol><div className="wealth-guide-note"><strong>入口可能变化</strong><p>教程采用可维护文字，不复用旧应用截图。找不到入口时可查看官方帮助中心。</p><Button variant="secondary" type="button" onClick={() => void openInternalUrl(source === "wechat" ? "https://kf.qq.com/product/weixin.html" : "https://help.alipay.com/")}>打开{label}官方帮助</Button></div><footer><Button variant="secondary" type="button" onClick={onClose}>取消</Button><Button variant="primary" disabled={busy} onClick={onChoose}>{busy ? "正在本机解析…" : "选择解压后的账单"}</Button></footer></> : <><div className="wealth-import-counts">{(["expense", "income", "refund", "transfer", "skipped", "duplicate", "suspected", "uncertain"] as const).map((key) => <div key={key}><strong>{preview.counts[key]}</strong><span>{{ expense: "支出", income: "收入", refund: "退款", transfer: "转账", skipped: "跳过", duplicate: "重复", suspected: "疑似重复", uncertain: "待确认" }[key]}</span></div>)}</div>{preview.alreadyImported ? <p className="wealth-import-warning">相同文件指纹已经导入过，本次不能重复入账。</p> : null}<ImportCaptureReview preview={preview} busy={busy} onMatch={onMatch} /><div className="wealth-preview-table"><table><thead><tr><th>导入</th><th>时间</th><th>说明</th><th>类型 / 状态</th><th>金额</th></tr></thead><tbody>{preview.records.slice(0, 300).map((record) => <tr className={`decision-${record.decision}`} key={`${record.rowNumber}-${record.externalTransactionId}`}><td><input type="checkbox" checked={record.selected} disabled={record.decision === "skipped" || record.decision === "duplicate" || !record.amountCents || !record.occurredAt} onChange={() => onToggle(record.rowNumber)} /></td><td>{formatDateTime(record.occurredAt)}</td><td><strong>{record.merchant || record.description || "无法识别"}</strong><small>{record.reason || FINANCE_CATEGORY_LABELS[record.category]}</small></td><td>{transactionKindLabels[record.kind]}<small>{record.status}</small></td><td>{money(record.amountCents)}</td></tr>)}</tbody></table></div>{preview.records.length > 300 ? <p className="wealth-muted">为保证页面流畅，只展示前 300 条；确认时会按全部选择状态入账。</p> : null}<footer><Button variant="secondary" type="button" disabled={busy} onClick={() => onSwitchSource(source)}>重新选文件</Button><Button variant="primary" disabled={busy || preview.alreadyImported || !preview.records.some((record) => record.selected)} onClick={onConfirm}>{busy ? "正在事务写入…" : `确认导入 ${preview.records.filter((record) => record.selected).length} 笔`}</Button></footer></>}</section></div>;
 }
 
 function ManualEntryDialog({ repository, projects, today, onClose, onSaved, onNotice }: {
@@ -602,13 +699,14 @@ function ManualEntryDialog({ repository, projects, today, onClose, onSaved, onNo
       <label className="wide"><span>说明</span><input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="例如：早餐、银行卡购物" required /></label>
       <label className="wide"><span>支付来源</span><SelectMenu label="支付来源" value={source} onChange={(value) => setSource(value as FinanceSource)} options={financeSourceOptions} /></label>
     </div>
-    <details className="wealth-manual-advanced"><summary>补充分类等信息（可选）</summary><div className="wealth-form-grid">
-      <label><span>用途分类</span><SelectMenu label="用途分类" value={category} onChange={(value) => setCategory(value as FinanceCategory)} options={financeCategoryOptions} /></label>
-      <label><span>消费性质</span><SelectMenu label="消费性质" value={budgetRole} onChange={(value) => setBudgetRole(value as FinanceBudgetRole)} options={financeBudgetRoleOptions} /></label>
+    <details className="wealth-manual-advanced"><summary>补充分类（可选）</summary>
+      <FinanceSpendingFields category={category} budgetRole={budgetRole} onCategory={setCategory} onRole={setBudgetRole} />
+      <details className="wealth-manual-advanced"><summary>更多选项</summary><div className="wealth-form-grid">
       <label><span>关联项目</span><SelectMenu label="关联项目" value={projectId} onChange={setProjectId} options={financeProjectOptions(projects)} /></label>
       <label><span>生活领域</span><SelectMenu label="生活领域" value={lifeDomain} onChange={(value) => setLifeDomain(value as LifeDomain | "")} options={financeLifeDomainOptions} /></label>
       <label><span>是否值得</span><SelectMenu label="是否值得" value={valueRating} onChange={(value) => setValueRating(value as FinanceValueRating | "")} options={financeValueRatingOptions} /></label>
-    </div><FinanceClassificationGuide role={budgetRole} /></details>
+      </div></details>
+    </details>
     <footer><Button variant="secondary" type="button" onClick={onClose}>取消</Button><Button variant="primary" type="submit" disabled={saving}>{saving ? "保存中…" : "保存消费"}</Button></footer>
   </form></div>;
 }
@@ -616,7 +714,7 @@ function ManualEntryDialog({ repository, projects, today, onClose, onSaved, onNo
 function MoneyCard({ label, value, note, positive = false }: { label: string; value: number; note: string; positive?: boolean }) { return <article className="wealth-money-card"><span>{label}</span><strong className={positive ? "positive" : ""}>{money(value)}</strong><small>{note}</small></article>; }
 function Scenario({ label, value }: { label: string; value: number }) { return <div><span>{label}</span><strong className={value < 0 ? "negative" : ""}>{money(value)}</strong></div>; }
 function ImportCard({ source, onClick }: { source: FinanceImportSource; onClick: (source: FinanceImportSource) => void }) { return <button className={`wealth-import-card ${source}`} onClick={() => onClick(source)}><i>{source === "alipay" ? "支" : "微"}</i><span><strong>导入{sourceLabels[source]}账单</strong><small>查看官方导出与解压步骤</small></span><b>→</b></button>; }
-function CategoryBars({ summary, budget }: { summary: FinanceMonthlySummary; budget: FinanceBudget }) { const shown = FINANCE_CATEGORIES.filter((entry) => summary.categoryTotals[entry.value] || budget.categoryLimits[entry.value]).sort((left, right) => summary.categoryTotals[right.value] - summary.categoryTotals[left.value]).slice(0, 6); return shown.length ? <div className="wealth-category-bars">{shown.map((entry) => { const spent = summary.categoryTotals[entry.value]; const limit = budget.categoryLimits[entry.value] ?? 0; const width = limit ? Math.min(100, spent / limit * 100) : Math.min(100, spent / Math.max(1, summary.ordinaryExpenseCents) * 100); return <div key={entry.value}><span><strong>{entry.label}</strong><small>{money(spent)}{limit ? ` / ${money(limit)}` : ""}</small></span><i><b style={{ width: `${width}%` }} /></i></div>; })}</div> : <p className="wealth-muted">导入或补记后，这里会按用途展示本月消费结构。</p>; }
+function CategoryBars({ summary, budget }: { summary: FinanceMonthlySummary; budget: FinanceBudget }) { const shown = FINANCE_CATEGORIES.filter((entry) => summary.categoryTotals[entry.value] || budget.categoryLimits[entry.value]).sort((left, right) => summary.categoryTotals[right.value] - summary.categoryTotals[left.value]).slice(0, 6); return shown.length ? <div className="wealth-category-bars">{shown.map((entry) => { const spent = entry.value === "transport" && budget.categoryLimits.transport ? financeCategorySpending(summary.categoryTotals, entry.value) : summary.categoryTotals[entry.value]; const limit = budget.categoryLimits[entry.value] ?? 0; const width = limit ? Math.min(100, spent / limit * 100) : Math.min(100, spent / Math.max(1, summary.ordinaryExpenseCents) * 100); return <div key={entry.value}><span><strong>{entry.label}</strong><small>{money(spent)}{limit ? ` / ${money(limit)}` : ""}</small></span><i><b style={{ width: `${width}%` }} /></i></div>; })}</div> : <p className="wealth-muted">导入或补记后，这里会按用途展示本月消费结构。</p>; }
 function MoneyInput({ label, value, onChange, required = false }: { label: string; value: string; onChange: (value: string) => void; required?: boolean }) { return <label><span>{label}</span><span className="yuan-input"><i>¥</i><input inputMode="decimal" value={value} onChange={(event) => onChange(event.target.value)} required={required} /></span></label>; }
 
 function money(cents: number) { return new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", minimumFractionDigits: 2 }).format(cents / 100); }

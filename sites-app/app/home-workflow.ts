@@ -16,6 +16,7 @@ export type HomeTaskCandidate = {
   dueDate: string;
   stageDueDate: string;
   sortOrder: number;
+  weekBlocked?: boolean;
 };
 
 export function selectHomeTaskCandidates<Task extends HomeTaskCandidate>(
@@ -25,14 +26,14 @@ export function selectHomeTaskCandidates<Task extends HomeTaskCandidate>(
   limit = 3,
 ): Task[] {
   const available = tasks
-    .filter((task) => !["done", "cancelled", "waiting"].includes(task.status) && task.projectStatus !== "completed")
+    .filter((task) => !task.weekBlocked && !["done", "cancelled", "waiting"].includes(task.status) && task.projectStatus !== "completed")
     .sort((left, right) => homeTaskRank(left, today) - homeTaskRank(right, today));
   const active = activeTaskId ? tasks.find((task) => task.id === activeTaskId) : undefined;
   const ordered = [
     active,
-    ...available.filter((task) => isContinuablePlan(task.plan, today)),
     ...available.filter((task) => task.plan?.plannedDate === today),
-    ...available.filter((task) => task.status === "next" && (task.projectStatus === "active" || task.projectId === null)),
+    ...available.filter((task) => isContinuablePlan(task.plan, today)),
+    ...available.filter((task) => task.status === "next" && (!task.plan?.plannedDate || task.plan.plannedDate <= today) && (task.projectStatus === "active" || task.projectId === null)),
   ].filter((task): task is Task => Boolean(task));
   const seen = new Set<string>();
   return ordered.filter((task) => {
@@ -63,6 +64,19 @@ export function buildQuickCloseout(
   };
 }
 
+export function decodeTaskProgressLog(body: string) {
+  const prefix = "行动推进｜";
+  if (!body.startsWith(prefix)) return null;
+  try {
+    const parsed = JSON.parse(body.slice(prefix.length)) as { taskId?: unknown; result?: unknown; nextFocus?: unknown };
+    return typeof parsed.result === "string" && typeof parsed.nextFocus === "string" && parsed.result.trim() && parsed.nextFocus.trim()
+      ? { taskId: typeof parsed.taskId === "string" ? parsed.taskId : null, result: parsed.result.trim(), nextFocus: parsed.nextFocus.trim() }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export type ContextualEcho = {
   article: StoredArticle;
   reason: string;
@@ -89,6 +103,10 @@ const genericEchoTerms = new Set([
   "真实使用与反馈",
   "验收与整理",
   "方案判断",
+  "建立", "创建", "开始", "完成", "推进", "继续", "准备", "进行",
+  "检查", "确认", "整理", "记录", "总结", "分析", "研究", "学习",
+  "优化", "改进", "实现", "使用", "验证", "测试", "阅读", "编写",
+  "项目", "阶段", "任务", "行动", "计划", "目标", "结果", "问题",
 ]);
 
 export function contextualEchoTerms(
@@ -103,9 +121,41 @@ export function contextualEchoTerms(
     if (!phrase) return [];
     return [phrase, ...phrase.split(/[\s、，。；：/·（）()《》！？!?]+/)];
   });
-  return [...new Set(terms)]
-    .filter((term) => term.length >= 2 && term.length <= 60 && !genericEchoTerms.has(term))
-    .slice(0, 8);
+  return meaningfulEchoTerms(terms).slice(0, 8);
+}
+
+function meaningfulEchoTerms(terms: string[]) {
+  return [...new Set(terms.map((term) => term.trim().toLowerCase()))]
+    .filter((term) => term.length >= 2 && term.length <= 60 && !genericEchoTerms.has(term));
+}
+
+type EchoMatch = { article: StoredArticle; matched: string[] };
+
+function rankContextualEcho(matches: EchoMatch[], today: string): ContextualEcho | null {
+  const ranked = matches.flatMap(({ article, matched }) => {
+    const articleDate = (article.updated || article.created).slice(0, 10);
+    if (article.storage.deletedAt || isSourceArticle(article) || isThoughtInboxArticle(article) || !articleDate || articleDate >= today) return [];
+    const metadata = `${article.title} ${article.summary} ${article.project} ${article.tags.join(" ")}`.toLowerCase();
+    // 完整短语及其子词只计一次，避免重复命中虚增相关性。
+    const independent = matched.filter((term) => !matched.some((other) => other !== term && other.includes(term)));
+    const score = independent.reduce((total, term) =>
+      total + (term.length >= 4 ? 4 : 2) + (metadata.includes(term) ? 2 : 0), 0);
+    // 正文中孤立的短词不足以推荐，需要更具体的短语、元数据命中或多个独立词。
+    return score >= 4 ? [{ article, matched: independent, score }] : [];
+  }).sort((left, right) => right.score - left.score
+    || String(right.article.updated || right.article.created).localeCompare(String(left.article.updated || left.article.created)));
+  const best = ranked[0];
+  if (!best) return null;
+  const matched = [...best.matched].sort((left, right) => right.length - left.length).slice(0, 2);
+  return { article: best.article, reason: `旧记录中提到了 ${matched.join("、")}` };
+}
+
+export function selectContextualEcho(articles: StoredArticle[], terms: string[], today: string): ContextualEcho | null {
+  const meaningfulTerms = meaningfulEchoTerms(terms);
+  return rankContextualEcho(articles.map((article) => {
+    const text = `${article.title} ${article.summary} ${article.body} ${article.project} ${article.tags.join(" ")}`.toLowerCase();
+    return { article, matched: meaningfulTerms.filter((term) => text.includes(term)) };
+  }), today);
 }
 
 export async function findContextualEcho(
@@ -113,6 +163,7 @@ export async function findContextualEcho(
   terms: string[],
   today: string,
 ): Promise<ContextualEcho | null> {
+  terms = meaningfulEchoTerms(terms);
   const batches = await Promise.all(terms.map(async (term) => {
     try {
       return await repository.listSummaries(16, 0, term);
@@ -120,30 +171,16 @@ export async function findContextualEcho(
       return [];
     }
   }));
-  const ranked = new Map<string, { article: StoredArticle; matched: Set<string>; score: number }>();
+  const matches = new Map<string, EchoMatch>();
   batches.forEach((articles, termIndex) => {
     const term = terms[termIndex];
-    articles.forEach((article, resultIndex) => {
-      const articleDate = (article.updated || article.created).slice(0, 10);
-      if (isSourceArticle(article) || isThoughtInboxArticle(article) || (articleDate && articleDate >= today)) return;
-      const current = ranked.get(article.id) ?? { article, matched: new Set<string>(), score: 0 };
-      const metadata = `${article.title} ${article.summary} ${article.project} ${article.category} ${article.tags.join(" ")}`;
-      current.matched.add(term);
-      current.score += Math.max(1, terms.length - termIndex) + Math.max(0, 4 - resultIndex / 4);
-      if (metadata.includes(term)) current.score += 5;
-      ranked.set(article.id, current);
+    articles.forEach((article) => {
+      const current = matches.get(article.id) ?? { article, matched: [] };
+      if (!current.matched.includes(term)) current.matched.push(term);
+      matches.set(article.id, current);
     });
   });
-  const best = [...ranked.values()].sort((left, right) =>
-    right.score - left.score
-    || String(right.article.updated || right.article.created).localeCompare(String(left.article.updated || left.article.created)),
-  )[0];
-  if (!best) return null;
-  const matched = [...best.matched].sort((left, right) => right.length - left.length).slice(0, 2);
-  return {
-    article: best.article,
-    reason: matched.length ? `旧记录中提到了 ${matched.join("、")}` : "与当前行动有关",
-  };
+  return rankContextualEcho([...matches.values()], today);
 }
 
 function homeTaskRank(task: HomeTaskCandidate, today: string) {

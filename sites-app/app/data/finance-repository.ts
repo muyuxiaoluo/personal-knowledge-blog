@@ -1,4 +1,9 @@
 import type { LifeDomain } from "../domain-taxonomy";
+import { financeConsumptionTransactions } from "../finance-consumption";
+import { financeCaptureSchema, mergeCaptureTransactions } from "../finance-capture";
+import { FinanceCaptureRepository } from "./finance-capture-repository";
+import { financeReviewGroupKey, financeRuleMatch, financeRuleMatches, financeTransportCategory } from "../finance-classification";
+import { captureSourceLabel, type FinanceCapture } from "../finance-capture";
 import {
   FINANCE_BUDGET_ROLES,
   FINANCE_CATEGORIES,
@@ -125,7 +130,7 @@ const defaultAccounts: Array<Pick<FinanceAccount, "id" | "name" | "source">> = [
 type AccountRow = { id: string; name: string; source: FinanceSource; created_at: string };
 type SettingsRow = { stable_monthly_income_cents: number; default_savings_target_cents: number; backup_notice_acknowledged: number; updated_at: string };
 type BudgetRow = { month: string; savings_target_cents: number; category_limits_json: string; updated_at: string };
-type RuleRow = { id: string; match_kind: "merchant" | "description"; match_value: string; category: FinanceCategory; budget_role: FinanceBudgetRole; created_at: string; updated_at: string };
+type RuleRow = { id: string; match_kind: FinanceCategoryRule["matchKind"]; match_value: string; category: FinanceCategory; budget_role: FinanceBudgetRole; created_at: string; updated_at: string };
 type BatchRow = { id: string; source: "alipay" | "wechat"; period_start: string; period_end: string; file_hash: string; parser_version: string; statistics_json: string; created_at: string };
 type TransactionRow = {
   id: string;
@@ -158,15 +163,31 @@ type ReportRow = { report_month: string; content_json: string; model: string; ge
 
 export class FinanceRepository {
   private initialization: Promise<void> | null = null;
+  readonly captures: FinanceCaptureRepository;
 
   constructor(
     private readonly database: SqliteDatabase,
     private readonly clock: () => Date = () => new Date(),
-  ) {}
+  ) { this.captures = new FinanceCaptureRepository(database, clock); }
 
   private async initialize() {
     this.initialization ??= (async () => {
       for (const statement of migrations) await this.database.execute(statement);
+      await this.database.execute(financeCaptureSchema);
+      // Official bills stay local. Matching must not rewrite privately synced notification evidence.
+      await this.database.execute(`CREATE TABLE IF NOT EXISTS finance_import_capture_matches (
+        capture_id TEXT PRIMARY KEY NOT NULL, transaction_id TEXT NOT NULL,
+        FOREIGN KEY(transaction_id) REFERENCES finance_transactions(id))`);
+      await this.database.execute(`CREATE VIEW IF NOT EXISTS finance_ledger AS SELECT
+        t.id,t.occurred_at,t.amount_cents,t.kind,t.direction,t.account_id,t.source,t.external_transaction_id,
+        t.merchant,t.merchant_normalized,t.description,t.payment_method,t.status,t.category,t.budget_role,
+        t.category_confirmed,t.budget_role_confirmed,t.project_id,t.life_domain,t.import_batch_id,
+        COALESCE(refund_match.transaction_id,t.related_transaction_id) AS related_transaction_id,
+        t.value_rating,t.duplicate_fingerprint,t.created_at,t.updated_at
+        FROM finance_transactions t
+        LEFT JOIN finance_import_capture_matches refund_match ON t.related_transaction_id = 'finance-capture-' || refund_match.capture_id
+        WHERE NOT EXISTS (SELECT 1 FROM finance_import_capture_matches m WHERE t.id = 'finance-capture-' || m.capture_id)`);
+      await this.database.execute("CREATE INDEX IF NOT EXISTS idx_finance_capture_pending ON finance_capture_events(state,received_at)");
       const createdAt = this.clock().toISOString();
       for (const account of defaultAccounts) {
         await this.database.execute(
@@ -246,19 +267,31 @@ export class FinanceRepository {
     await this.initialize();
     const safeLimit = Math.max(1, Math.min(50_000, Math.round(limit)));
     const rows = month
-      ? (assertMonth(month), await this.database.select<TransactionRow>("SELECT * FROM finance_transactions WHERE occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at DESC LIMIT ?", [`${month}-01`, `${nextMonth(month)}-01`, safeLimit]))
-      : await this.database.select<TransactionRow>("SELECT * FROM finance_transactions ORDER BY occurred_at DESC LIMIT ?", [safeLimit]);
-    return rows.map(rowToTransaction);
+      ? (assertMonth(month), await this.database.select<TransactionRow>("SELECT * FROM finance_ledger WHERE occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at DESC LIMIT ?", [`${month}-01`, `${nextMonth(month)}-01`, safeLimit]))
+      : await this.database.select<TransactionRow>("SELECT * FROM finance_ledger ORDER BY occurred_at DESC LIMIT ?", [safeLimit]);
+    return mergeCaptureTransactions(rows.map(rowToTransaction), await this.unmatchedCaptures()).filter(t => !month || t.occurredAt.startsWith(month))
+      .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)).slice(0, safeLimit);
   }
 
   async listCalendarExpenses(month: string): Promise<FinanceTransaction[]> {
     await this.initialize();
     assertMonth(month);
     const rows = await this.database.select<TransactionRow>(
-      "SELECT * FROM finance_transactions WHERE occurred_at >= ? AND occurred_at < ? AND kind = 'expense' ORDER BY occurred_at DESC",
-      [`${month}-01`, `${nextMonth(month)}-01`],
+      `SELECT * FROM finance_ledger WHERE (occurred_at >= ? AND occurred_at < ? AND kind = 'expense')
+        OR (kind = 'refund' AND related_transaction_id IN (SELECT id FROM finance_ledger WHERE occurred_at >= ? AND occurred_at < ? AND kind = 'expense')) ORDER BY occurred_at DESC`,
+      [`${month}-01`, `${nextMonth(month)}-01`, `${month}-01`, `${nextMonth(month)}-01`],
     );
-    return rows.map(rowToTransaction);
+    return financeConsumptionTransactions(mergeCaptureTransactions(rows.map(rowToTransaction), await this.unmatchedCaptures())).filter(t => t.occurredAt.startsWith(month));
+  }
+
+  async matchedCaptureIds(): Promise<string[]> {
+    await this.initialize();
+    return (await this.database.select<{ capture_id: string }>("SELECT capture_id FROM finance_import_capture_matches")).map(row => row.capture_id);
+  }
+
+  private async unmatchedCaptures(): Promise<FinanceCapture[]> {
+    const matched = new Set(await this.matchedCaptureIds());
+    return (await this.captures.list()).filter(event => !matched.has(event.id) && !matched.has(event.duplicate_of ?? ""));
   }
 
   async addManualTransaction(entry: FinanceManualEntry): Promise<FinanceTransaction> {
@@ -309,7 +342,7 @@ export class FinanceRepository {
 
   async listManualTransactions(limit = 100): Promise<FinanceTransaction[]> {
     await this.initialize();
-    return (await this.database.select<TransactionRow>("SELECT * FROM finance_transactions WHERE import_batch_id IS NULL ORDER BY occurred_at DESC LIMIT ?", [Math.max(1, Math.min(2000, Math.round(limit)))])).map(rowToTransaction);
+    return (await this.database.select<TransactionRow>("SELECT * FROM finance_ledger WHERE import_batch_id IS NULL AND id NOT LIKE 'finance-capture-%' ORDER BY occurred_at DESC LIMIT ?", [Math.max(1, Math.min(2000, Math.round(limit)))])).map(rowToTransaction);
   }
 
   async updateManualTransaction(id: string, entry: FinanceManualEntry) {
@@ -327,8 +360,14 @@ export class FinanceRepository {
 
   async deleteManualTransaction(id: string) {
     await this.initialize();
+    const existing = await this.database.select<{ id: string }>("SELECT id FROM finance_transactions WHERE id = ? AND import_batch_id IS NULL AND id NOT LIKE 'finance-capture-%'", [id]);
+    if (!existing.length) throw new Error("没有找到这笔补记账单，导入账单和交易通知请在原入口处理");
+    const linked = await this.database.select<{ total: number }>("SELECT COUNT(*) AS total FROM finance_transactions WHERE related_transaction_id = ?", [id]);
+    if (linked[0]?.total) throw new Error("这笔补记已关联退款，请先解除退款关联再删除");
     // The private journal's DELETE trigger records the tombstone atomically.
-    await this.database.execute("DELETE FROM finance_transactions WHERE id=? AND import_batch_id IS NULL", [id]);
+    const result = await this.database.execute(`DELETE FROM finance_transactions WHERE id = ? AND import_batch_id IS NULL AND id NOT LIKE 'finance-capture-%'
+      AND NOT EXISTS (SELECT 1 FROM finance_transactions related WHERE related.related_transaction_id = ?)`, [id, id]);
+    if (!result.rowsAffected) throw new Error("账单已变化，请刷新后重试");
   }
 
   async reconcileImportPreview(preview: FinanceImportPreview): Promise<FinanceImportPreview> {
@@ -342,14 +381,19 @@ export class FinanceRepository {
     const externalIds = new Set(existing.map((row) => row.external_transaction_id).filter(Boolean));
     const fingerprints = new Set(existing.map((row) => row.duplicate_fingerprint).filter(Boolean));
     const rules = await this.listRules();
+    const captures = await this.unmatchedCaptures();
     const records = preview.records.map((record) => {
       let next = { ...record };
-      const rule = rules.find((candidate) => candidate.matchKind === "merchant"
-        ? candidate.matchValue === record.merchantNormalized
-        : candidate.matchValue === normalizeFinanceMerchant(record.description));
+      const rule = rules.find(candidate => financeRuleMatches(candidate, record));
+      if (!next.categoryConfirmed) next.category = financeTransportCategory(record) ?? next.category;
       if (rule && next.decision === "candidate") {
-        next = { ...next, category: rule.category, budgetRole: rule.budgetRole, categoryConfirmed: true, budgetRoleConfirmed: true };
+        next = { ...next, category: rule.category, budgetRole: rule.budgetRole, categoryConfirmed: true, budgetRoleConfirmed: rule.budgetRole !== "unknown" };
       }
+      next.captureCandidates = captures.filter(event => event.state !== "ignored" && event.state !== "duplicate"
+        && event.amount_cents === record.amountCents && (event.kind === record.kind || event.kind === "unknown")
+        && (event.source === "wechat" ? record.source === "wechat" : true)
+        && Math.abs(Date.parse(event.received_at) - Date.parse(/(?:Z|[+-]\d{2}:\d{2})$/.test(record.occurredAt) ? record.occurredAt : `${record.occurredAt}+08:00`)) <= 600_000)
+        .map(event => ({ id: event.id, label: `${captureSourceLabel(event.source)} · ${new Date(event.received_at).toLocaleString("zh-CN")} · ${event.description || "尚未补用途"}` }));
       if (next.externalTransactionId && externalIds.has(next.externalTransactionId)) {
         return { ...next, decision: "duplicate" as const, reason: "相同来源和流水号已经存在", selected: false };
       }
@@ -414,15 +458,34 @@ export class FinanceRepository {
         createdAt: now,
         updatedAt: now,
       }));
+    const matchedIds = new Set<string>();
+    const captures = await this.captures.list();
+    for (let index = 0; index < selected.length; index++) {
+      const record = selected[index], transaction = transactions[index];
+      for (const captureId of record.matchedCaptureIds ?? []) {
+        if (matchedIds.has(captureId) || !record.captureCandidates?.some(candidate => candidate.id === captureId)) throw new Error("通知关联对象已变化或被重复选择，请重新预览");
+        matchedIds.add(captureId);
+        const event = captures.find(candidate => candidate.id === captureId)!;
+        if (event.transaction_id) {
+          const existing = (await this.database.select<TransactionRow>("SELECT * FROM finance_transactions WHERE id = ?", [event.transaction_id]))[0];
+          if (existing) {
+            // Retain judgments the user already made while replacing the amount/time with bill evidence.
+            if (existing.category_confirmed) { transaction.category = existing.category; transaction.categoryConfirmed = true; }
+            transaction.budgetRole = existing.budget_role; transaction.budgetRoleConfirmed = Boolean(existing.budget_role_confirmed);
+            transaction.projectId = existing.project_id; transaction.lifeDomain = existing.life_domain; transaction.valueRating = existing.value_rating;
+          }
+        }
+      }
+    }
     const existingExpenses = (await this.database.select<TransactionRow>(
-      "SELECT * FROM finance_transactions WHERE source = ? AND kind = 'expense' ORDER BY occurred_at DESC",
+      "SELECT * FROM finance_ledger WHERE source = ? AND kind = 'expense' ORDER BY occurred_at DESC",
       [reconciled.source],
     )).map(rowToTransaction);
     const candidateExpenses = [...existingExpenses, ...transactions.filter((transaction) => transaction.kind === "expense")];
     for (const transaction of transactions) {
       if (transaction.kind !== "refund") continue;
       const related = candidateExpenses
-        .filter((candidate) => candidate.amountCents === transaction.amountCents
+        .filter((candidate) => !matchedIds.has(candidate.id.replace(/^finance-capture-/, "")) && candidate.amountCents === transaction.amountCents
           && candidate.merchantNormalized === transaction.merchantNormalized
           && candidate.occurredAt <= transaction.occurredAt)
         .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))[0];
@@ -431,6 +494,9 @@ export class FinanceRepository {
     for (const transaction of transactions) {
       statements.push({ sql: insertTransactionSql, bindValues: transactionBindValues(transaction) });
     }
+    selected.forEach((record, index) => {
+      for (const captureId of record.matchedCaptureIds ?? []) statements.push({ sql: "INSERT INTO finance_import_capture_matches(capture_id,transaction_id) VALUES (?,?)", bindValues: [captureId, transactions[index].id] });
+    });
     await executeSqliteTransaction(this.database, statements);
     return batch;
   }
@@ -438,7 +504,12 @@ export class FinanceRepository {
   async rollbackBatch(batchId: string) {
     await this.initialize();
     if (!batchId.trim()) throw new Error("导入批次无效");
+    const linked = await this.database.select<{ total: number }>(`SELECT COUNT(*) AS total FROM finance_transactions
+      WHERE kind='refund' AND COALESCE(import_batch_id,'') <> ?
+      AND related_transaction_id IN (SELECT id FROM finance_transactions WHERE import_batch_id=?)`, [batchId, batchId]);
+    if (linked[0]?.total) throw new Error("这批付款已关联其他记录的退款，请先解除退款关联再撤销");
     await executeSqliteTransaction(this.database, [
+      { sql: "DELETE FROM finance_import_capture_matches WHERE transaction_id IN (SELECT id FROM finance_transactions WHERE import_batch_id = ?)", bindValues: [batchId] },
       { sql: "DELETE FROM finance_transactions WHERE import_batch_id = ?", bindValues: [batchId] },
       { sql: "DELETE FROM finance_import_batches WHERE id = ?", bindValues: [batchId] },
     ]);
@@ -458,26 +529,55 @@ export class FinanceRepository {
     }));
   }
 
+  async listRefundCandidates(transaction: FinanceTransaction): Promise<FinanceTransaction[]> {
+    await this.initialize();
+    return (await this.database.select<TransactionRow>(
+      `SELECT * FROM finance_ledger WHERE kind = 'expense' AND id <> ? AND occurred_at <= ? AND amount_cents >= ?
+        ORDER BY CASE WHEN id = ? THEN 0 WHEN merchant_normalized = ? THEN 1 ELSE 2 END, occurred_at DESC LIMIT 200`,
+      [transaction.id, transaction.occurredAt, transaction.amountCents, transaction.relatedTransactionId, transaction.merchantNormalized],
+    )).map(rowToTransaction);
+  }
+
   async updateClassification(
     transactionId: string,
     category: FinanceCategory,
     budgetRole: FinanceBudgetRole,
     remember: boolean,
-    context?: { projectId: string | null; lifeDomain: LifeDomain | null; valueRating: FinanceValueRating | null },
+    context?: { projectId: string | null; lifeDomain: LifeDomain | null; valueRating: FinanceValueRating | null;
+      kind?: FinanceTransactionKind; direction?: FinanceTransaction["direction"]; relatedTransactionId?: string | null },
   ) {
     await this.initialize();
-    if (!isCategory(category) || !isBudgetRole(budgetRole) || budgetRole === "unknown") throw new Error("请选择确定的分类和预算角色");
-    const rows = await this.database.select<TransactionRow>("SELECT * FROM finance_transactions WHERE id = ? LIMIT 1", [transactionId]);
+    if (!isCategory(category) || !isBudgetRole(budgetRole)) throw new Error("请选择有效的分类和消费性质");
+    const rows = await this.database.select<TransactionRow>("SELECT * FROM finance_ledger WHERE id = ? LIMIT 1", [transactionId]);
     const transaction = rows[0] ? rowToTransaction(rows[0]) : null;
     if (!transaction) throw new Error("没有找到这笔流水");
+    const kind = context?.kind ?? transaction.kind;
+    if (!["expense", "income", "refund", "transfer", "repayment", "adjustment"].includes(kind)) throw new Error("交易类型无效");
+    const direction = kind === "expense" || kind === "repayment" ? "out" : kind === "income" || kind === "refund" ? "in" : context?.direction ?? transaction.direction;
+    if (!["out", "in", "neutral"].includes(direction)) throw new Error("收支方向无效");
+    const relatedId = kind === "refund" ? (context?.relatedTransactionId === undefined ? transaction.relatedTransactionId : context.relatedTransactionId) : null;
+    if (relatedId) {
+      const original = (await this.database.select<TransactionRow>("SELECT * FROM finance_ledger WHERE id = ? AND kind = 'expense'", [relatedId]))[0];
+      const refunds = await this.database.select<{ total: number }>("SELECT COALESCE(SUM(amount_cents),0) AS total FROM finance_ledger WHERE kind = 'refund' AND related_transaction_id = ? AND id <> ?", [relatedId, transactionId]);
+      if (!original || relatedId === transactionId || original.occurred_at > transaction.occurredAt) throw new Error("请选择退款之前的原付款");
+      if ((refunds[0]?.total ?? 0) + transaction.amountCents > original.amount_cents) throw new Error("累计退款超过原付款金额，请核对关联");
+    }
+    if (transaction.kind === "expense" && kind !== "expense") {
+      const linked = await this.database.select<{ total: number }>("SELECT COUNT(*) AS total FROM finance_ledger WHERE kind = 'refund' AND related_transaction_id = ?", [transactionId]);
+      if (linked[0]?.total) throw new Error("这笔付款已关联退款，请先解除退款关联再更改类型");
+    }
+    const role = kind === "expense" ? budgetRole : "unknown";
     const now = this.clock().toISOString();
     const statements: SqliteStatement[] = [{
-      sql: "UPDATE finance_transactions SET category = ?, budget_role = ?, category_confirmed = 1, budget_role_confirmed = 1, project_id = ?, life_domain = ?, value_rating = ?, updated_at = ? WHERE id = ?",
-      bindValues: [category, budgetRole, context ? context.projectId : transaction.projectId, context ? context.lifeDomain : transaction.lifeDomain, context ? context.valueRating : transaction.valueRating, now, transactionId],
+      sql: "UPDATE finance_transactions SET category = ?, budget_role = ?, category_confirmed = 1, budget_role_confirmed = ?, kind = ?, direction = ?, related_transaction_id = ?, project_id = ?, life_domain = ?, value_rating = ?, updated_at = ? WHERE id = ?",
+      bindValues: [category, role, role !== "unknown" ? 1 : 0, kind, direction, relatedId, context ? context.projectId : transaction.projectId, context ? context.lifeDomain : transaction.lifeDomain, context ? context.valueRating : transaction.valueRating, now, transactionId],
     }];
-    if (remember) {
-      const matchKind = transaction.merchantNormalized ? "merchant" : "description";
-      const matchValue = transaction.merchantNormalized || normalizeFinanceMerchant(transaction.description);
+    if (transactionId.startsWith("finance-capture-")) statements.push({
+      sql: "UPDATE finance_capture_events SET kind = ?, category = ?, updated_at = ? WHERE transaction_id = ? AND state = 'completed'",
+      bindValues: [["expense", "income", "refund", "transfer"].includes(kind) ? kind : "unknown", category, now, transactionId],
+    });
+    if (remember && kind === "expense") {
+      const { matchKind, matchValue } = financeRuleMatch(transaction);
       if (matchValue) statements.push({
         sql: `INSERT INTO finance_category_rules(id, match_kind, match_value, category, budget_role, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -489,13 +589,40 @@ export class FinanceRepository {
     await executeSqliteTransaction(this.database, statements);
   }
 
+  async confirmClassificationGroup(month: string, groupKey: string, transactionIds: string[], category: FinanceCategory, remember: boolean) {
+    await this.initialize();
+    assertMonth(month);
+    if (!isCategory(category) || !transactionIds.length || new Set(transactionIds).size !== transactionIds.length) throw new Error("请选择要确认的流水和分类");
+    const rows = await this.database.select<TransactionRow>("SELECT * FROM finance_ledger WHERE occurred_at >= ? AND occurred_at < ? AND import_batch_id IS NOT NULL AND kind='expense'", [`${month}-01`, `${nextMonth(month)}-01`]);
+    const byId = new Map(rows.map(row => [row.id, rowToTransaction(row)]));
+    const transactions = transactionIds.map(id => byId.get(id));
+    if (transactions.some(transaction => !transaction || transaction.categoryConfirmed || financeReviewGroupKey(transaction) !== groupKey)) throw new Error("这组流水已变化，请刷新后确认");
+    const now = this.clock().toISOString();
+    const statements: SqliteStatement[] = transactionIds.map(id => ({
+      sql: "UPDATE finance_transactions SET category=?,category_confirmed=1,updated_at=? WHERE id=?",
+      bindValues: [category, now, id],
+    }));
+    if (remember) {
+      const { matchKind, matchValue } = financeRuleMatch(transactions[0]!);
+      if (matchValue) statements.push({
+        sql: `INSERT INTO finance_category_rules(id,match_kind,match_value,category,budget_role,created_at,updated_at) VALUES (?,?,?,?,'unknown',?,?)
+          ON CONFLICT(match_kind,match_value) DO UPDATE SET category=excluded.category,updated_at=excluded.updated_at`,
+        bindValues: [makeId("finance-rule"), matchKind, matchValue, category, now, now],
+      });
+    }
+    await executeSqliteTransaction(this.database, statements);
+    return transactionIds.length;
+  }
+
   async monthlySummary(month: string) {
     await this.initialize();
     assertMonth(month);
     const since = `${shiftMonth(month, -8)}-01`;
     const until = `${nextMonth(month)}-01`;
-    const rows = await this.database.select<TransactionRow>("SELECT * FROM finance_transactions WHERE occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at", [since, until]);
-    return summarizeFinanceMonth(month, rows.map(rowToTransaction), await this.getSettings());
+    const rows = await this.database.select<TransactionRow>(`SELECT * FROM finance_ledger WHERE (occurred_at >= ? AND occurred_at < ?)
+      OR (kind = 'refund' AND related_transaction_id IN (SELECT id FROM finance_ledger WHERE occurred_at >= ? AND occurred_at < ? AND kind = 'expense')) ORDER BY occurred_at`, [since, until, since, until]);
+    const captures = (await this.unmatchedCaptures()).filter(event => event.received_at >= since && event.received_at < until);
+    return summarizeFinanceMonth(month, mergeCaptureTransactions(rows.map(rowToTransaction), captures), await this.getSettings());
   }
 
   async getReport(month: string): Promise<FinanceAiReport | null> {
@@ -577,14 +704,14 @@ function budgetWriteStatement(budget: FinanceBudget): SqliteStatement {
   };
 }
 
-const insertTransactionSql = `INSERT INTO finance_transactions(
+export const insertTransactionSql = `INSERT INTO finance_transactions(
   id, occurred_at, amount_cents, kind, direction, account_id, source, external_transaction_id,
   merchant, merchant_normalized, description, payment_method, status, category, budget_role,
   category_confirmed, budget_role_confirmed, project_id, life_domain, import_batch_id,
   related_transaction_id, value_rating, duplicate_fingerprint, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
-function transactionBindValues(transaction: FinanceTransaction) {
+export function transactionBindValues(transaction: FinanceTransaction) {
   return [
     transaction.id, transaction.occurredAt, transaction.amountCents, transaction.kind,
     transaction.direction, transaction.accountId, transaction.source, transaction.externalTransactionId,

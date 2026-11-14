@@ -1,0 +1,284 @@
+@layer pages.editor {
+/* Note editor readability and history controls --------------------------- */
+
+.document-stage .workbench-editor {
+  grid-template-rows: 62px minmax(0, 1fr);
+}
+
+.document-stage .editor-toolbar {
+  border-bottom-color: rgba(75, 84, 143, 0.2);
+  padding-inline: clamp(18px, 3.5vw, 52px);
+  background: rgba(235, 238, 248, 0.94);
+  box-shadow: 0 8px 30px rgba(42, 47, 91, 0.09);
+  backdrop-filter: blur(16px) saturate(1.08);
+}
+
+.theme-magic .document-stage .editor-toolbar,
+.theme-immersive .document-stage .editor-toolbar {
+  background: rgba(231, 235, 248, 0.9);
+}
+
+.document-stage .editor-toolbar > div {
+  gap: 12px;
+}
+
+.document-stage .editor-toolbar button {
+  min-height: 40px;
+  border-color: rgba(75, 88, 145, 0.18);
+  border-radius: 9px;
+  padding: 9px 13px;
+  background: rgba(255, 255, 255, 0.62);
+  color: #4d5b8c;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.document-stage .editor-toolbar button:hover:not(:disabled) {
+  border-color: rgba(75, 88, 145, 0.34);
+  background: rgba(255, 255, 255, 0.88);
+  color: #344477;
+}
+
+.document-stage .editor-toolbar .ui-button--primary {
+  min-width: 72px;
+  border-color: #5668a5;
+  background: linear-gradient(135deg, #53639d, #6f81bd);
+  box-shadow: 0 5px 14px rgba(72, 86, 148, 0.2);
+  color: #fff;
+}
+
+.document-stage .editor-toolbar span {
+  color: #505a7d;
+  font-size: 15px;
+}
+
+.document-stage .editor-toolbar small {
+  color: #646d88;
+  font-size: 12px;
+}
+
+.editor-toolbar-actions,
+.editor-history-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.document-stage .editor-history-actions button {
+  min-width: 76px;
+}
+
+.document-stage .editor-history-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.document-stage .editor-scroll {
+  padding: 28px 0 58px;
+}
+
+.document-stage .immersive-editor .editor-paper {
+  width: min(960px, calc(100% - 64px));
+  max-width: none;
+  border: 1px solid rgba(75, 84, 143, 0.18);
+  border-radius: 22px;
+  padding: clamp(38px, 5vh, 58px) clamp(38px, 5.5vw, 72px) 56px;
+  background: rgba(249, 250, 253, 0.93);
+  box-shadow: 0 24px 70px rgba(36, 42, 82, 0.16);
+  backdrop-filter: blur(14px) saturate(1.04);
+}
+
+.theme-immersive .document-stage .immersive-editor .editor-paper {
+  background: rgba(247, 248, 253, 0.91);
+}
+
+.document-stage .editor-title {
+  border-bottom-color: rgba(75, 84, 143, 0.18);
+  color: #303653;
+}
+
+.document-stage .editor-title::placeholder,
+.document-stage .editor-body::placeholder {
+  color: #7f869e;
+}
+
+.document-stage .editor-body {
+  color: #41485f;
+  font-size: 17px;
+  line-height: 1.92;
+}
+
+.document-stage .markdown-toolbar {
+  gap: 8px;
+  margin-bottom: -4px;
+  border-bottom-color: rgba(75, 84, 143, 0.15);
+  padding-bottom: 12px;
+}
+
+.document-stage .markdown-toolbar button {
+  min-width: 52px;
+  min-height: 36px;
+  border-color: rgba(75, 88, 145, 0.2);
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: #eff1f8;
+  color: #4e5a83;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.document-stage .markdown-toolbar button:hover {
+  border-color: rgba(75, 88, 145, 0.4);
+  background: #e6e9f5;
+  color: #344477;
+}
+
+.document-stage .markdown-toolbar span {
+  color: #666e87;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+@media (max-width: 760px) {
+  .document-stage .workbench-editor {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .document-stage .editor-toolbar {
+    min-height: 62px;
+    gap: 10px;
+    padding-block: 8px;
+  }
+
+  .document-stage .editor-toolbar small,
+  .document-stage .editor-history-actions button:nth-child(2) {
+    display: none;
+  }
+
+  .document-stage .editor-history-actions button {
+    min-width: auto;
+  }
+
+  .document-stage .editor-scroll {
+    padding-top: 16px;
+  }
+
+  .document-stage .immersive-editor .editor-paper {
+    width: calc(100% - 28px);
+    border-radius: 16px;
+    padding: 30px 22px 42px;
+  }
+
+  .document-stage .metadata-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .document-stage .markdown-toolbar span {
+    display: none;
+  }
+}
+
+/* Immersive note composer ------------------------------------------------ */
+
+.document-stage .editor-scroll {
+  padding: 20px 0 40px;
+}
+
+.document-stage .editor-writing-pane {
+  display: grid;
+  min-width: 0;
+  gap: 18px;
+}
+
+.document-stage .markdown-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 0;
+  padding-bottom: 13px;
+}
+
+.markdown-format-actions,
+.editor-preview-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.document-stage .markdown-format-actions button {
+  min-width: auto;
+}
+
+.document-stage .editor-preview-toggle {
+  flex: 0 0 auto;
+  border-radius: 10px;
+  padding: 3px;
+  background: rgba(224, 228, 242, 0.8);
+}
+
+.document-stage .editor-preview-toggle button {
+  min-width: auto;
+  min-height: 32px;
+  border: 0;
+  padding: 6px 10px;
+  background: transparent;
+  color: #68718d;
+  font-size: 12px;
+}
+
+.document-stage .editor-preview-toggle button.active {
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(49, 58, 105, 0.12);
+  color: #3f5085;
+}
+
+.document-stage .editor-body {
+  display: block;
+  height: clamp(560px, 70vh, 780px);
+  min-height: 560px;
+  border: 1px solid rgba(75, 84, 143, 0.17);
+  border-radius: 12px;
+  padding: 18px 20px;
+  resize: vertical;
+  background: rgba(255, 255, 255, 0.64);
+  scrollbar-color: rgba(75, 88, 145, 0.24) transparent;
+}
+
+.document-stage .editor-body:focus {
+  border-color: rgba(91, 108, 169, 0.5);
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 0 0 3px rgba(91, 108, 169, 0.1);
+}
+
+.editor-live-preview .desktop-markdown {
+  border-top-color: rgba(75, 84, 143, 0.14);
+  padding-top: 22px;
+  color: #4b5268;
+  font-size: 16px;
+  line-height: 1.88;
+}
+
+.editor-live-preview .desktop-markdown p {
+  white-space: pre-wrap;
+}
+
+.editor-live-preview .desktop-markdown img {
+  max-height: 520px;
+  object-fit: contain;
+}
+
+@media (max-width: 650px) {
+  .document-stage .markdown-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .document-stage .editor-body {
+    height: 520px;
+    min-height: 520px;
+  }
+}
+
+}

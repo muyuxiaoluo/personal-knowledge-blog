@@ -1,0 +1,18 @@
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+const adb = join(process.env.ANDROID_HOME || 'C:/Users/HP/AppData/Local/Android/Sdk', 'platform-tools/adb.exe');
+const devices = execFileSync(adb, ['devices'], { encoding: 'utf8' }).split(/\r?\n/).filter(l => /^emulator-\d+\s+device$/.test(l));
+if (devices.length !== 1) throw new Error('Requires exactly one Android emulator');
+const serial = devices[0].split(/\s/)[0];
+const users = execFileSync(adb, ['-s', serial, 'shell', 'pm', 'list', 'users'], { encoding: 'utf8' });
+if (!users.includes('UserInfo{10:FinanceCaptureTest:')) throw new Error('Requires the isolated FinanceCaptureTest user 10');
+const script = readFileSync(process.argv[2], 'utf8');
+const notificationArgs = process.argv.includes('--check-notifications') ? ['-e', 'checkNotifications', 'true'] : [];
+const unbindArgs = process.argv.includes('--unbind-listener') ? ['-e', 'unbindListener', 'true'] : [];
+const result = execFileSync(adb, ['-s', serial, 'shell', 'am', 'instrument', '-w', '-r', '--user', '10', '-e', 'script', Buffer.from(script).toString('base64'), ...notificationArgs, ...unbindArgs, 'com.muyuxiaoluo.workbenchchecks/.CompanionChecks'], { encoding: 'utf8', timeout: 100000 });
+const encoded = result.match(/INSTRUMENTATION_RESULT: resultBase64=(\S+)/);
+if (!encoded) throw new Error(result);
+const report = JSON.parse(Buffer.from(encoded[1], 'base64').toString('utf8'));
+console.log(JSON.stringify(report, null, 2));
+if (!report.ok) process.exitCode = 1;

@@ -31,6 +31,12 @@ export function matchingAiKeywords(item: Pick<AiBriefItem, "title" | "summary" |
   return normalizeAiHighlightKeywords(keywords).filter((keyword) => content.includes(keyword.toLocaleLowerCase("zh-CN")));
 }
 
+export function prioritizeAiBriefItems(items: AiBriefItem[], keywords: string[]) {
+  const highlighted: AiBriefItem[] = [], regular: AiBriefItem[] = [];
+  for (const item of items) (matchingAiKeywords(item, keywords).length ? highlighted : regular).push(item);
+  return [...highlighted, ...regular];
+}
+
 export function rainVerdict(snapshot: WeatherSnapshot, nowLocal = snapshot.current.time): RainVerdict {
   const today = nowLocal.slice(0, 10);
   const currentHour = `${nowLocal.slice(0, 13)}:00`;

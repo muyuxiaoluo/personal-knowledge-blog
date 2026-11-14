@@ -42,14 +42,14 @@
 .ui-button--primary {
   border-color: var(--ui-primary);
   background: var(--ui-primary);
-  color: #fff;
+  color: var(--ui-on-primary, #fff);
   box-shadow: none;
 }
 
 .ui-button--primary:hover:not(:disabled) {
   border-color: var(--ui-primary-hover);
   background: var(--ui-primary-hover);
-  color: #fff;
+  color: var(--ui-on-primary, #fff);
 }
 
 .ui-button--danger {

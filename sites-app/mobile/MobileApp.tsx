@@ -6,7 +6,10 @@ import type { FinanceTransaction } from "../app/finance-types";
 import { CompanionAccount, PrivateRequestError, PrivateSyncClient } from "../app/data/private-sync-client";
 import { systemSecrets, normalizePrivateServer } from "../app/data/secret-store";
 import { PrivateSyncPanel } from "../app/PrivateSyncPanel";
-type Page = "home" | "health" | "expense" | "account";
+import { MealCapture } from "./MealCapture";
+import { FinanceCaptureInbox } from "../app/FinanceCaptureInbox";
+import { captureNative, FinanceCaptureSettings } from "./FinanceCaptureSettings";
+type Page = "home" | "health" | "meal" | "expense" | "account" | "captures";
 export function MobileApp() {
   const [runtime, setRuntime] = useState<MobileRuntime | null>(null);
   const [error, setError] = useState(false);
@@ -23,20 +26,23 @@ function Companion({ runtime }: { runtime: MobileRuntime }) {
   const [server, setServer] = useState("https://mind.47-108-88-117.sslip.io");
   const [username, setUsername] = useState<string | null>(null);
   const [status, setStatus] = useState("仅保存在本机");
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState(runtime.captureReady ? "" : "交易通知服务初始化未完成，可到账户设置重试；其他记录仍可使用。");
   const [pending, setPending] = useState(0);
+  const [photoSyncEnabled, setPhotoSyncEnabled] = useState(false);
+  const [captureCount, setCaptureCount] = useState(0);
   const account = useMemo(() => new CompanionAccount(server, runtime.privateRepository, systemSecrets), [server, runtime]);
   const client = useMemo(() => username ? new PrivateSyncClient(runtime.privateRepository, server, username, () => account.token(), systemSecrets) : null, [runtime, server, username, account]);
-  const refresh = useCallback(async () => { setDays(await runtime.health.listDaily("", 14)); setExpenses(await runtime.finance.listManualTransactions(100)); const s = await runtime.privateRepository.status(); setPending(s.pending); }, [runtime]);
-  const sync = useCallback(async () => {
+  const refresh = useCallback(async () => { setDays(await runtime.health.listDaily("", 14)); setExpenses(await runtime.finance.listManualTransactions(100)); setCaptureCount((await runtime.finance.captures.list()).filter(e => e.state === "pending").length); const s = await runtime.privateRepository.status(); setPending(s.pending); setPhotoSyncEnabled(s.enabled && await runtime.privateRepository.meta("photo_enabled") === "1"); }, [runtime]);
+  const sync = useCallback(async (afterSave = false) => {
     const s = await runtime.privateRepository.status();
+    setPhotoSyncEnabled(s.enabled && await runtime.privateRepository.meta("photo_enabled") === "1");
     if (!s.enabled) { setStatus(navigator.onLine ? "私人同步未开启" : "离线 · 仅保存在本机"); return; }
     if (!navigator.onLine) { setStatus("离线"); return; }
-    if (page === "health" || page === "expense") { setStatus("待同步 · 保存后自动同步"); return; }
+    if (!afterSave && (page === "health" || page === "expense" || page === "meal" || page === "captures")) { setStatus("待同步 · 返回后自动同步"); return; }
     if (!client) { setStatus("待同步 · 请登录"); return; }
     setStatus("正在同步…");
     try { await client.sync(); const next = await runtime.privateRepository.status(); setStatus(next.conflicts ? "有冲突 · 请到账户设置处理" : next.pending ? "待同步" : "已同步"); await refresh(); }
-    catch { setStatus("同步失败 · 可重试"); }
+    catch (error) { setStatus(error instanceof PrivateRequestError ? error.message : "同步失败 · 可重试"); }
   }, [client, runtime, refresh, page]);
   useEffect(() => { void runtime.privateRepository.meta("server_url").then(v => { if (v) setServer(v); }); void refresh(); }, [runtime, refresh]);
   useEffect(() => { let active = true; void account.restore().then(() => { if (active) setUsername(account.session?.username ?? null); }).catch(() => { if (active) setStatus("离线保存可用 · 登录待恢复"); }); return () => { active = false; }; }, [account]);
@@ -53,24 +59,36 @@ function Companion({ runtime }: { runtime: MobileRuntime }) {
   }, [sync]);
   useEffect(() => { const back = () => { setPage("home"); }; window.addEventListener("popstate", back); return () => window.removeEventListener("popstate", back); }, []);
   const go = (next: Page) => { if (page === "home") history.pushState({ page: next }, ""); setPage(next); setNotice(""); window.scrollTo(0, 0); };
+  useEffect(() => {
+    const check = () => { if (!document.hidden) void captureNative.openRequest().then(result => { if (result.open) { history.pushState({ page: "captures" }, ""); setPage("captures"); } }).catch(() => setNotice("补全入口未连接，可从首页打开交易待补全")); };
+    check(); const timer = setInterval(check, 1500); document.addEventListener("visibilitychange", check);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", check); };
+  }, []);
+  useEffect(() => { const timer = setInterval(() => { if (!document.hidden && page === "home") void refresh(); }, 5000); return () => clearInterval(timer); }, [page, refresh]);
   const saved = async () => { setNotice("已保存在本机"); await refresh(); history.back(); void sync(); };
   return <main>
-    <header><div><span className="eyebrow">PERSONAL WORKBENCH</span><h1>{page === "home" ? "随手记，慢慢来" : page === "health" ? "记录健康" : page === "expense" ? "补记消费" : "账户与私人同步"}</h1></div>{page !== "home" && <button className="text-button" onClick={() => history.back()}>返回</button>}</header>
+    <header><div><span className="eyebrow">PERSONAL WORKBENCH</span><h1>{page === "home" ? "个人工作台" : page === "health" ? "记录健康" : page === "meal" ? "记一餐" : page === "expense" ? "补记消费" : page === "captures" ? "交易待补全" : "账户与私人同步"}</h1></div>{page !== "home" && <button className="text-button" onClick={() => history.back()}>返回</button>}</header>
     <div className="sync-strip" role="status"><span>{status}{pending > 0 ? ` · ${pending} 条待同步` : ""}</span><button onClick={() => void sync()}>立即同步</button></div>
     {notice && <p role="status">{notice}</p>}
     {page === "home" && <>
-      <p className="intro">留下今天的一点记录。没有网络也可以。</p>
+      <p className="intro">健康、餐食与消费，都记在这里。没有网络也可以。</p>
+      {!runtime.captureReady && <p role="status">交易通知暂未就绪，餐食与健康记录可以正常使用。</p>}
+      <button className="record" onClick={() => go("captures")}><strong>交易待补全{captureCount ? ` · ${captureCount} 条` : ""}</strong><span>自动留下金额，补一句用途</span></button>
+      <button className="entry food" onClick={() => go("meal")}><span>◎</span><strong>记一餐</strong><small>拍照或从相册选图</small></button>
       <div className="entry-grid"><button className="entry health" onClick={() => { setDate(today()); go("health"); }}><span>☀</span><strong>记录健康</strong><small>睡眠、活动与三餐</small></button><button className="entry money" onClick={() => { setExpense(null); go("expense"); }}><span>＋</span><strong>补记消费</strong><small>银行卡、现金与其他</small></button></div>
       <h2>最近健康记录</h2>{days.length === 0 && <p className="muted">从今天开始，记一点就好。</p>}{days.map(day => <button className="record" key={day.date} onClick={() => { setDate(day.date); go("health"); }}><strong>{day.date}</strong><span>{day.sleepMinutes ? `睡眠 ${Math.floor(day.sleepMinutes / 60)} 小时 ${day.sleepMinutes % 60} 分钟` : "查看当天记录"} · {day.steps ?? "—"} 步</span></button>)}
       <h2>手工消费</h2>{expenses.length === 0 && <p className="muted">这里只显示手工补记，不显示批量账单。</p>}{expenses.map(item => <button className="record" key={item.id} onClick={() => { setExpense(item); go("expense"); }}><strong>{item.description} <b>¥{(item.amountCents / 100).toFixed(2)}</b></strong><span>{item.occurredAt.replace("T", " ").slice(0, 16)} · {item.source === "cash" ? "现金" : item.source === "custom" ? "银行卡 / 其他" : item.source === "wechat" ? "微信手工记录" : "支付宝手工记录"}</span></button>)}
       <button className="account-entry" onClick={() => go("account")}>账户与私人同步设置 →</button>
     </>}
     {page === "health" && <HealthForm repository={runtime.health} date={date} onDate={setDate} onSaved={saved} />}
+    {page === "meal" && <MealCapture repository={runtime.health.mealPhotos} syncEnabled={photoSyncEnabled} onSaved={async () => { await saved(); setNotice(photoSyncEnabled ? "餐食照片已保存在手机，联网后加密同步。" : "餐食照片已保存在手机；可到账户设置开启照片同步。"); }} />}
     {page === "expense" && <ExpenseForm repository={runtime.finance} transaction={expense} onSaved={saved} />}
     {page === "account" && <>
+      <FinanceCaptureSettings />
       <AccountForm account={account} server={server} username={username} onServer={async value => { const v = normalizePrivateServer(value); await runtime.privateRepository.setMeta("server_url", v); setUsername(null); setServer(v); }} onLogin={setUsername} />
       <PrivateSyncPanel repository={runtime.privateRepository} server={server} username={username} mobile onSync={sync} token={() => account.token()} />
     </>}
+    {page === "captures" && <FinanceCaptureInbox repository={runtime.finance.captures} onChanged={async () => { await refresh(); setNotice("已保存在本机"); await sync(true); }} />}
   </main>;
 }
 function AccountForm({ account, server, username, onServer, onLogin }: { account: CompanionAccount; server: string; username: string | null; onServer: (s: string) => Promise<void>; onLogin: (s: string | null) => void }) {

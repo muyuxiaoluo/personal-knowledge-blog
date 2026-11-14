@@ -8,7 +8,8 @@
   "scripts": {
     "mobile:dev": "vite --config mobile/vite.config.ts",
     "mobile:build": "tsc -p mobile/tsconfig.json && vite build --config mobile/vite.config.ts",
-    "android:build": "powershell -NoProfile -File scripts/build-android-debug.ps1",
+    "android:build": "powershell -NoProfile -File scripts/build-android.ps1",
+    "android:build:debug": "powershell -NoProfile -File scripts/build-android.ps1 -DebugBuild",
     "content:generate": "node scripts/generate-content.mjs",
     "dev": "npm run tauri:dev",
     "desktop:dev": "vite --config desktop/vite.config.ts",
@@ -16,9 +17,11 @@
     "desktop:build": "tsc -p desktop/tsconfig.json && vite build --config desktop/vite.config.ts",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
+    "dev:windows": "node scripts/dev-windows.mjs",
     "tauri:build": "tauri build",
     "test": "node --require ./scripts/node-user-info-shim.cjs ./node_modules/tsx/dist/cli.mjs --test tests/*.test.ts",
     "check:ui": "node scripts/check-ui-primitives.mjs",
+    "check:aihot": "cargo test --manifest-path src-tauri/Cargo.toml dashboard::tests::live_aihot_contract --lib -- --ignored --nocapture",
     "lint": "npm run check:ui && tsc -p desktop/tsconfig.json",
     "check": "npm run lint && npm test"
   },

@@ -1,0 +1,24 @@
+# The companion proposes workbench actions. The host validates and executes them.
+# Do not mount the minimal profile's unrestricted terminal or telemetry producers.
+- id: persistent-pwsh
+  disabled: true
+- id: persistent-bash
+  disabled: true
+- id: terminal-pwsh
+  disabled: true
+- id: terminal-bash
+  disabled: true
+- id: pty
+  disabled: true
+- id: subprocess
+  disabled: true
+- id: tool-fs
+  disabled: true
+- id: tool-working-directory
+  disabled: true
+- id: session-log-deepseek
+  disabled: true
+- id: plugin-package-inventory-deepseek
+  disabled: true
+- id: session-title
+  disabled: true

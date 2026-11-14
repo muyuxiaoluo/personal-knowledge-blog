@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "companion",
+  "description": "本地桌宠窗口：拖动与助手交互，不直接访问数据库或外部网页",
+  "platforms": ["windows", "macOS", "linux"],
+  "windows": ["companion"],
+  "permissions": ["core:default", "core:window:allow-start-dragging", "dialog:allow-open"]
+}

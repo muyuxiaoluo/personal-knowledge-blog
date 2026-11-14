@@ -2,7 +2,7 @@ import "./styles/dashboard.css";
 import { isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { eventOccursOn, matchingAiKeywords, morningBriefRefreshSlot, nextCalendarOccurrences, normalizeAiHighlightKeywords, rainVerdict, zonedIsoMinute } from "../app/dashboard-helpers";
+import { eventOccursOn, morningBriefRefreshSlot, nextCalendarOccurrences, normalizeAiHighlightKeywords, rainVerdict, zonedIsoMinute } from "../app/dashboard-helpers";
 import type {
   AiBriefSnapshot,
   CalendarEvent,
@@ -18,6 +18,7 @@ import type { DashboardRepository } from "../app/data/dashboard-repository";
 import { officialHolidayDays, officialHolidayOn, officialHolidaySource } from "../app/official-holidays";
 import { Button, SelectMenu } from "./DesktopControls";
 import { desktopApi } from "./integrationApi";
+import { HomeAiHighlights } from "./HomeAiHighlights";
 
 type SharedProps = {
   today: string;
@@ -199,10 +200,10 @@ export function MorningInformation({ today, repository, preferences, onSavePrefe
     if (!preferences.modules.aiHot || !isTauri() || aiRequestActive.current) return;
     aiRequestActive.current = true;
     setAiBusy(true);
-    setAiError("");
     try {
       const cached = await repository.getCache<AiBriefSnapshot>("aihot:brief");
-      const result = await desktopApi.dashboard.aiBrief(cached?.etag ?? "");
+      const refreshAll = manual || cached?.value.warnings?.length || cached?.value.attribution.url !== "https://aihot.news";
+      const result = await desktopApi.dashboard.aiBrief(refreshAll ? "" : cached?.etag ?? "");
       if (result.notModified && cached) {
         await repository.touchCache("aihot:brief", result.fetchedAt, result.maxAgeSeconds);
         setAi(cached.value);
@@ -212,7 +213,8 @@ export function MorningInformation({ today, repository, preferences, onSavePrefe
         setAi(result.value);
         setAiCache(saved);
       }
-      if (manual) onNotice("AI 热点已经更新。 ");
+      setAiError("");
+      if (manual) onNotice(result.value?.warnings?.length ? `AI 动态已更新，部分内容暂不可用：${result.value.warnings.join("；")}` : "AI 热点已经更新。 ");
     } catch (error) {
       setAiError(errorMessage(error, "AI 热点暂时无法更新"));
       if (manual) onNotice(errorMessage(error, "AI 热点暂时无法更新"));
@@ -302,13 +304,6 @@ export function MorningInformation({ today, repository, preferences, onSavePrefe
     };
   }, [aiCache, brief, preferences.modules.aiHot, preferences.modules.morningBrief, refreshAi, refreshBrief]);
 
-  const prioritizedItems = useMemo(() => {
-    const items = ai?.items ?? [];
-    const highlighted = items.filter((item) => matchingAiKeywords(item, preferences.aiHighlightKeywords).length > 0);
-    const regular = items.filter((item) => matchingAiKeywords(item, preferences.aiHighlightKeywords).length === 0);
-    return [...highlighted, ...regular].slice(0, 5);
-  }, [ai, preferences.aiHighlightKeywords]);
-
   if (!preferences.modules.aiHot && !preferences.modules.morningBrief) return null;
 
   async function saveItem(item: AiBriefSnapshot["items"][number]) {
@@ -324,31 +319,21 @@ export function MorningInformation({ today, repository, preferences, onSavePrefe
   return (
     <div className="morning-information-grid">
       {preferences.modules.aiHot && (
-        <section className="workspace-card morning-ai-card">
+        <section className="workspace-card morning-ai-card" data-home-tile data-news-density="short">
           <header className="morning-card-heading">
-            <div><span>AI 动态</span><strong>过去 24 小时值得留意</strong></div>
+            <div><span>AI 动态 · {ai?.items.length ?? 0} 条</span><strong>关注速览</strong></div>
             <nav className="morning-information-actions">
               <Button variant="ghost" size="small" type="button" disabled={aiBusy} onClick={() => void refreshAi(true)}>{aiBusy ? "更新中…" : "刷新"}</Button>
               <Button variant="ghost" size="small" type="button" onClick={() => setKeywordOpen(true)}>关注词{preferences.aiHighlightKeywords.length ? ` ${preferences.aiHighlightKeywords.length}` : ""}</Button>
               {preferences.modules.morningBrief && <button className="morning-brief-header-entry" disabled={briefBusy} onClick={() => brief ? setBriefOpen(true) : void refreshBrief(true)}><b>60s 早报</b><small>{brief ? `${formatShortDate(brief.date)} · ${brief.news.length} 条` : briefBusy ? "获取中…" : "点击获取"}</small></button>}
             </nav>
           </header>
-          {ai?.daily && <button className="ai-daily-ribbon" onClick={() => void openExternal(ai.daily?.url || ai.attribution.url)}><span>AIHOT 日报 · {formatShortDate(ai.daily.date)}</span><p>{ai.daily.lead || "打开今天的 AI 日报"}</p></button>}
-          <div className="ai-brief-list">
-            {prioritizedItems.length ? prioritizedItems.map((item, index) => {
-              const matches = matchingAiKeywords(item, preferences.aiHighlightKeywords);
-              return <article key={item.id} className={matches.length ? "highlighted" : ""}>
-                <i>{index + 1}</i>
-                <div>{matches.length > 0 && <mark className="ai-interest-mark">★ 关注 · {matches.join(" / ")}</mark>}<button className="ai-item-link" disabled={!item.aihotUrl && !item.originalUrl} onClick={() => void openExternal(item.aihotUrl || item.originalUrl)}><strong>{item.title}</strong><p>{item.summary || item.reason}</p><small>{item.sourceName || "AIHOT"} · {formatPublished(item.publishedAt)}</small></button></div>
-                <nav><Button wrap variant="ghost" size="small" type="button" disabled={!item.originalUrl} onClick={() => void openExternal(item.originalUrl)}>原文</Button><Button variant="secondary" type="button" disabled={savedIds.has(item.id)} onClick={() => void saveItem(item)}>{savedIds.has(item.id) ? "已收藏" : "收藏"}</Button></nav>
-              </article>;
-            }) : <MorningEmpty busy={aiBusy} error={aiError} label="暂时没有可显示的 AI 热点" />}
-          </div>
-          <MorningSourceStatus cache={aiCache} error={aiError} autoLabel="每 30 分钟自动更新" name={ai?.attribution.name || "AIHOT"} url={ai?.attribution.url || "https://aihot.virxact.com"} />
+          <HomeAiHighlights snapshot={ai} keywords={preferences.aiHighlightKeywords} savedIds={savedIds} busy={aiBusy} error={aiError} onRefresh={() => void refreshAi(true)} onOpenExternal={openExternal} onSave={saveItem} sourceStatus={<MorningSourceStatus cache={aiCache} error={aiError} warning={ai?.warnings?.join("；")} autoLabel="每 30 分钟自动更新" name={ai?.attribution.name || "AIHOT"} url={ai?.attribution.url || "https://aihot.news"} />} />
+          <MorningSourceStatus cache={aiCache} error={aiError} warning={ai?.warnings?.join("；")} autoLabel="每 30 分钟自动更新" name={ai?.attribution.name || "AIHOT"} url={ai?.attribution.url || "https://aihot.news"} />
         </section>
       )}
       {preferences.modules.morningBrief && !preferences.modules.aiHot && (
-        <section className="workspace-card morning-news-card">
+        <section className="workspace-card morning-news-card" data-home-tile data-news-density="short">
           <header className="morning-card-heading"><div><span>每日早报</span><strong>{brief ? `${formatShortDate(brief.date)} · 60 秒读懂世界` : "60 秒读懂世界"}</strong></div><Button variant="ghost" size="small" type="button" disabled={briefBusy} onClick={() => void refreshBrief(true)}>{briefBusy ? "更新中…" : "刷新"}</Button></header>
           {brief ? <button className="morning-brief-launcher" onClick={() => setBriefOpen(true)}>
             <i>60″</i><span><b>{brief.news.length} 条新闻已经整理好</b><small>{brief.news[0]}</small><em>{brief.date === beijingClock().date ? "阅读今日早报" : "阅读最近一期"} →</em></span>
@@ -402,7 +387,7 @@ function WeatherCard({ snapshot, cache, busy, error, onChooseCity, onRefresh }: 
   onRefresh: () => void;
 }) {
   const verdict = snapshot ? rainVerdict(snapshot, zonedIsoMinute(new Date(), snapshot.location.timezone)) : null;
-  return <section className="workspace-card morning-weather-card">
+  return <section className="workspace-card morning-weather-card" data-home-tile>
     <header className="morning-card-heading"><div><span>今日天气</span><strong>{snapshot?.location.name || "选择你的城市"}</strong></div><nav>{snapshot && <Button variant="ghost" size="small" type="button" disabled={busy} onClick={onRefresh}>{busy ? "更新中…" : "刷新"}</Button>}<Button variant="ghost" size="small" type="button" onClick={onChooseCity}>{snapshot ? "换城市" : "选择城市"}</Button></nav></header>
     {snapshot ? <div className="weather-compact-body">
       <div className="weather-now"><i>{weatherIcon(snapshot.current.weatherCode, snapshot.current.isDay)}</i><div><strong>{Math.round(snapshot.current.temperature)}°</strong><span>{weatherLabel(snapshot.current.weatherCode)} · 体感 {Math.round(snapshot.current.apparentTemperature)}°</span></div></div>
@@ -416,7 +401,7 @@ function WeatherCard({ snapshot, cache, busy, error, onChooseCity, onRefresh }: 
 function CalendarCard({ today, events, onOpenCalendar, onManage }: { today: string; events: CalendarEvent[]; onOpenCalendar: () => void; onManage: (date: string, event?: CalendarEvent) => void }) {
   const upcoming = useMemo(() => combinedUpcoming(events, today), [events, today]);
   const holiday = officialHolidayOn(today);
-  return <section className="workspace-card morning-calendar-card">
+  return <section className="workspace-card morning-calendar-card" data-home-tile>
     <header className="morning-card-heading"><div><span>今日日历</span><strong>{formatCalendarToday(today)}</strong></div><nav><Button variant="ghost" size="small" type="button" onClick={onOpenCalendar}>查看月历</Button><Button variant="ghost" size="small" type="button" onClick={() => onManage(today)}>＋ 标记</Button></nav></header>
     <div className="calendar-compact-body"><div className="calendar-today-tile"><span>{weekday(today)}</span><strong>{Number(today.slice(8))}</strong><small>{holiday ? `${holiday.name} · ${holiday.kind === "workday" ? "调休上班" : "休息"}` : "普通工作日"}</small></div><CalendarUpcoming upcoming={upcoming} onManage={onManage} /></div>
     <footer className="calendar-source"><Button wrap variant="ghost" size="small" type="button" onClick={() => void openExternal(officialHolidaySource.url)}>法定节假日来源：{officialHolidaySource.label} ↗</Button></footer>
@@ -521,7 +506,7 @@ function AiKeywordModal({ keywords, onClose, onSave }: {
 
   return <div className="morning-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="morning-modal ai-keyword-modal" role="dialog" aria-modal="true" aria-label="设置 AI 关注词"><header><div><span>AI 动态</span><h2>设置关注词</h2></div><Button variant="secondary" size="small" iconOnly type="button" onClick={onClose} aria-label="关闭">×</Button></header><form onSubmit={submit}>
     <label><span>每行一个，也可以用逗号分隔</span><textarea autoFocus maxLength={360} value={value} onChange={(event) => setValue(event.target.value)} placeholder={"新模型\n模型发布\n开源"} /></label>
-    <p>关注词会匹配标题、摘要、推荐理由和分类。命中的资讯会排在前面并高亮，其余资讯仍会保留。</p>
+    <p>关注词会匹配标题、摘要、推荐理由和分类。首页最多显示 3 条命中资讯，其余内容可点击“查看全部动态”阅读。</p>
     <div className="ai-keyword-preview"><strong>{normalized.length}/12 个关注词</strong><div>{normalized.length ? normalized.map((keyword) => <span key={keyword}>{keyword}</span>) : <small>尚未设置关注词</small>}</div></div>
     {error && <p className="morning-modal-message" role="status">{error}</p>}
     <footer><Button variant="secondary" type="button" onClick={() => setValue("")}>清空</Button><Button variant="secondary" type="button" onClick={onClose}>取消</Button><Button variant="primary" type="submit" disabled={busy}>{busy ? "保存中…" : "保存关注词"}</Button></footer>
@@ -582,8 +567,9 @@ function CalendarManagerModal({ initialDate, initialEvent, events, onClose, onSa
   </form><aside><strong>已标记的日期</strong><div>{events.length ? events.map((item) => <button key={item.id} className={item.id === draft.id ? "active" : ""} onClick={() => { setDraft({ ...item }); setConfirmDelete(false); }}><i style={{ background: item.color }} /><span><b>{item.title}</b><small>{calendarEventDescription(item)}</small></span></button>) : <p>还没有自定义重要日期。</p>}</div></aside></div></section></div>;
 }
 
-function MorningSourceStatus<T>({ cache, error, autoLabel, name, url }: { cache: DashboardCache<T> | null; error: string; autoLabel?: string; name: string; url: string }) {
-  return <footer className="morning-source-status"><span className={error ? "stale" : ""}>{error ? `显示缓存 · ${formatCacheTime(cache)}` : formatCacheTime(cache)}</span><div>{autoLabel && <em>{autoLabel}</em>}<Button wrap variant="ghost" size="small" type="button" onClick={() => void openExternal(url)}>数据来源：{name} ↗</Button></div></footer>;
+function MorningSourceStatus<T>({ cache, error, warning, autoLabel, name, url }: { cache: DashboardCache<T> | null; error: string; warning?: string; autoLabel?: string; name: string; url: string }) {
+  const issue = error ? `更新失败${cache ? "，显示缓存" : ""}：${error}` : warning ? `部分内容未更新：${warning}` : "";
+  return <footer className="morning-source-status" title={autoLabel}><span className={issue ? "stale" : ""} role={issue ? "status" : undefined}>{issue && <>{issue}<br /></>}{formatCacheTime(cache)}</span><div>{autoLabel && <em>{autoLabel}</em>}<Button wrap variant="ghost" size="small" type="button" aria-label={`数据来源：${name}`} onClick={() => void openExternal(url)}>{name} ↗</Button></div></footer>;
 }
 
 function MorningEmpty({ busy, error, label }: { busy: boolean; error: string; label: string }) {
@@ -680,7 +666,7 @@ function formatCacheTime(cache: DashboardCache<unknown> | null) {
   if (!cache) return "尚未更新";
   const value = new Date(cache.fetchedAt);
   if (Number.isNaN(value.getTime())) return "更新时间未知";
-  return `更新于 ${value.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`;
+  return `更新于 ${value.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
 }
 
 function formatShortDate(value: string) {
@@ -706,11 +692,6 @@ function locationBreadcrumb(location: DashboardPreferences["location"] | CitySug
       return true;
     })
     .join(" · ");
-}
-
-function formatPublished(value: string) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "时间未知" : date.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 function morningCandidateDates() {

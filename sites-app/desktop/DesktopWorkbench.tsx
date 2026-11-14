@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { companionApi } from "./companionApi";
+import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   disable as disableAutostart,
   enable as enableAutostart,
@@ -59,6 +60,8 @@ import { workspaceTitle, type QuickLink } from "../app/workspace-preferences";
 import type { HealthReminderPreferences } from "../app/reminder-preferences";
 import type { DailySituation, SituationPlanChange, TaskPlanHistory, FocusSession, TaskPlan, WeeklyFocus, WeeklyReview } from "../app/work-types";
 import { DailySituationDialog } from "./DailySituationDialog";
+import { ProjectWeekDialog, type ProjectWeekTarget } from "./ProjectWeekDialog";
+import type { WeekSettings } from "../app/project-week";
 import { isContinuablePlan } from "../app/action-planning";
 import { defaultDashboardPreferences, type CalendarEvent, type DashboardPreferences, type ExternalSourceInput, type RestDay } from "../app/dashboard-types";
 import { emptyHealthDailyLog, emptyHealthProfile, type HealthDailyLog, type HealthMeal, type HealthProfile } from "../app/health-types";
@@ -78,10 +81,14 @@ import type {
   WorkspaceTask,
 } from "./WorkPages";
 import { formatFocusDuration } from "./focus-format";
-import { DESKTOP_THEMES, ThemeArtwork, ThemeSticker, type ThemeId } from "./DesktopThemes";
+import { DESKTOP_THEMES, ThemeArtwork, ThemeSticker, useDefaultThemePalette, type ThemeId } from "./DesktopThemes";
+import { DEFAULT_THEME_PALETTES } from "../app/desktop-theme-preferences";
 import { DESKTOP_FONT_PRESETS, type FontPresetId } from "./DesktopTypography";
 import { desktopApi } from "./integrationApi";
 import { ObserverIndicator } from "./WorkObserverIndicator";
+import type { AsabaFocusCommand, AsabaNote, CompanionAction } from "../app/companion-types";
+import { AsabaShotPreview } from "./AsabaDetails";
+const CompanionBridge = lazy(async () => ({ default: (await import("./CompanionBridge")).CompanionBridge }));
 
 const ProjectWorkspace = lazy(async () => ({ default: (await import("./ProjectWorkspace")).ProjectWorkspace }));
 const AiAssistantDialog = lazy(async () => ({ default: (await import("./AiAssistantDialog")).AiAssistantDialog }));
@@ -98,7 +105,7 @@ const InboxPage = lazy(async () => ({ default: (await import("./WorkPages")).Inb
 const ReviewPage = lazy(async () => ({ default: (await import("./WorkPages")).ReviewPage }));
 const ArchivePage = lazy(async () => ({ default: (await import("./WorkPages")).ArchivePage }));
 
-const NotesStyles = lazy(async () => { await import("./styles/notes-final.css"); return { default: () => null }; });
+const NotesStyles = lazy(async () => { await import("./notes-entry.css"); return { default: () => null }; });
 const SettingsStyles = lazy(async () => { await import("./styles/avatar-settings.css"); return { default: () => null }; });
 
 export type DeskSection = "home" | "tasks" | "health" | "wealth" | "projects" | "notes" | "explore" | "inbox" | "review" | "archive" | "ai" | "tools" | "settings" | "observer";
@@ -251,6 +258,10 @@ export function DesktopWorkbench({
   const [planHistory, setPlanHistory] = useState<TaskPlanHistory[]>([]);
   const [dailySituations, setDailySituations] = useState<DailySituation[]>([]);
   const [situationDate, setSituationDate] = useState<string | null>(null);
+  const [projectWeekTarget, setProjectWeekTarget] = useState<ProjectWeekTarget>();
+  const [projectWeekRevision, setProjectWeekRevision] = useState(0);
+  const [projectWeekManaged, setProjectWeekManaged] = useState<WeekSettings["managed"]>({});
+  const manualProjectCreate = useRef<(() => void) | null>(null);
   const [activeSession, setActiveSession] = useState<FocusSession | null>(null);
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
   const [focusEditorSession, setFocusEditorSession] = useState<FocusSession | null>(null);
@@ -408,7 +419,7 @@ export function DesktopWorkbench({
   const refreshProjects = useCallback(async () => {
     const next = await projectRepository.list();
     const [details, standalone] = await Promise.all([
-      projectRepository.listIndexDetails(),
+      projectRepository.listPlanningDetails(),
       projectRepository.listStandaloneTasks(),
     ]);
     setProjects(next);
@@ -422,7 +433,7 @@ export function DesktopWorkbench({
     const previousWeekStart = shiftLocalDate(weekStart, -7);
     const focusHistoryFrom = new Date();
     focusHistoryFrom.setFullYear(focusHistoryFrom.getFullYear() - 1);
-    const [nextPlans, nextActive, nextSessions, nextFocus, nextReview, previousReview, nextHistory, nextSituations] = await Promise.all([
+    const [nextPlans, nextActive, nextSessions, nextFocus, nextReview, previousReview, nextHistory, nextSituations, week] = await Promise.all([
       workRepository.listPlans(),
       workRepository.getActiveSession(),
       workRepository.listSessions(focusHistoryFrom.toISOString(), 2000),
@@ -431,7 +442,9 @@ export function DesktopWorkbench({
       workRepository.getWeeklyReview(previousWeekStart),
       workRepository.listPlanHistory(),
       workRepository.listDailySituations(),
+      projectRepository.readProjectWeek().catch(() => null),
     ]);
+    if (week) setProjectWeekManaged(week.settings.managed);
     setPlans(nextPlans);
     setPlanHistory(nextHistory);
     setDailySituations(nextSituations);
@@ -440,7 +453,7 @@ export function DesktopWorkbench({
     setWeeklyFocus(nextFocus);
     setWeeklyReview(nextReview);
     setPreviousWeeklyReview(previousReview);
-  }, [workRepository]);
+  }, [workRepository, projectRepository]);
 
   const refreshDashboardLocal = useCallback(async () => {
     const [preferences, events, rests] = await Promise.all([
@@ -464,6 +477,15 @@ export function DesktopWorkbench({
     setHealthToday(nextDaily);
     setHealthMealsToday(nextMeals);
   }, [healthRepository]);
+
+  useEffect(() => {
+    let active = true;
+    let stop = () => {};
+    void import("./xiaomi-sync").then(({ startXiaomiAutoSync }) => { if (active) stop = startXiaomiAutoSync(healthRepository); });
+    const changed = () => { void refreshHealth(); };
+    window.addEventListener("mind-garden:xiaomi-synced", changed);
+    return () => { active = false; stop(); window.removeEventListener("mind-garden:xiaomi-synced", changed); };
+  }, [healthRepository, refreshHealth]);
 
   useEffect(() => {
     let active = true;
@@ -544,6 +566,7 @@ export function DesktopWorkbench({
   });
 
   const workspaceTasks = useMemo<WorkspaceTask[]>(() => {
+    const completed = new Set(projectDetails.flatMap((detail) => detail.tasks.filter((task) => task.status === "done").map((task) => task.id)));
     const projectTasks = projectDetails.flatMap((detail) => detail.tasks.map((task) => {
       const activeMilestones = detail.milestones.filter((item) => item.status !== "superseded");
       const milestone = activeMilestones.find((item) => item.id === task.milestoneId) ?? null;
@@ -565,6 +588,8 @@ export function DesktopWorkbench({
         stageTaskCount: stageTasks.length,
         plan: storedPlan,
         planCarriedFrom,
+        weekBlocked: Boolean(projectWeekManaged[task.id]?.after.some((id) => !completed.has(id)) ||
+          (projectWeekManaged[task.id]?.date === "" && storedPlan?.plannedDate === "")),
       };
     }));
     const independentTasks = standaloneTasks.map((task): WorkspaceTask => {
@@ -587,7 +612,7 @@ export function DesktopWorkbench({
       };
     });
     return [...projectTasks, ...independentTasks];
-  }, [plans, projectDetails, standaloneTasks, today]);
+  }, [plans, projectDetails, standaloneTasks, today, projectWeekManaged]);
 
   useEffect(() => {
     if (loading) return;
@@ -886,6 +911,45 @@ export function DesktopWorkbench({
     return saveExternalSource({ url, title: note ? captureTitle(note) : undefined, summary: note });
   }
 
+  async function prepareDelegation(note: StoredArticle, reveal = false) {
+    if (!note.body.trim()) throw new Error("请先补充笔记内容。");
+    if (reveal) await companionApi.window(true);
+    await emitTo("companion", "asaba-prepare-note", {
+      noteId: note.id, title: note.title, projectId: note.projectId || "",
+      description: note.body.slice(0, 4000), repository: "",
+    });
+  }
+
+  async function saveAsabaNote(note: AsabaNote) {
+    if (!/^[0-9a-f-]{36}$/i.test(note.id)) throw new Error("便签编号无效。");
+    const text = note.text.trim();
+    if (text.length > 4000 || note.url.length > 2048) throw new Error("便签内容过长。");
+    const project = projects.find(project => project.id === note.projectId);
+    if (note.projectId && !project) throw new Error("项目已变化，请重新选择。");
+    const url = note.url.trim() ? new URL(note.url.trim()) : null;
+    if (url && !["http:", "https:"].includes(url.protocol)) throw new Error("请粘贴一个网页链接。");
+    if (!text && !url) throw new Error("请写点内容或粘贴链接。");
+    const collection = "notes";
+    const id = `${collection}/asaba-${note.id}`;
+    if (await repository.get(id)) return id;
+    const source = ["浅羽随手记"];
+    if (url) source.push(url.href);
+    if (note.application) source.push(`应用 · ${note.application.slice(0, 100)}`);
+    if (note.shotId && /^[0-9a-f-]{36}$/i.test(note.shotId)) source.push(`浅羽画面 · ${note.shotId}`);
+    const saved = await persist({
+      ...emptyDraft, id, slug: `asaba-${note.id}`, collection,
+      collectionLabel: "笔记",
+      category: "uncategorized",
+      title: text ? captureTitle(text) : url!.hostname,
+      body: url ? `${text ? `${text}\n\n` : ""}[打开原内容](<${url.href}>)` : text,
+      type: "想法", branch: "待分类", stage: "种子",
+      projectId: project?.id || "", project: project?.title || "", summary: plainExcerpt(text) || url?.hostname || "",
+      created: today, source,
+    }, "已保存到笔记 · 待分类。", false);
+    if (!saved) throw new Error("便签未能保存，请重试。");
+    return saved.id;
+  }
+
   async function saveDashboardPreferences(preferences: DashboardPreferences) {
     await dashboardRepository.savePreferences(preferences);
     setDashboardPreferences(preferences);
@@ -983,6 +1047,14 @@ export function DesktopWorkbench({
 
   async function startFocus(task: Pick<ProjectTask, "id" | "projectId" | "title">) {
     try {
+      if (projectWeekManaged[task.id]?.after.length) {
+        const schedule = await projectRepository.readProjectWeek();
+        const action = schedule.actions.find((item) => item.id === task.id);
+        if (action?.after.some((id) => schedule.actions.find((item) => item.id === id)?.status !== "done")) {
+          showMessage("请先完成这项行动的前置任务。");
+          return false;
+        }
+      }
       const session = await workRepository.startSession({ taskId: task.id, projectId: task.projectId, label: task.title });
       setActiveSession(session);
       setFocusSessions((current) => [session, ...current.filter((item) => item.id !== session.id)]);
@@ -1002,6 +1074,32 @@ export function DesktopWorkbench({
       showMessage(`本次投入 ${formatFocusDuration(stopped.durationSeconds)}，已经记录。`);
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "无法结束专注");
+    }
+  }
+
+  async function companionFocus(command: AsabaFocusCommand) {
+    if (command.operation === "stop") {
+      const current = await workRepository.getActiveSession();
+      if (!current || current.id !== command.sessionId) throw new Error("当前投入已变化，请刷新后再结束。");
+      await workRepository.stopSession(current.id);
+      await refreshWork();
+      return;
+    }
+    if (command.operation !== "start") throw new Error("无法识别投入操作。");
+    if (command.taskId) {
+      const task = workspaceTasks.find(task => task.id === command.taskId && !["done", "cancelled", "waiting"].includes(task.status));
+      if (!task) throw new Error("这项行动目前无法开始。");
+      const session = await workRepository.startSession({ taskId: task.id, projectId: task.projectId, label: task.title });
+      setActiveSession(session);
+      setFocusSessions(current => [session, ...current.filter(item => item.id !== session.id)]);
+    } else {
+      const label = command.label?.trim();
+      if (!label || label.length > 120) throw new Error("请给这次投入写一个简短名字。");
+      const project = projects.find(project => project.id === command.projectId);
+      if (command.projectId && !project) throw new Error("项目已变化，请重新选择。");
+      const session = await workRepository.startSession({ label, projectId: project?.id || null });
+      setActiveSession(session);
+      setFocusSessions(current => [session, ...current.filter(item => item.id !== session.id)]);
     }
   }
 
@@ -1361,6 +1459,7 @@ export function DesktopWorkbench({
     `font-preset-${fontPresetId}`,
   ].filter(Boolean).join(" ");
   const taskActions = {
+    onChangeWeek: () => setProjectWeekTarget({ kind: "change" }),
     onCompleteTask: completeTask,
     onUpdateTask: updateTask,
     onCloseToday: closeToday,
@@ -1394,6 +1493,28 @@ export function DesktopWorkbench({
       {activeSession && <GlobalFocusBar session={activeSession} task={workspaceTasks.find((task) => task.id === activeSession.taskId) ?? null} onShow={() => activeSession.taskId ? openTask(activeSession.taskId) : switchSection("tasks")} onPause={() => void stopFocus()} onCorrect={() => setFocusEditorSession(activeSession)} />}
       <Suspense fallback={null}><FocusTools activeSession={activeSession} repository={workRepository} preferencesRepository={preferencesRepository} editorSession={focusEditorSession} onEdit={setFocusEditorSession} historyOpen={focusHistoryOpen} onCloseHistory={() => setFocusHistoryOpen(false)} onChanged={refreshWork} onMessage={showMessage} /></Suspense>
       <ObserverIndicator onOpen={() => void switchSection("observer")} />
+      <Suspense fallback={null}><CompanionBridge projects={projects} tasks={workspaceTasks} articles={articles} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} activeSession={activeSession} onFocus={companionFocus} onError={showMessage} onSaveNote={saveAsabaNote} onAction={async (action: CompanionAction) => {
+        if (action.kind === "prepare_note") {
+          const note = await repository.get(action.id);
+          if (!note) throw new Error("这篇笔记已不存在。");
+          await prepareDelegation(note);
+        } else if (action.kind === "open_note") {
+          const note = await repository.get(action.id);
+          if (!note) throw new Error("这篇笔记已不存在。");
+          await openArticle(note);
+        } else if (action.kind === "open_project") {
+          if (!projects.some(project => project.id === action.id)) throw new Error("项目已发生变化，请刷新后再试。");
+          await openProject(action.id);
+        } else if (action.kind === "start_task") {
+          const task = workspaceTasks.find(task => task.id === action.id && !["done", "cancelled", "waiting"].includes(task.status));
+          if (!task) throw new Error("这项行动目前无法开始。");
+          if (activeSession) throw new Error("已有投入正在记录，请先暂停当前投入。");
+          if (!await startFocus(task)) throw new Error("未能开始记录投入，请查看工作台提示。");
+        } else if (action.kind === "capture") {
+          setQuickText(action.text || ""); setQuickCaptureOpen(true);
+        } else if (action.kind === "open_observer") await switchSection("observer");
+        else if (action.kind === "open_settings") await switchSection("settings");
+      }} /></Suspense>
 
       <Suspense fallback={<section className="workspace-page-loading"><span>个人工作台</span><strong>正在打开这一页…</strong></section>}>
       {(documentMode || section === "notes") && <NotesStyles />}
@@ -1421,14 +1542,23 @@ export function DesktopWorkbench({
               onBack={closeDocument}
               onEdit={() => void startEditing(selectedArticle)}
               onAppend={() => void startEditing(selectedArticle, true)}
+              onDelegate={isTauri() && selectedArticle.body.trim() ? () => void prepareDelegation(selectedArticle, true).catch(error => showMessage(String(error))) : undefined}
               onRemove={() => void removeArticle(selectedArticle)}
             />
           ) : null}
         </section>
       ) : section === "projects" ? (
         <ProjectWorkspace
+          onCreateWeek={(manual) => { manualProjectCreate.current = manual; setProjectWeekTarget({ kind: "create" }); }}
+          onContinueWeek={(projectId) => setProjectWeekTarget({ kind: "continue", projectId })}
+          onChangeWeek={taskActions.onChangeWeek}
+          weekRevision={projectWeekRevision}
+          plannedDates={Object.fromEntries(plans.map((plan) => [plan.taskId, plan.plannedDate]))}
+          today={today}
           repository={projectRepository}
           projects={projects}
+          articles={articles}
+          onOpenArticle={openArticle}
           initialProjectId={requestedProjectId}
           onProjectsChange={refreshProjects}
           onBackToHall={() => setRequestedProjectId(null)}
@@ -1466,7 +1596,7 @@ export function DesktopWorkbench({
         /></>
       ) : (
         <section className="workspace-main-stage">
-          {section === "home" && <HomeDashboard dailySituations={dailySituations} onSupplementDay={setSituationDate} today={today} tasks={workspaceTasks} articles={articles} articleRepository={repository} weeklyFocus={weeklyFocus} integrationRepository={integrationRepository} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} calendarEvents={calendarEvents} restDays={restDays} healthProfile={healthProfile} healthToday={healthToday} healthMeals={healthMealsToday} onOpenHealth={() => switchSection("health")} onOpenTools={() => switchSection("tools")} onSaveWeeklyFocus={saveWeeklyFocus} onSaveDashboardPreferences={saveDashboardPreferences} onSaveCalendarEvent={saveCalendarEvent} onDeleteCalendarEvent={deleteCalendarEvent} onSetRestDay={setRestDay} onSaveSource={saveExternalSource} onNotice={showMessage} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTask={openTask} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
+          {section === "home" && <HomeDashboard planningHistoryRepository={aiRepository} projectDetails={projectDetails} dailySituations={dailySituations} onSupplementDay={setSituationDate} today={today} tasks={workspaceTasks} articles={articles} articleRepository={repository} weeklyFocus={weeklyFocus} integrationRepository={integrationRepository} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} calendarEvents={calendarEvents} restDays={restDays} healthProfile={healthProfile} healthToday={healthToday} healthMeals={healthMealsToday} onOpenHealth={() => switchSection("health")} onOpenTools={() => switchSection("tools")} onSaveWeeklyFocus={saveWeeklyFocus} onSaveDashboardPreferences={saveDashboardPreferences} onSaveCalendarEvent={saveCalendarEvent} onDeleteCalendarEvent={deleteCalendarEvent} onSetRestDay={setRestDay} onSaveSource={saveExternalSource} onNotice={showMessage} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTask={openTask} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
           {section === "tasks" && <TasksPage onOpenFocusHistory={() => setFocusHistoryOpen(true)} onSupplementDay={setSituationDate} dailySituations={dailySituations} today={today} tasks={workspaceTasks} projects={projects} projectDetails={projectDetails} initialTaskId={requestedTaskId} onTaskOpened={() => setRequestedTaskId(null)} onAddTask={addTask} onRemoveTask={removeTask} onOpenProject={openProject} {...taskActions} />}
           {section === "observer" && <WorkObserverPage tasks={workspaceTasks} activeSession={activeSession} onOpenTask={openTask} />}
           {section === "health" && <HealthPage repository={healthRepository} today={today} onChanged={() => void refreshHealth()} onNotice={showMessage} onOpenAiSettings={() => switchSection("settings")} />}
@@ -1510,6 +1640,16 @@ export function DesktopWorkbench({
       )}
 
       {situationDate && <DailySituationDialog date={situationDate} today={today} tasks={workspaceTasks} history={planHistory} situations={dailySituations} activeTaskId={activeSession?.taskId} onClose={() => setSituationDate(null)} onSave={saveDailySituation} />}
+      {projectWeekTarget && <ProjectWeekDialog repository={projectRepository} target={projectWeekTarget} today={today}
+        onClose={() => setProjectWeekTarget(undefined)}
+        onManualCreate={() => { setProjectWeekTarget(undefined); manualProjectCreate.current?.(); }}
+        onSaved={async (projectId) => {
+          setProjectWeekTarget(undefined);
+          setProjectWeekRevision((value) => value + 1);
+          await Promise.all([refreshProjects(), refreshWork()]);
+          if (projectId) await openProject(projectId);
+          showMessage("项目安排已保存。");
+        }} />}
       {activeSession?.id === focusRecoveryId && <div className="focus-recovery-backdrop"><section className="focus-recovery-dialog" role="dialog" aria-modal="true" aria-label="处理上次未结束的投入"><span>投入记录恢复</span><h2>上次投入没有正常结束</h2><p>“{activeSession.label}”开始于 {new Date(activeSession.startedAt).toLocaleString("zh-CN")}。请选择实际结束时间，或者继续本次投入。</p><label><span>实际结束时间</span><input type="datetime-local" min={toLocalDateTimeInput(new Date(activeSession.startedAt))} max={toLocalDateTimeInput(new Date())} value={focusRecoveryEnd} onChange={(event) => setFocusRecoveryEnd(event.target.value)} /></label><footer><Button variant="secondary" type="button" onClick={() => setFocusRecoveryId(null)}>继续投入</Button><Button variant="primary" onClick={() => void finishRecoveredFocus()}>按此时间暂停并记录</Button></footer></section></div>}
 
       {message && <div className="desktop-toast" role="status">{message}</div>}
@@ -1755,6 +1895,7 @@ function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backi
   onSaveAvatarDataUrl: (dataUrl: string) => Promise<void>;
 }) {
   const [nameDraft, setNameDraft] = useState(displayName);
+  const { palette, onChange: onPaletteChange } = useDefaultThemePalette();
   const [nameMessage, setNameMessage] = useState("");
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [avatarMessage, setAvatarMessage] = useState("");
@@ -1992,7 +2133,7 @@ function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backi
           </div>
         </section>
         <section className="workspace-card settings-section">
-          <header><span>外观</span><h2>工作台主题</h2><p>默认主题专注阅读；角色主题只在有足够留白时显示立绘。</p></header>
+          <header><span>外观</span><h2>工作台主题</h2><p>默认主题可选择配色；角色主题使用专属色彩，首页以小贴图陪伴。</p></header>
           <div className="settings-theme-options">
             {DESKTOP_THEMES.map((theme) => (
               <button
@@ -2010,6 +2151,17 @@ function SettingsPage({ displayName, avatarDataUrl, themeId, fontPresetId, backi
               </button>
             ))}
           </div>
+          {themeId === "default" && <div className="settings-palette-options" role="group" aria-label="默认主题配色">
+            <span>默认配色</span>
+            <div>{DEFAULT_THEME_PALETTES.map((item) => <button
+              className="settings-palette-option"
+              key={item.id}
+              type="button"
+              aria-pressed={palette === item.id}
+              onClick={() => onPaletteChange(item.id)}
+            ><i style={{ background: item.primary }} aria-hidden="true" /><span>{item.label}</span></button>)}</div>
+            <small>配色会自动保存，切换角色主题后仍会保留。</small>
+          </div>}
         </section>
         <section className="workspace-card settings-section settings-font-section">
           <header><span>外观</span><h2>文字风格</h2><p>标题与长正文跟随选择；按钮、表单和数字始终保持清晰。</p></header>
@@ -2206,6 +2358,7 @@ function AiModelSettingsSection() {
     { key: "projectCreate", label: "项目创建判断", detail: "默认使用更强模型判断行动/项目与推进方式" },
     { key: "projectReplan", label: "重大计划重排", detail: "处理截止提前、实验失败和导师反馈" },
     { key: "nextAction", label: "下一行动建议", detail: "留空时跟随全局默认" },
+    { key: "globalPlanning", label: "全局规划助手", detail: "留空时跟随全局默认" },
     { key: "financeReport", label: "财务月报", detail: "留空时跟随全局默认" },
     { key: "healthAdvice", label: "健康建议", detail: "解读手动记录并生成下一餐建议" },
   ];
@@ -2373,7 +2526,7 @@ function NoteOrganizePanel({ article, projects, onOrganize, onClose }: {
   );
 }
 
-function ArticleReader({ article, attachmentRepository, saving, onBack, onEdit, onAppend, onRemove }: {
+function ArticleReader({ article, attachmentRepository, saving, onBack, onEdit, onAppend, onRemove, onDelegate }: {
   article: StoredArticle;
   attachmentRepository: AttachmentRepository;
   saving: boolean;
@@ -2381,13 +2534,15 @@ function ArticleReader({ article, attachmentRepository, saving, onBack, onEdit, 
   onEdit: () => void;
   onAppend: () => void;
   onRemove: () => void;
+  onDelegate?: () => void;
 }) {
   const sourceUrl = article.source.find((item) => /^https?:\/\//i.test(item));
+  const shotId = article.source.find(source => source.startsWith("浅羽画面 · "))?.split(" · ")[1];
   return (
     <article className="desktop-reader immersive-reader">
       <header className="reader-toolbar">
         <Button variant="ghost" type="button" className="reader-back" onClick={onBack}>← 返回笔记</Button>
-        <div><span>最后修改于 {formatDate(article.updated || article.created)}</span><Button variant="danger" disabled={saving} onClick={onRemove}>删除</Button><Button variant="primary" onClick={onEdit}>编辑</Button></div>
+        <div><span>最后修改于 {formatDate(article.updated || article.created)}</span>{onDelegate && <Button onClick={onDelegate}>创建委托</Button>}<Button variant="danger" disabled={saving} onClick={onRemove}>删除</Button><Button variant="primary" onClick={onEdit}>编辑</Button></div>
       </header>
       <div className="reader-scroll">
         <div className="reader-document">
@@ -2398,6 +2553,7 @@ function ArticleReader({ article, attachmentRepository, saving, onBack, onEdit, 
             {article.project && <span className="reader-project-link">↗ 关联项目 · {article.project}</span>}
           </div>
           <MarkdownDocument body={article.body} title={article.title} attachmentRepository={attachmentRepository} />
+          {shotId && <AsabaShotPreview key={shotId} id={shotId} />}
           <footer className="reader-history"><div><strong>读到这里，有新的想法吗？</strong><span>追加会在原文末尾新建一个带日期的段落，保留前文的连贯性。</span></div><div className="reader-history-actions">{sourceUrl && <a href={sourceUrl} target="_blank" rel="noreferrer">打开原始来源 ↗</a>}<Button variant="secondary" type="button" onClick={onAppend}>＋ 在文末追加想法</Button></div></footer>
         </div>
       </div>

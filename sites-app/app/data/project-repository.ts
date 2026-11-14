@@ -12,10 +12,25 @@ import type {
   ProposalStatus,
 } from "../project-types";
 import type { ProjectAdjustmentDraft, ProjectRouteDraft } from "../ai-api-types";
+import type { WeekAction, WeekPlacement, WeekSettings } from "../project-week";
+
+export type ProjectWeekState = { revision: string; settings: WeekSettings; rest: string[]; actions: WeekAction[] };
+export type ProjectWeekWrite = {
+  revision: string;
+  settings: WeekSettings;
+  placements: WeekPlacement[];
+  tasks: ProjectTask[];
+  project?: Project;
+  milestones?: Milestone[];
+  reason: string;
+};
 
 export interface ProjectRepository {
+  readProjectWeek(): Promise<ProjectWeekState>;
+  applyProjectWeek(write: ProjectWeekWrite): Promise<void>;
   list(): Promise<ProjectSummary[]>;
   listIndexDetails(): Promise<ProjectDetail[]>;
+  listPlanningDetails(): Promise<ProjectDetail[]>;
   listStandaloneTasks(): Promise<ProjectTask[]>;
   listTaskLogs(taskId: string): Promise<ProjectLog[]>;
   get(id: string): Promise<ProjectDetail | null>;

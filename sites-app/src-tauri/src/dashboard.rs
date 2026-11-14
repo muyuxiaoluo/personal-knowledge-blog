@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 const MAX_JSON_BYTES: usize = 2 * 1024 * 1024;
-const AIHOT_HOME: &str = "https://aihot.virxact.com";
+const AIHOT_HOME: &str = "https://aihot.news";
 const OPEN_METEO_HOME: &str = "https://open-meteo.com";
 const MORNING_BRIEF_HOME: &str = "https://60s-static-host.vercel.app";
 const NOMINATIM_SEARCH: &str = "https://nominatim.openstreetmap.org/search";
@@ -151,6 +151,7 @@ pub struct AiBriefSnapshot {
     topics: Vec<AiHotTopic>,
     daily: Option<AiDailyBrief>,
     attribution: Attribution,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -309,7 +310,7 @@ struct AiDailyResponse {
 struct AiDailyReportRaw {
     date: String,
     #[serde(default)]
-    lead: Option<String>,
+    lead: Option<AiDailyLeadRaw>,
     #[serde(default)]
     links: AiLinksRaw,
     #[serde(default)]
@@ -319,7 +320,23 @@ struct AiDailyReportRaw {
 #[derive(Debug, Deserialize)]
 struct AiDailySectionRaw {
     #[serde(default)]
-    items: Vec<AiItemRaw>,
+    items: Vec<AiDailyItemRaw>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AiDailyLeadRaw {
+    Text(String),
+    Story {
+        #[serde(rename = "leadParagraph")]
+        paragraph: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct AiDailyItemRaw {
+    #[serde(default)]
+    summary: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -703,12 +720,21 @@ pub async fn dashboard_fetch_weather(
 pub async fn dashboard_fetch_ai_brief(
     etag: Option<String>,
 ) -> Result<DashboardFetchResult<AiBriefSnapshot>, String> {
-    let client = client()?;
+    fetch_ai_brief(&client()?, AIHOT_HOME, etag.as_deref()).await
+}
+
+async fn fetch_ai_brief(
+    client: &reqwest::Client,
+    home: &str,
+    etag: Option<&str>,
+) -> Result<DashboardFetchResult<AiBriefSnapshot>, String> {
     let items_response: JsonResponse<AiItemsResponse> = request_json(
-        client
-            .get("https://aihot.virxact.com/api/v1/items")
-            .query(&[("mode", "selected"), ("window", "24h"), ("limit", "20")]),
-        etag.as_deref(),
+        client.get(format!("{home}/api/v1/items")).query(&[
+            ("mode", "selected"),
+            ("window", "24h"),
+            ("limit", "20"),
+        ]),
+        etag,
         false,
     )
     .await?;
@@ -722,29 +748,30 @@ pub async fn dashboard_fetch_ai_brief(
             max_age_seconds: 1_800,
         });
     }
-    let topics_response: Option<Value> = request_json::<Value>(
-        client.get("https://aihot.virxact.com/api/v1/hot-topics"),
-        None,
-        false,
-    )
-    .await
-    .ok()
-    .and_then(|response| response.value);
+    let mut warnings = Vec::new();
+    let topics_response: Option<Value> =
+        request_json::<Value>(client.get(format!("{home}/api/v1/hot-topics")), None, false)
+            .await
+            .map_err(|error| warnings.push(format!("热点专题：{error}")))
+            .ok()
+            .and_then(|response| response.value);
     let daily_response: Option<AiDailyResponse> = request_json::<AiDailyResponse>(
-        client.get("https://aihot.virxact.com/api/v1/dailies/latest"),
+        client.get(format!("{home}/api/v1/dailies/latest")),
         None,
         false,
     )
     .await
+    .map_err(|error| warnings.push(format!("AI 日报：{error}")))
     .ok()
     .and_then(|response| response.value);
-    let value = normalize_ai_brief(
+    let mut value = normalize_ai_brief(
         items_response
             .value
             .ok_or_else(|| "AIHOT 没有返回精选资讯".to_string())?,
         topics_response.as_ref(),
         daily_response,
     )?;
+    value.warnings.extend(warnings);
     Ok(DashboardFetchResult {
         value: Some(value),
         not_modified: false,
@@ -797,7 +824,7 @@ pub async fn dashboard_fetch_morning_brief(
 fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::limited(5))
         .user_agent(
             "life-strategy-library/0.7 (+https://github.com/muyuxiaoluo/personal-knowledge-blog)",
         )
@@ -813,10 +840,17 @@ async fn request_json<T: DeserializeOwned>(
     if let Some(value) = etag.filter(|value| !value.is_empty() && value.len() <= 200) {
         request = request.header(IF_NONE_MATCH, value);
     }
-    let response = request
-        .send()
+    let (client, request) = request.build_split();
+    let request = request.map_err(|error| format!("无法准备晨间数据请求：{error}"))?;
+    let source = format!(
+        "{}{}",
+        request.url().host_str().unwrap_or_default(),
+        request.url().path()
+    );
+    let response = client
+        .execute(request)
         .await
-        .map_err(|error| format!("无法连接晨间数据源：{error}"))?;
+        .map_err(|error| format!("无法连接晨间数据源（{source}）：{error}"))?;
     let status = response.status();
     let response_etag = response
         .headers()
@@ -839,7 +873,7 @@ async fn request_json<T: DeserializeOwned>(
         });
     }
     if !status.is_success() {
-        return Err(format!("晨间数据源暂时不可用（HTTP {status}）"));
+        return Err(format!("晨间数据源暂时不可用（{source}，HTTP {status}）"));
     }
     if response
         .content_length()
@@ -855,7 +889,7 @@ async fn request_json<T: DeserializeOwned>(
         return Err("晨间数据源返回内容过大".into());
     }
     let value = serde_json::from_slice::<T>(&bytes)
-        .map_err(|error| format!("晨间数据格式无法解析：{error}"))?;
+        .map_err(|error| format!("晨间数据格式无法解析（{source}）：{error}"))?;
     Ok(JsonResponse {
         value: Some(value),
         not_modified: false,
@@ -1053,6 +1087,10 @@ fn normalize_ai_brief(
             lead: value
                 .report
                 .lead
+                .map(|lead| match lead {
+                    AiDailyLeadRaw::Text(text) => text,
+                    AiDailyLeadRaw::Story { paragraph } => paragraph,
+                })
                 .filter(|lead| !lead.trim().is_empty())
                 .map(|lead| lead.trim().to_string())
                 .unwrap_or(fallback_lead),
@@ -1067,6 +1105,7 @@ fn normalize_ai_brief(
             name: "AIHOT".into(),
             url: AIHOT_HOME.into(),
         },
+        warnings: Vec::new(),
     })
 }
 
@@ -1104,8 +1143,9 @@ fn safe_https_url(value: &str) -> Option<String> {
 
 fn safe_aihot_url(value: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(value).ok()?;
-    (parsed.scheme() == "https" && parsed.host_str() == Some("aihot.virxact.com"))
-        .then(|| parsed.to_string())
+    (parsed.scheme() == "https"
+        && matches!(parsed.host_str(), Some("aihot.news" | "aihot.virxact.com")))
+    .then(|| parsed.to_string())
 }
 
 fn validate_location(location: &DashboardLocation) -> Result<(), String> {
@@ -1132,6 +1172,193 @@ fn valid_timezone(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn serve(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for response in responses {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "request did not arrive");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    assert_eq!(stream.read(&mut byte).unwrap(), 1);
+                    request.push(byte[0]);
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (address, handle)
+    }
+
+    fn json_response(body: &str) -> String {
+        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn follows_permanent_redirect_and_preserves_conditional_requests() {
+        let (home, server) = serve(vec![
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: /moved\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            json_response(r#"{"items":[]}"#),
+            "HTTP/1.1 304 Not Modified\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n".into(),
+        ]);
+        runtime().block_on(async {
+            let client = client().unwrap();
+            let result = request_json::<Value>(client.get(&home), Some("\"old\""), false)
+                .await
+                .unwrap();
+            assert_eq!(result.value.unwrap()["items"], serde_json::json!([]));
+            assert_eq!(result.etag, "\"fixture\"");
+            let result = request_json::<Value>(client.get(&home), Some("\"fixture\""), false)
+                .await
+                .unwrap();
+            assert!(result.not_modified);
+            assert!(result.value.is_none());
+        });
+        let requests = server.join().unwrap();
+        assert!(requests[1].starts_with("GET /moved "));
+        assert!(requests[1]
+            .to_lowercase()
+            .contains("if-none-match: \"old\""));
+        assert!(requests[2]
+            .to_lowercase()
+            .contains("if-none-match: \"fixture\""));
+    }
+
+    #[test]
+    fn limits_redirect_loops() {
+        let (home, server) = serve(vec![
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: /loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(); 6
+        ]);
+        let error = runtime()
+            .block_on(request_json::<Value>(
+                client().unwrap().get(&home),
+                None,
+                false,
+            ))
+            .err()
+            .unwrap();
+        assert!(error.contains("无法连接晨间数据源"));
+        assert_eq!(server.join().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn keeps_headlines_and_reports_optional_endpoint_failures() {
+        let (home, server) = serve(vec![
+            json_response(r#"{"items":[{"id":"1","title":"示例动态"}]}"#),
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .into(),
+            json_response(r#"{"report":{"unexpected":true}}"#),
+        ]);
+        let result = runtime()
+            .block_on(fetch_ai_brief(&client().unwrap(), &home, None))
+            .unwrap();
+        let snapshot = result.value.unwrap();
+        assert_eq!(snapshot.items.len(), 1);
+        assert!(snapshot.daily.is_none());
+        assert_eq!(snapshot.warnings.len(), 2);
+        assert!(snapshot.warnings[0].contains("/api/v1/hot-topics，HTTP 503"));
+        assert!(snapshot.warnings[1].contains("AI 日报：晨间数据格式无法解析"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn parses_daily_summary_items_without_headline_ids() {
+        let (home, server) = serve(vec![
+            json_response(
+                r#"{"items":[{"id":"1","title":"示例动态","links":{"aihot":"https://aihot.news/items/1"}}]}"#,
+            ),
+            json_response(r#"{"items":[]}"#),
+            json_response(
+                r#"{"report":{"date":"2026-11-10","links":{"aihot":"https://aihot.news/daily/2026-11-10"},"sections":[{"items":[{"title":"日报条目","summary":"当天摘要"}]}]}}"#,
+            ),
+        ]);
+        let result = runtime()
+            .block_on(fetch_ai_brief(&client().unwrap(), &home, None))
+            .unwrap();
+        let snapshot = result.value.unwrap();
+        assert_eq!(snapshot.items[0].aihot_url, "https://aihot.news/items/1");
+        let daily = snapshot.daily.unwrap();
+        assert_eq!(daily.lead, "当天摘要");
+        assert_eq!(daily.url, "https://aihot.news/daily/2026-11-10");
+        assert!(snapshot.warnings.is_empty());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn accepts_daily_lead_objects_text_and_summary_fallback() {
+        for (lead, expected) in [
+            (
+                serde_json::json!({"title":"导语标题","leadParagraph":"对象导语"}),
+                "对象导语",
+            ),
+            (serde_json::json!("文本导语"), "文本导语"),
+            (Value::Null, "摘要兜底"),
+        ] {
+            let daily = serde_json::from_value(serde_json::json!({
+                "report": {
+                    "date": "2026-11-10", "lead": lead,
+                    "sections": [{"items": [{"summary": "摘要兜底"}]}]
+                }
+            }))
+            .unwrap();
+            let items = serde_json::from_value(serde_json::json!({
+                "items": [{"id":"1", "title":"示例动态"}]
+            }))
+            .unwrap();
+            let result = normalize_ai_brief(items, None, Some(daily)).unwrap();
+            assert_eq!(result.daily.unwrap().lead, expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "访问真实公开数据源；手动执行 cargo test dashboard::tests::live_aihot_contract -- --ignored --nocapture"]
+    fn live_aihot_contract() {
+        let result = runtime().block_on(dashboard_fetch_ai_brief(None)).unwrap();
+        let snapshot = result.value.unwrap();
+        assert!(snapshot.warnings.is_empty(), "{:?}", snapshot.warnings);
+        assert!(!snapshot.items.is_empty());
+        let daily = snapshot.daily.expect("AIHOT 没有返回有效日报");
+        assert!(daily.url.starts_with(AIHOT_HOME));
+        assert!(snapshot
+            .items
+            .iter()
+            .all(|item| item.aihot_url.starts_with(AIHOT_HOME)));
+        println!(
+            "AIHOT 可用：{} 条动态、{} 个专题，日报 {}（{}）",
+            snapshot.items.len(),
+            snapshot.topics.len(),
+            daily.date,
+            daily.url
+        );
+    }
 
     fn location() -> DashboardLocation {
         DashboardLocation {
@@ -1362,6 +1589,8 @@ mod tests {
         assert!(safe_https_url("https://example.com/story").is_some());
         assert!(safe_https_url("javascript:alert(1)").is_none());
         assert!(safe_aihot_url("https://aihot.virxact.com/item/1").is_some());
+        assert!(safe_aihot_url("https://aihot.news/items/1").is_some());
+        assert!(safe_aihot_url("https://aihot.news.evil.example/items/1").is_none());
         assert!(safe_aihot_url("https://example.com/item/1").is_none());
     }
 }

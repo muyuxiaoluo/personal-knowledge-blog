@@ -1,9 +1,12 @@
 import {
   createContext,
   useContext,
+  useEffect,
+  useState,
   type CSSProperties,
   type ReactNode,
 } from "react";
+import { DEFAULT_THEME_PALETTES, loadDefaultThemePalette, saveDefaultThemePalette, type DefaultThemePalette } from "../app/desktop-theme-preferences";
 import asunaCharacter from "./assets/asuna-character-v1.webp";
 import asunaChibiSticker from "./assets/asuna-chibi-sticker-v1.webp";
 import roxyCharacter from "./assets/roxy-character-v1.webp";
@@ -71,6 +74,16 @@ const roxySectionStickers: Readonly<Record<string, string>> = {
   archive: roxyGoodNightSticker,
 };
 const DesktopThemeContext = createContext<ThemeId>("default");
+const DefaultThemePaletteContext = createContext<{
+  palette: DefaultThemePalette;
+  onChange: (palette: DefaultThemePalette) => void;
+} | null>(null);
+
+export function useDefaultThemePalette() {
+  const context = useContext(DefaultThemePaletteContext);
+  if (!context) throw new Error("Default theme palette requires DesktopThemeProvider");
+  return context;
+}
 
 export type ThemeStickerPlacement =
   | "heading"
@@ -104,7 +117,21 @@ export function DesktopThemeProvider({ themeId, children }: {
   themeId: ThemeId;
   children: ReactNode;
 }) {
-  return <DesktopThemeContext.Provider value={themeId}>{children}</DesktopThemeContext.Provider>;
+  const [palette, setPalette] = useState(loadDefaultThemePalette);
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.workspacePalette = palette;
+    root.style.setProperty("--default-theme-primary", DEFAULT_THEME_PALETTES.find((item) => item.id === palette)!.primary);
+    return () => {
+      delete root.dataset.workspacePalette;
+      root.style.removeProperty("--default-theme-primary");
+    };
+  }, [palette]);
+  return <DesktopThemeContext.Provider value={themeId}>
+    <DefaultThemePaletteContext.Provider value={{ palette, onChange: (next) => { saveDefaultThemePalette(next); setPalette(next); } }}>
+      {children}
+    </DefaultThemePaletteContext.Provider>
+  </DesktopThemeContext.Provider>;
 }
 
 export function ThemeSticker({ section, placement = "heading" }: {
@@ -150,7 +177,7 @@ export function ThemeArtwork({ themeId, section, documentMode }: {
           return <i key={index} style={style} />;
         })}
       </div>
-      <img className="character-theme-figure" src={theme.characterImage} alt="" draggable={false} />
+      {section !== "home" && <img className="character-theme-figure" src={theme.characterImage} alt="" draggable={false} />}
     </div>
   );
 }

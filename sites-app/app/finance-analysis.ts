@@ -1,4 +1,5 @@
 import type { LifeDomain } from "./domain-taxonomy";
+import { financeConsumptionTransactions, financeNeedsConfirmation } from "./finance-consumption";
 import {
   FINANCE_BUDGET_ROLES,
   FINANCE_CATEGORIES,
@@ -52,6 +53,10 @@ export function countFinanceImportRecords(records: FinanceImportPreview["records
   return counts;
 }
 
+export function financeCategorySpending(totals: Record<FinanceCategory, number>, category: FinanceCategory) {
+  return category === "transport" ? totals.transport + totals.metro + totals.bus + totals.taxi + totals.cycling : totals[category];
+}
+
 export function summarizeFinanceMonth(
   month: string,
   transactions: FinanceTransaction[],
@@ -59,7 +64,9 @@ export function summarizeFinanceMonth(
 ): FinanceMonthlySummary {
   assertMonth(month);
   const current = transactions.filter((transaction) => transaction.occurredAt.startsWith(month));
-  const expenses = current.filter((transaction) => transaction.kind === "expense");
+  const consumption = financeConsumptionTransactions(transactions);
+  const expenses = consumption.filter((transaction) => transaction.occurredAt.startsWith(month));
+  const grossExpenseCents = sum(current.filter(transaction => transaction.kind === "expense").map(transaction => transaction.amountCents));
   const ordinaryExpenseCents = sum(expenses.map((transaction) => transaction.amountCents));
   const actualIncomeCents = sum(current.filter((transaction) => transaction.kind === "income").map((transaction) => transaction.amountCents));
   const refundCents = sum(current.filter((transaction) => transaction.kind === "refund").map((transaction) => transaction.amountCents));
@@ -73,7 +80,7 @@ export function summarizeFinanceMonth(
     .map((transaction) => transaction.amountCents));
   const baselineMonths = [previousMonth(month, 2), previousMonth(month, 1), month];
   const coveredMonths = baselineMonths.filter((candidate) => transactions.some((transaction) => transaction.occurredAt.startsWith(candidate)));
-  const variableSamples = coveredMonths.map((candidate) => sum(transactions
+  const variableSamples = coveredMonths.map((candidate) => sum(consumption
     .filter((transaction) => transaction.occurredAt.startsWith(candidate)
       && transaction.kind === "expense"
       && transaction.budgetRoleConfirmed
@@ -95,16 +102,16 @@ export function summarizeFinanceMonth(
     budgetRoleTotals[transaction.budgetRoleConfirmed ? transaction.budgetRole : "unknown"] += transaction.amountCents;
   }
   const forecastExpenseCents = Math.max(0, ordinaryExpenseCents - currentVariableEssentialCents + variableEssentialBaselineCents);
-  const recurringCandidates = findRecurringCandidates(transactions);
+  const recurringCandidates = findRecurringCandidates(consumption);
   const savingCandidates = findSavingCandidates(expenses);
-  const anomalies = findSpendingAnomalies(month, transactions);
+  const anomalies = findSpendingAnomalies(month, consumption);
   const baselineCents = settings.stableMonthlyIncomeCents - forecastExpenseCents;
   const moderateSaving = sum(savingCandidates.filter((candidate) => candidate.confidence === "high").map((candidate) => candidate.minimumSavingCents));
   const aggressiveSaving = sum(savingCandidates.map((candidate) => candidate.maximumSavingCents));
   const trendMonths = [previousMonth(month, 3), previousMonth(month, 2), previousMonth(month, 1), month];
   const trend = trendMonths.map((candidate) => ({
     month: candidate,
-    expenseCents: sum(transactions.filter((transaction) => transaction.occurredAt.startsWith(candidate) && transaction.kind === "expense").map((transaction) => transaction.amountCents)),
+    expenseCents: sum(consumption.filter((transaction) => transaction.occurredAt.startsWith(candidate)).map((transaction) => transaction.amountCents)),
     incomeCents: sum(transactions.filter((transaction) => transaction.occurredAt.startsWith(candidate) && transaction.kind === "income").map((transaction) => transaction.amountCents)),
     refundCents: sum(transactions.filter((transaction) => transaction.occurredAt.startsWith(candidate) && transaction.kind === "refund").map((transaction) => transaction.amountCents)),
   }));
@@ -115,7 +122,7 @@ export function summarizeFinanceMonth(
     refundCents,
     transferCents,
     repaymentCents,
-    actualNetCents: actualIncomeCents + refundCents - ordinaryExpenseCents,
+    actualNetCents: actualIncomeCents + refundCents - grossExpenseCents,
     stableIncomeCents: settings.stableMonthlyIncomeCents,
     fixedEssentialCents,
     variableEssentialBaselineCents,
@@ -129,7 +136,7 @@ export function summarizeFinanceMonth(
     anomalies,
     trend,
     scenarios: {
-      currentCents: actualIncomeCents + refundCents - ordinaryExpenseCents,
+      currentCents: actualIncomeCents + refundCents - grossExpenseCents,
       baselineCents,
       moderateCents: baselineCents + moderateSaving,
       aggressiveCents: baselineCents + aggressiveSaving,
@@ -143,7 +150,7 @@ export function buildFinanceInsightSnapshot(
   transactions: FinanceTransaction[],
   projects: Array<{ id: string; category: LifeDomain; status: "active" | "paused" | "completed" }>,
 ): FinanceInsightSnapshot {
-  const currentExpenses = transactions.filter((transaction) => transaction.kind === "expense" && transaction.occurredAt.startsWith(summary.month));
+  const currentExpenses = financeConsumptionTransactions(transactions).filter((transaction) => transaction.occurredAt.startsWith(summary.month));
   const projectById = new Map(projects.map((project) => [project.id, project]));
   const usedProjects = [...new Set(currentExpenses.map((transaction) => transaction.projectId).filter((value): value is string => Boolean(value)))]
     .sort();
@@ -184,7 +191,7 @@ export function buildFinanceInsightSnapshot(
     budgetVariances: FINANCE_CATEGORIES.flatMap((entry) => {
       const limitCents = budget.categoryLimits[entry.value] ?? 0;
       if (!limitCents) return [];
-      const spentCents = summary.categoryTotals[entry.value];
+      const spentCents = financeCategorySpending(summary.categoryTotals, entry.value);
       return [{ category: entry.value, spentCents, limitCents, varianceCents: spentCents - limitCents }];
     }),
     retainedSpending: FINANCE_CATEGORIES.flatMap((entry) => {
@@ -194,8 +201,8 @@ export function buildFinanceInsightSnapshot(
       return amountCents ? [{ evidenceId: `K-${stableShortHash(entry.value)}`, category: entry.value, amountCents }] : [];
     }),
     pendingConfirmation: {
-      count: currentExpenses.filter((transaction) => !transaction.budgetRoleConfirmed || transaction.budgetRole === "unknown").length,
-      amountCents: sum(currentExpenses.filter((transaction) => !transaction.budgetRoleConfirmed || transaction.budgetRole === "unknown").map((transaction) => transaction.amountCents)),
+      count: currentExpenses.filter(financeNeedsConfirmation).length,
+      amountCents: sum(currentExpenses.filter(financeNeedsConfirmation).map((transaction) => transaction.amountCents)),
     },
     anonymousProjects,
     evidence: summary.savingCandidates.map((candidate) => ({
@@ -267,7 +274,7 @@ export function assertFinanceReportLanguage(content: FinanceAiReportContent) {
   const prose = [content.overview, content.essentialStructure, ...content.pendingConfirmations,
     ...content.worthwhileSpending, ...content.nextActions, ...content.questions,
     ...content.opportunities.flatMap((item) => [item.title, item.reason, item.action, item.tradeoff])].join("\n");
-  const internalTerms = /\b(?:[a-z]+[A-Z][a-zA-Z]*|fixed-essential|variable-essential|growth|quality|optional|unknown|housing|food|transport|daily|health|learning|digital|relationships|entertainment|travel|fees|other|true|false)\b|\b[SKRAP]-[A-Z0-9]{3,}\b|\d[\d,，]*(?:\.\d+)?\s*分(?!钟)/;
+  const internalTerms = /\b(?:[a-z]+[A-Z][a-zA-Z]*|fixed-essential|variable-essential|growth|quality|optional|unknown|housing|food|transport|metro|bus|taxi|cycling|daily|health|learning|digital|relationships|entertainment|travel|fees|other|true|false)\b|\b[SKRAP]-[A-Z0-9]{3,}\b|\d[\d,，]*(?:\.\d+)?\s*分(?!钟)/;
   if (internalTerms.test(prose)) throw new Error("AI 月报仍含内部字段或未换算的金额，请重新生成；已有报告已保留");
 }
 

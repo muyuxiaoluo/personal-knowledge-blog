@@ -137,6 +137,12 @@
 .tools-tabs button.active { border-color: rgba(85, 100, 162, .17); background: rgba(255,255,255,.82); box-shadow: 0 10px 28px rgba(50, 58, 103, .08); color: #43528b; }
 .tools-tabs strong { display: block; }
 .tools-tabs strong { font-size: 14px; }
+.developer-mode { display: grid; gap: 14px; }
+.developer-mode p, .developer-mode li { font-size: 13px; line-height: 1.6; }
+.developer-mode-crashes { border-top: 1px solid color-mix(in srgb, currentColor 16%, transparent); padding-top: 10px; }
+.developer-mode-crashes header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.developer-mode-crashes h3 { margin: 0; font-size: 15px; }
+.developer-mode summary { cursor: pointer; font-size: 13px; }
 .tools-content { min-width: 0; }
 .tools-notice { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; border: 1px solid rgba(177, 116, 96, .2); border-radius: 12px; padding: 11px 14px; background: #fff5ef; color: #8d5b53; font-size: 12px; }
 .tools-notice button { border: 0; background: transparent; color: inherit; }

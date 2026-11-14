@@ -3,6 +3,8 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { initialProjectSeeds } from "../app/data/project-seeds";
 import { SqliteProjectRepository } from "../app/data/sqlite-project-repository";
+import { SqliteWorkRepository } from "../app/data/sqlite-work-repository";
+import { DashboardRepository } from "../app/data/dashboard-repository";
 import { rootProjectStatusCounts } from "../app/project-selectors";
 import type {
   SqliteDatabase,
@@ -12,6 +14,7 @@ import type {
 
 class NodeSqliteAdapter implements SqliteDatabase {
   selectCount = 0;
+  beforeTransaction?: () => void;
 
   constructor(private readonly database: DatabaseSync) {}
 
@@ -19,6 +22,7 @@ class NodeSqliteAdapter implements SqliteDatabase {
     sql: string,
     bindValues: SqliteValue[] = [],
   ): Promise<SqliteExecuteResult> {
+    if (sql === "BEGIN IMMEDIATE") this.beforeTransaction?.();
     const result = this.database.prepare(sql).run(...bindValues);
     return {
       rowsAffected: Number(result.changes),
@@ -31,6 +35,33 @@ class NodeSqliteAdapter implements SqliteDatabase {
     return this.database.prepare(sql).all(...bindValues) as T[];
   }
 }
+
+test("a week draft is atomic and a stale confirmation cannot overwrite a newer arrangement", async () => {
+  const database = new DatabaseSync(":memory:");
+  const adapter = new NodeSqliteAdapter(database);
+  const repository = new SqliteProjectRepository(adapter, { seedProjects: initialProjectSeeds });
+  const work = new SqliteWorkRepository(adapter);
+  await work.ready();
+  await new DashboardRepository(adapter).ready();
+  const detail = await repository.get("project-life-workbench-v01");
+  assert.ok(detail);
+  const project = { ...detail.project, id: "new-week-project", title: "学习整理表格", planningMode: "direct" as const };
+  const task = { ...detail.tasks[0], id: "week-action", projectId: project.id, milestoneId: null, title: "读入表格", dueDate: "", status: "later" as const };
+  const start = await repository.readProjectWeek();
+  const write = {
+    revision: start.revision, settings: start.settings, project, tasks: [task], reason: "",
+    placements: [{ action: { id: task.id, projectId: project.id, title: task.title, due: "", date: "", minutes: 25, status: task.status, fixed: false, after: [] }, date: "2026-11-12", reason: "" }],
+  };
+  await assert.rejects(repository.applyProjectWeek({ ...write, tasks: [{ ...task, projectId: "missing-parent" }] }));
+  assert.equal(await repository.get(project.id), null);
+  await repository.applyProjectWeek(write);
+  assert.equal((await work.listPlans()).find((plan) => plan.taskId === task.id)?.estimateMinutes, 25);
+  assert.equal((await repository.get(project.id))?.tasks[0].autoSchedulePaused, true);
+  const current = await repository.readProjectWeek();
+  adapter.beforeTransaction = () => { database.prepare("UPDATE task_plans SET planned_date = ? WHERE task_id = ?").run("2026-11-16", task.id); };
+  await assert.rejects(repository.applyProjectWeek({ ...write, revision: current.revision, project: undefined, tasks: [] }), /安排已变化/);
+  assert.equal((await work.listPlans()).find((plan) => plan.taskId === task.id)?.plannedDate, "2026-11-16");
+});
 
 test("loads the project index in three reads and a selected project in three more", async () => {
   const adapter = new NodeSqliteAdapter(new DatabaseSync(":memory:"));
@@ -45,6 +76,27 @@ test("loads the project index in three reads and a selected project in three mor
   adapter.selectCount = 0;
   await repository.get(projects[0].id);
   assert.equal(adapter.selectCount, 3);
+});
+
+test("planning overview reads progress and accumulations and accepts an action with only a title", async () => {
+  const adapter = new NodeSqliteAdapter(new DatabaseSync(":memory:"));
+  const repository = new SqliteProjectRepository(adapter, { seedProjects: initialProjectSeeds, clock: () => new Date("2026-10-22T04:00:00Z") });
+  const detail = await repository.get("project-life-workbench-v01");
+  assert.ok(detail);
+  const action = await repository.saveTask({ ...detail.tasks[0], id: "title-only", title: "核对一个结果", currentFocus: "", definitionOfDone: "", details: "", steps: [] });
+  assert.equal(action.currentFocus, "");
+  assert.equal(action.definitionOfDone, "");
+  await repository.recordTaskProgress(action.id, "已核对第一个结果", "稍后核对另一个");
+  for (let index = 0; index < 15; index += 1) await repository.addLog(detail.project.id, `计划说明${index}`, null, "plan_revision");
+  await repository.saveAccumulation({ id: "fact", projectId: detail.project.id, milestoneId: null, title: "已有结论", content: "只剩另一个结果待核对", reference: "", createdAt: "", updatedAt: "" });
+  adapter.selectCount = 0;
+  const overview = await repository.listPlanningDetails();
+  assert.equal(adapter.selectCount, 5); // Three index reads, then two batched history reads.
+  const loaded = overview.find((item) => item.project.id === detail.project.id)!;
+  assert.equal(loaded.tasks.find((task) => task.id === action.id)?.definitionOfDone, "");
+  assert.ok(loaded.logs.some((log) => log.kind === "task_progress" && log.body.includes("已核对第一个结果")));
+  assert.equal(loaded.accumulations[0].content, "只剩另一个结果待核对");
+  assert.ok(loaded.logs.length <= 15);
 });
 
 test("seeds staged projects and persists project progress", async () => {

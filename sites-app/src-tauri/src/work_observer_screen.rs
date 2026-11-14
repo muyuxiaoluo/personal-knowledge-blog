@@ -1,9 +1,12 @@
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct DesktopActivity {
     pub title: String,
     pub application: String,
     pub idle_seconds: u32,
     pub available: bool,
+    pub window: usize,
+    pub process_id: u32,
+    pub executable: String,
 }
 
 #[cfg(not(windows))]
@@ -55,12 +58,14 @@ pub(crate) fn activity() -> DesktopActivity {
         GetWindowThreadProcessId(window, &mut process_id);
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
         let mut application = String::new();
+        let mut executable = String::new();
         if !process.is_null() {
             let mut path = [0u16; 1024];
             let mut size = path.len() as u32;
             if QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut size) != 0 {
+                executable = String::from_utf16_lossy(&path[..size as usize]);
                 application =
-                    std::path::Path::new(&String::from_utf16_lossy(&path[..size as usize]))
+                    std::path::Path::new(&executable)
                         .file_name()
                         .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or_default();
@@ -81,6 +86,9 @@ pub(crate) fn activity() -> DesktopActivity {
             application,
             idle_seconds,
             available,
+            window: window as usize,
+            process_id,
+            executable,
         }
     }
 }

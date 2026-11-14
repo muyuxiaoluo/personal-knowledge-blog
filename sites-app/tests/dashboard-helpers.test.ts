@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { eventOccursOn, matchingAiKeywords, morningBriefRefreshSlot, nextCalendarOccurrences, normalizeAiHighlightKeywords, normalizeExternalSourceInput, occurrenceDateInYear, rainVerdict } from "../app/dashboard-helpers";
-import type { CalendarEvent, WeatherSnapshot } from "../app/dashboard-types";
+import { eventOccursOn, matchingAiKeywords, morningBriefRefreshSlot, nextCalendarOccurrences, normalizeAiHighlightKeywords, normalizeExternalSourceInput, occurrenceDateInYear, prioritizeAiBriefItems, rainVerdict } from "../app/dashboard-helpers";
+import type { AiBriefItem, CalendarEvent, WeatherSnapshot } from "../app/dashboard-types";
+
+test("AI highlights keep the actual 0, 2 or 6 stories and prioritize matching interests stably", () => {
+  const items: AiBriefItem[] = Array.from({ length: 6 }, (_, index) => ({
+    id: String(index), title: index === 5 ? "OpenAI update" : `News ${index}`, summary: "", reason: "", category: "", sourceName: "test", publishedAt: "", score: 0, originalUrl: "", aihotUrl: "",
+  }));
+  assert.deepEqual(prioritizeAiBriefItems([], ["OpenAI"]), []);
+  assert.deepEqual(prioritizeAiBriefItems(items.slice(0, 2), ["OpenAI"]), items.slice(0, 2));
+  assert.deepEqual(prioritizeAiBriefItems(items, ["OpenAI"]).map((item) => item.id), ["5", "0", "1", "2", "3", "4"]);
+  assert.equal(items[0].id, "0");
+});
 
 function weather(probability: number, precipitation = 0): WeatherSnapshot {
   return {

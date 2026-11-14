@@ -1,5 +1,8 @@
 import type { AiConversation, AiMessage, AiRestoreState, AiRole } from "../ai-types";
 import type { SqliteDatabase } from "./sqlite-article-repository";
+import type { GlobalPlanningHistoryEntry, GlobalPlanningRecord } from "../global-planning";
+
+export type PlanningHistoryRepository = Pick<SqliteAiRepository, "listPlanningHistory" | "getPlanningRecord" | "savePlanningRecord">;
 
 type ConversationRow = {
   id: string;
@@ -27,6 +30,7 @@ const retentionMs = 30 * 24 * 60 * 60 * 1000;
 
 export class SqliteAiRepository {
   private initialization: Promise<void> | null = null;
+  private planningInitialization: Promise<void> | null = null;
 
   constructor(
     private readonly database: SqliteDatabase,
@@ -67,6 +71,47 @@ export class SqliteAiRepository {
       throw error;
     });
     await this.initialization;
+  }
+
+  private async initializePlanningHistory() {
+    this.planningInitialization ??= (async () => {
+      await this.initialize();
+      // History is opened after startup; keep its new schema out of parallel FTS initialization.
+      await this.database.execute(`CREATE TABLE IF NOT EXISTS ai_planning_history (
+        id TEXT PRIMARY KEY NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`);
+      await this.database.execute("CREATE INDEX IF NOT EXISTS idx_ai_planning_history_created ON ai_planning_history(created_at DESC, id DESC)");
+    })().catch((error) => { this.planningInitialization = null; throw error; });
+    await this.planningInitialization;
+  }
+
+  async savePlanningRecord(record: GlobalPlanningRecord): Promise<void> {
+    await this.initializePlanningHistory();
+    await this.database.execute(
+      `INSERT INTO ai_planning_history(id, payload_json, created_at) VALUES (?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json`,
+      [record.id, JSON.stringify(record), record.createdAt],
+    );
+  }
+
+  async listPlanningHistory(limit = 20, offset = 0): Promise<GlobalPlanningHistoryEntry[]> {
+    await this.initializePlanningHistory();
+    const rows = await this.database.select<{ payload_json: string }>(
+      "SELECT payload_json FROM ai_planning_history ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+      [Math.min(100, Math.max(1, Math.floor(limit))), Math.max(0, Math.floor(offset))],
+    );
+    return rows.map((row) => {
+      const record = JSON.parse(row.payload_json) as GlobalPlanningRecord;
+      return { id: record.id, createdAt: record.createdAt, request: record.request, model: record.model, summary: record.proposal.summary };
+    });
+  }
+
+  async getPlanningRecord(id: string): Promise<GlobalPlanningRecord | null> {
+    await this.initializePlanningHistory();
+    const rows = await this.database.select<{ payload_json: string }>("SELECT payload_json FROM ai_planning_history WHERE id = ?", [id]);
+    return rows[0] ? JSON.parse(rows[0].payload_json) as GlobalPlanningRecord : null;
   }
 
   async cleanupExpired(): Promise<number> {

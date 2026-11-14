@@ -15,8 +15,9 @@ import type { LinkOpenMode, QuickLink } from "../app/workspace-preferences";
 import { BrandLogo, brandForLink } from "./BrandLogo";
 import { Button, SelectMenu } from "./DesktopControls";
 import { desktopApi, openInternalUrl, openQuickLink } from "./integrationApi";
+import { DeveloperMode } from "./DeveloperMode";
 
-type ToolTab = "ai" | "development" | "accounts" | "entertainment" | "web";
+type ToolTab = "ai" | "development" | "accounts" | "entertainment" | "web" | "developer";
 
 const tabs: Array<{ id: ToolTab; label: string }> = [
   { id: "ai", label: "AI模型" },
@@ -24,6 +25,7 @@ const tabs: Array<{ id: ToolTab; label: string }> = [
   { id: "accounts", label: "账户用量" },
   { id: "entertainment", label: "娱乐" },
   { id: "web", label: "常用网站" },
+  { id: "developer", label: "开发者模式" },
 ];
 
 export function ToolCenterPage({ repository, quickLinks, onSaveQuickLinks, onOpenAi, onOpenAiSettings }: {
@@ -147,6 +149,7 @@ export function ToolCenterPage({ repository, quickLinks, onSaveQuickLinks, onOpe
           {tab === "accounts" && <AccountTools balances={balances} usage={usage} busyKey={busyKey} onRefreshBalance={refreshBalance} onReadUsage={readUsage} onReadQwenMonitor={readQwenMonitor} onNotice={setNotice} onOpenAiSettings={onOpenAiSettings} />}
           {tab === "entertainment" && <EntertainmentTools links={quickLinks} onSave={onSaveQuickLinks} onNotice={setNotice} />}
           {tab === "web" && <LinkLibrary area="web" links={quickLinks} onSave={onSaveQuickLinks} onNotice={setNotice} />}
+          {tab === "developer" && <DeveloperMode />}
         </main>
       </div>
     </div>
@@ -423,8 +426,6 @@ function LinkLibrary({ area, links, onSave, onNotice }: { area: "entertainment" 
 export function HomeIntegrationCards({ repository, onOpenTools }: { repository: IntegrationRepository; onOpenTools: () => void }) {
   const [repositories, setRepositories] = useState<GitHubRepositoryConfig[]>([]);
   const [snapshots, setSnapshots] = useState<Record<string, GitHubRepositorySnapshot>>({});
-  const [balances, setBalances] = useState<Partial<Record<"deepseek" | "qwen", ModelBalance>>>({});
-  const [usage, setUsage] = useState<Partial<Record<"deepseek" | "qwen", UsageConsoleSnapshot>>>({});
 
   useEffect(() => {
     let disposed = false;
@@ -438,36 +439,12 @@ export function HomeIntegrationCards({ repository, onOpenTools }: { repository: 
           try { const snapshot = await desktopApi.github.fetch(config.owner, config.name); await repository.saveCache(`github:${config.id}`, snapshot, snapshot.fetchedAt); nextSnapshots[config.id] = snapshot; } catch { /* keep stale data */ }
         }
       }
-      const nextBalances: Partial<Record<"deepseek" | "qwen", ModelBalance>> = {};
-      const nextUsage: Partial<Record<"deepseek" | "qwen", UsageConsoleSnapshot>> = {};
-      for (const provider of ["deepseek", "qwen"] as const) {
-        const cached = await repository.getCache<ModelBalance>(`balance:${provider}`);
-        if (cached) nextBalances[provider] = cached.value;
-        const cachedUsage = await repository.getCache<UsageConsoleSnapshot>(`usage:${provider}`);
-        if (cachedUsage) nextUsage[provider] = cachedUsage.value;
-        if (isTauri() && (!cached || isStale(cached.fetchedAt))) {
-          const configured = provider === "deepseek"
-            ? await desktopApi.secrets.status("deepseek_api_key").catch(() => false)
-            : await Promise.all([
-                desktopApi.secrets.status("aliyun_access_key_id").catch(() => false),
-                desktopApi.secrets.status("aliyun_access_key_secret").catch(() => false),
-              ]).then((values) => values.every(Boolean));
-          if (configured) {
-            try {
-              const balance = provider === "deepseek" ? await desktopApi.balances.deepseek() : await desktopApi.balances.qwen();
-              await repository.saveCache(`balance:${provider}`, balance, balance.fetchedAt);
-              nextBalances[provider] = balance;
-            } catch { /* keep stale balance */ }
-          }
-        }
-      }
-      if (!disposed) { setRepositories(configs); setSnapshots(nextSnapshots); setBalances(nextBalances); setUsage(nextUsage); }
+      if (!disposed) { setRepositories(configs); setSnapshots(nextSnapshots); }
     })();
     return () => { disposed = true; };
   }, [repository]);
 
-  const topUsage = (["deepseek", "qwen"] as const).flatMap((provider) => (usage[provider]?.rows ?? []).map((row) => ({ ...row, provider }))).sort((left, right) => right.totalTokens - left.totalTokens).slice(0, 3);
-  return <div className="home-integration-grid"><section className="workspace-card home-developer-card"><header><div><span>开发动态</span><strong>GitHub 仓库</strong></div><Button variant="ghost" size="small" type="button" onClick={onOpenTools}>查看全部 →</Button></header>{repositories.length ? <div>{repositories.map((config) => { const snapshot = snapshots[config.id]; const commit = snapshot?.commits[0]; const release = snapshot?.releases[0]; return <button key={config.id} onClick={() => snapshot && void openInternalUrl(snapshot.url)}><i><BrandLogo brand="github" /></i><span><strong>{config.displayName || `${config.owner}/${config.name}`}</strong><small>{commit?.message || "等待首次刷新"}</small></span><em>{release?.tagName || (commit ? relativeTime(commit.committedAt) : "未连接")}</em></button>; })}</div> : <p>还没有首页仓库。到工具中心添加私有仓库并配置只读 PAT。</p>}</section><section className="workspace-card home-account-card"><header><div><span>模型账户</span><strong>余额摘要</strong></div><Button variant="secondary" type="button" onClick={onOpenTools}>管理账户 →</Button></header><div>{(["deepseek", "qwen"] as const).map((provider) => { const balance = balances[provider]; return <article key={provider}><i><BrandLogo brand={provider} /></i><span><strong>{provider === "deepseek" ? "DeepSeek" : "Qwen / 阿里云"}</strong><small>{balance ? `更新于 ${relativeTime(balance.fetchedAt)}` : "尚未配置或刷新"}</small></span><em>{balance ? `${balance.currency} ${balance.amount || "0"}` : "—"}</em></article>; })}</div>{topUsage.length ? <ul className="home-token-summary">{topUsage.map((row, index) => <li key={`${row.provider}-${row.model}-${index}`}><span>{row.model}</span><strong>{formatNumber(row.totalTokens)} tokens</strong></li>)}</ul> : <p>Token 用量按需从官方控制台读取，不会在后台持续监控。</p>}</section></div>;
+  return <section className="workspace-card home-developer-card"><header><div><span>开发动态</span><strong>GitHub 仓库</strong></div><Button variant="ghost" size="small" type="button" onClick={onOpenTools}>查看全部 →</Button></header>{repositories.length ? <div>{repositories.map((config) => { const snapshot = snapshots[config.id]; const commit = snapshot?.commits[0]; const release = snapshot?.releases[0]; return <button key={config.id} onClick={() => snapshot && void openInternalUrl(snapshot.url)}><i><BrandLogo brand="github" /></i><span><strong>{config.displayName || `${config.owner}/${config.name}`}</strong><small>{commit?.message || "等待首次刷新"}</small></span><em>{release?.tagName || (commit ? relativeTime(commit.committedAt) : "未连接")}</em></button>; })}</div> : <p>还没有首页仓库。到工具中心添加私有仓库并配置只读 PAT。</p>}</section>;
 }
 
 function BrandMark({ link }: { link: Pick<QuickLink, "title" | "url"> }) {

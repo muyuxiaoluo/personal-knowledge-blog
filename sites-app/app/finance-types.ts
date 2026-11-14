@@ -14,6 +14,10 @@ export type FinanceCategory =
   | "housing"
   | "food"
   | "transport"
+  | "metro"
+  | "bus"
+  | "taxi"
+  | "cycling"
   | "daily"
   | "health"
   | "learning"
@@ -106,7 +110,7 @@ export type FinanceBudget = {
 
 export type FinanceCategoryRule = {
   id: string;
-  matchKind: "merchant" | "description";
+  matchKind: "merchant" | "description" | "merchant-description";
   matchValue: string;
   category: FinanceCategory;
   budgetRole: FinanceBudgetRole;
@@ -137,6 +141,8 @@ export type FinanceImportRecord = {
   decision: FinanceImportDecision;
   reason: string;
   selected: boolean;
+  captureCandidates?: Array<{ id: string; label: string }>;
+  matchedCaptureIds?: string[];
 };
 
 export type FinanceImportCounts = {
@@ -332,6 +338,10 @@ export const FINANCE_CATEGORIES: Array<{ value: FinanceCategory; label: string }
   { value: "housing", label: "居住" },
   { value: "food", label: "餐饮" },
   { value: "transport", label: "交通" },
+  { value: "metro", label: "交通 · 地铁" },
+  { value: "bus", label: "交通 · 公交" },
+  { value: "taxi", label: "交通 · 打车" },
+  { value: "cycling", label: "交通 · 骑行" },
   { value: "daily", label: "日用" },
   { value: "health", label: "健康" },
   { value: "learning", label: "学习成长" },

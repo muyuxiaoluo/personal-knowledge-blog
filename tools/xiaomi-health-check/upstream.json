@@ -1,0 +1,9 @@
+{
+  "repository": "Aaron-gx/mihealth-api",
+  "commit": "05edd1308025795e124f8958b20f8408c41b1c82",
+  "files": {
+    "login.py": "45517468e0e1de324b9fe07a75bde514530bc55c50e6989116766c68b3f24958",
+    "mihealth_client.py": "0f4e4d8b626e5b6fb326ea7225cd4886254197085a7a58a8b7c7a4b98537b84a",
+    "LICENSE": "1126322e2cc8d165adc4c792eeb195717de2bcc7b39be1ce77959d78e87ef685"
+  }
+}

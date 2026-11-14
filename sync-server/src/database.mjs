@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { initializePrivateSync, syncPrivate, pairPrivate } from "./private-sync.mjs";
+import { initializePrivateSync, syncPrivate, syncPrivatePhotos, pairPrivate } from "./private-sync.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -166,6 +166,7 @@ export class SyncDatabase {
   }
 
   syncPrivate(userId, body) { return syncPrivate(this.database, userId, body); }
+  syncPrivatePhotos(userId, body) { return syncPrivatePhotos(this.database, userId, body); }
   pairPrivate(userId, body) { return pairPrivate(this.database, userId, body); }
 
   async authenticate(username, password) {
@@ -615,9 +616,9 @@ export class SyncDatabase {
     const blobCutoff = new Date(currentTime.getTime() - blobGraceHours * 3_600_000).toISOString();
     // Apply the same history-retention window while retaining each latest encrypted
     // envelope, including tombstones whose business operation is invisible here.
-    this.database.prepare(`DELETE FROM private_changes WHERE changed_at < ? AND EXISTS (
-      SELECT 1 FROM private_changes newer WHERE newer.user_id=private_changes.user_id
-      AND newer.id=private_changes.id AND newer.sequence>private_changes.sequence
+    for (const table of ["private_changes", "private_photo_changes"]) this.database.prepare(`DELETE FROM ${table} WHERE changed_at < ? AND EXISTS (
+      SELECT 1 FROM ${table} newer WHERE newer.user_id=${table}.user_id
+      AND newer.id=${table}.id AND newer.sequence>${table}.sequence
     )`).run(historyCutoff);
 
     const compactedChanges = Number(this.database.prepare(

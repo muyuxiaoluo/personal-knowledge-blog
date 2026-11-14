@@ -977,6 +977,8 @@ pub async fn deepseek_release(
         let current = app_handle.state::<DeepSeekBridgeState>();
         if current.lifecycle_generation.load(Ordering::SeqCst) == state_generation {
             if let Some(window) = app_handle.get_webview_window(WINDOW_LABEL) {
+                #[cfg(windows)]
+                crate::developer_mode::record("deepseek_window_destroy");
                 let _ = window.destroy();
             }
         }

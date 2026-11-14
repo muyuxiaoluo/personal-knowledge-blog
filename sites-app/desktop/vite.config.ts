@@ -71,6 +71,9 @@ export default defineConfig({
   plugins: [react(), reloadPersistentRuntime(), buildBudget()],
   clearScreen: false,
   server: {
+    forwardConsole: process.env.WORKBENCH_DEVELOPER_MODE === "1"
+      ? { logLevels: ["debug", "log", "info", "warn", "error"], unhandledErrors: true }
+      : undefined,
     port: 1420,
     strictPort: true,
     host: host || false,

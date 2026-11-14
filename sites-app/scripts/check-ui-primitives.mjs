@@ -11,6 +11,8 @@ const pageStyleLayers = {
   "dashboard.css": "dashboard", "ai-tools.css": "ai", "project-refinements.css": "project",
   "capture.css": "capture", "health.css": "health", "wealth.css": "wealth",
   "notes-final.css": "notes", "avatar-settings.css": "avatar",
+  "note-editor.css": "editor", "focus-tools.css": "focus",
+  "work-observer.css": "observer", "global-planning.css": "planning",
 };
 const isUnregisteredStyle = (value) => /\/styles\/.*\.css$/.test(value) && !pageStyleLayers[path.basename(value)];
 
@@ -94,7 +96,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       violations.push(`${file}: 页面样式必须包在已登记的 pages.${layer} 子层内。`);
     }
   }
-  for (const entry of ["desktop.css", "capture-entry.css"]) {
+  for (const entry of ["desktop.css", "capture-entry.css", "wealth-entry.css", "notes-entry.css"]) {
     violations.push(...inspectStyleEntry(await readFile(path.join(desktopRoot, entry), "utf8")).map((issue) => `${entry}: ${issue}`));
   }
   if (violations.length) {

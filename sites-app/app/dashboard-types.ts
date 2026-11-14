@@ -121,6 +121,7 @@ export type AiBriefSnapshot = {
   topics: AiHotTopic[];
   daily: AiDailyBrief | null;
   attribution: { name: string; url: string };
+  warnings?: string[];
 };
 
 export type MorningBriefSnapshot = {

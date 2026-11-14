@@ -130,7 +130,7 @@ test("imported rows, profiles and reports never enter journal; atomic rollback l
   const tx = await a.finance.addManualTransaction(entry);
   a.sqlite.prepare("DELETE FROM private_journal").run();
   a.sqlite.prepare("UPDATE finance_transactions SET import_batch_id='batch' WHERE id=?").run(tx.id);
-  await a.finance.deleteManualTransaction(tx.id); assert.equal((await a.finance.listManualTransactions()).length, 0); assert.equal((await a.finance.listTransactions()).length, 1);
+  await assert.rejects(a.finance.deleteManualTransaction(tx.id), /导入账单/); assert.equal((await a.finance.listManualTransactions()).length, 0); assert.equal((await a.finance.listTransactions()).length, 1);
   await a.finance.rollbackBatch("batch"); assert.equal((await a.repository.status()).pending, 0);
 });
 

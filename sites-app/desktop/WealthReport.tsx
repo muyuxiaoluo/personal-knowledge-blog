@@ -33,8 +33,8 @@ export function FinanceGoalSummary({ snapshot }: { snapshot: FinanceInsightSnaps
       <div><span>已记录支出</span><strong>{money(snapshot.expenseCents)}</strong></div>
     </div>
     <p>已确认的固定必要支出 {money(roleTotal("fixed-essential"))}，弹性必要支出 {money(roleTotal("variable-essential"))}。先保障这些需求，再比较单价、方式和频次；这些金额不等于最低生活费。</p>
-    <p className="wealth-muted">以上按规划月收入与已记录支出计算，不是完整月份预测；退款另列，不预先增加生活费额度。{snapshot.sampleInsufficient ? "记录还不够，暂不判断长期变化。" : ""}</p>
-    {snapshot.pendingConfirmation.count > 0 ? <p className="wealth-muted">还有 {snapshot.pendingConfirmation.count} 笔支出（{money(snapshot.pendingConfirmation.amountCents)}）需要确认消费性质。</p> : null}
+    <p className="wealth-muted">以上按规划月收入与已记录消费计算；已关联退款抵扣原消费，借还款等资金往来已排除。未关联的退款单列。{snapshot.sampleInsufficient ? "记录还不够，暂不判断长期变化。" : ""}</p>
+    {snapshot.pendingConfirmation.count > 0 ? <p className="wealth-muted">还有 {snapshot.pendingConfirmation.count} 笔支出（{money(snapshot.pendingConfirmation.amountCents)}）待分类，可到“月度整理”按组确认。</p> : null}
   </section>;
 }
 

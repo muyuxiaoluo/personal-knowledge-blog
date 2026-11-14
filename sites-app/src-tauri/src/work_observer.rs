@@ -19,6 +19,13 @@ use tauri::{Emitter, Manager};
 const MAX_RECORDS: usize = 200;
 const MODEL: &str = "qwen3.5:4b-q4_K_M";
 
+pub(crate) fn recap_model(app: &tauri::AppHandle) -> Option<String> {
+    let state = app.state::<ObserverState>();
+    initialize(app, &state).ok()?;
+    let model = state.inner.lock().ok()?.store.config.model.clone();
+    (!model.trim().is_empty()).then_some(model)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct ObserverConfig {
@@ -165,7 +172,7 @@ fn persist(app: &tauri::AppHandle, store: &Store) -> Result<(), String> {
     fs::rename(&temporary, directory.join("records.json"))
         .map_err(|error| format!("工作记录保存失败：{error}"))
 }
-fn snapshot(app: &tauri::AppHandle, state: &ObserverState) -> Result<ObserverStatus, String> {
+pub(crate) fn snapshot(app: &tauri::AppHandle, state: &ObserverState) -> Result<ObserverStatus, String> {
     initialize(app, state)?;
     let inner = state.inner.lock().map_err(|_| "工作记录状态不可用")?;
     Ok(ObserverStatus {
@@ -293,6 +300,12 @@ pub(crate) fn work_observer_set_enabled(
     }
     announce(&app);
     snapshot(&app, &state)
+}
+
+pub(crate) fn pause(app: &tauri::AppHandle, state: &ObserverState) -> Result<(), String> {
+    initialize(app,state)?;
+    {let mut inner=state.inner.lock().map_err(|_|"工作记录状态不可用")?;inner.enabled=false;inner.status="自动观察已暂停".into();}
+    announce(app);Ok(())
 }
 
 #[tauri::command]
@@ -521,7 +534,8 @@ async fn collect(
         let own_window = activity
             .application
             .eq_ignore_ascii_case("life-strategy-library.exe");
-        let screenshot = if config_capture.screenshot && !(automatic && own_window) {
+        let codex_window = activity.application.eq_ignore_ascii_case("codex.exe");
+        let screenshot = if config_capture.screenshot && !(automatic && (own_window || codex_window)) {
             Some(screen::capture())
         } else {
             None

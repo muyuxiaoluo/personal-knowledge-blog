@@ -1,4 +1,27 @@
-# Android 轻量伴侣（MVP）
+# Android 个人工作台
+
+## 当前统一版本（2026-10-26）
+
+Android 只维护和交付一个“个人工作台”应用，健康、餐食与财富共用 `sites-app/mobile` 入口、同一个本机资料库和私人同步账户。功能开发中的候选包属于同一应用的不同构建快照。
+
+- 健康：睡眠、步数、活动与餐食文字记录。
+- 餐食：拍照或从相册选图、核对日期餐次、本机保存；可开启餐食照片加密同步，电脑端点击后识别。
+- 财富：微信支付 / 招行 App 通知金额采集、即时补全提示、22:00 待补全提醒、重复候选确认与手工记账。
+- 账户：统一登录、私人数据配对、照片同步开关和通知采集设置。
+
+运行 `npm run android:build`，统一输出 `deploy-artifacts/android/personal-workbench-arm64.apk`；模拟器包输出同目录 `personal-workbench-x86_64.apk`。默认是启用 Rust 优化、R8 和资源缩减的本地签名测试包，移除调试符号；保留既有测试签名以支持覆盖安装，不属于商店发布。开发调试可显式运行 `npm run android:build:debug`。后续新增手机功能继续加入同一入口，通过这一个构建命令交付，不再另发按功能命名的 APK。
+
+应用 ID 始终为 `com.muyuxiaoluo.workbench`，名称为“个人工作台”。已核对先前餐食与财富候选包使用相同 ID 和签名，可以直接覆盖安装，保留本机数据；无需卸载。旧 `android-mvp`、`finance-capture` 目录中的 APK 仅供历史排查，日常安装使用上述统一位置。实体小米手机的相机/相册返回和真实通知内容仍需实测。
+
+本轮统一构建验证：24 项餐食、财富采集和私人同步测试通过，手机类型检查与前端构建通过，ARM64 / x86_64 原生打包及 ARM64 签名校验通过。隔离模拟器用户中实际覆盖安装，旧的 5 条通知证据、消费补全与关联状态均保留；同一个 APP 可进入健康、手工消费、餐食和通知待补全页面，合成餐食照片经页面保存后可重新查看，各页无横向溢出。测试用户未开启私人同步，未上传测试资料。
+
+优化后 ARM64 测试包大小为 10,104,860 字节（10.10 MB / 9.64 MiB），SHA-256：`edb9a1fc92276e6ee93e6b979daaab642a0cc5e696832a03cf9f35e16c5d68ee`。两次默认构建的大小和 SHA-256 均一致。打包检查确认异常空白与调试符号均为零，签名和 16 KB 原生库对齐通过；R8 映射单独保存在交付目录，不装入 APK。
+
+本轮缩减回归：26 项打包、餐食、财富及私人同步测试通过。隔离模拟器中用真实 release 优化 APK 覆盖原 debug 应用，验证旧通知关联、照片和 Keystore 凭据保留，健康与手工消费保存、餐食照片保存 / 重开、消费补全、凭据增读删，以及后台合成银行通知入库。即时通知具有两个操作，22:00 闹钟登记正常；不代表已验证实体机省电行为或实际晚间投递。详细测量见 [体积分析与修正结果](android-apk-size-analysis-2026-10-26.md)。
+
+## 原 MVP 记录
+
+2026-10-26 补充：手机伴侣已增加微信支付 / 招行 App 交易通知采集、待补全列表、跨来源关联确认、即时与 22:00 晚间提醒；相关金额、补全和关联状态纳入私人同步。通知采集与提醒通过原生后台组件运行，云端同步仍由打开应用、回前台、保存补全或手动操作触发。启用前需双端更新。完整使用范围与验证记录见 [交易通知采集与补全](finance-notification-capture.md)。下文的首版范围为原 MVP 记录。
 
 ## 使用与数据边界
 
@@ -56,7 +79,9 @@ npm run android:build
 npm run android:build -- -Targets x86_64
 ```
 
-构建脚本只生成 debug APK，不生成商店签名、不发布。它在 Windows 缺少符号链接权限时使用已成功编译的原生库副本进行 Gradle 打包，不更改系统开发者模式；其他编译失败仍会中止。通常无需再次运行 `tauri android init`，重新生成后必须保留清单、网络/备份规则和 MainActivity 的修改，构建脚本会检查关键保护配置。
+`scripts/build-android.ps1` 默认生成 release 优化的本地签名 APK，不生成商店签名、不发布。每次只移除对应架构 / 构建类型的自动生成 APK，强制重新封装，保留编译缓存以避免 ZIP 增量替换留下大块空白。Windows 缺少符号链接权限时，仅在日志确认原生编译成功且只因符号链接失败后，使用该库副本进行 Gradle 打包；其他编译失败仍会中止。复制到交付位置前，必须通过新旧签名一致、签名有效性、16 KB 对齐、CPU 架构、ZIP 空白和 ELF 调试段检查。优化参数只作用于本次 Android 命令，不改变桌面编译配置。通常无需再次运行 `tauri android init`，重新生成后必须保留清单、网络 / 备份规则、Gradle 缩减与本地签名配置和 MainActivity 的修改。
+
+缩减后的安装包不开放 WebView 调试。`scripts/build-companion-instrumentation.ps1` 生成独立的同签名 Android 测试夹具；`scripts/run-companion-instrumentation.mjs` 仅允许既有 `FinanceCaptureTest` 模拟器用户 10，在真实安装的 Tauri WebView 内检查页面与插件。夹具不装入交付 APK，不应安装到实体手机。`tests/android-companion-instrumentation/smoke.js` 需要此前合成通知、照片和测试凭据基线，验证时私人同步必须关闭，禁止使用生产账户或真实财务数据。
 
 本次验证（2026-09-08）：`npm run check` 131 项、Windows Rust `cargo test` 41 项、`sync-server npm test` 5 项通过；桌面和 Android 前端构建通过，ARM64 与 x86_64 Android Rust/Kotlin/Gradle 编译通过。debug APK 位于仓库根目录 `deploy-artifacts/android-mvp/personal-workbench-aarch64-debug.apk` 和 `personal-workbench-x86_64-debug.apk`。
 

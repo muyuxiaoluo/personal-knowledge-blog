@@ -3,5 +3,5 @@
   "description": "随手记录：本机 SQLite 与系统凭据存储",
   "platforms": ["android"],
   "windows": ["main"],
-  "permissions": ["core:default", "sql:default", "sql:allow-execute", "companion-secrets:default"]
+  "permissions": ["core:default", "sql:default", "sql:allow-execute", "companion-secrets:default", "companion-finance:default"]
 }

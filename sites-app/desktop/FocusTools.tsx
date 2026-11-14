@@ -1,3 +1,4 @@
+import "./styles/focus-tools.css";
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";

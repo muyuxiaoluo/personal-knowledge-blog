@@ -1,7 +1,7 @@
 import type { LifeDomain } from "./domain-taxonomy";
 import type { ProjectPlanningMode, ProjectTaskStatus } from "./project-types";
 
-export type DeepSeekApiFeature = "projectCreate" | "projectReplan" | "nextAction" | "financeReport" | "healthAdvice";
+export type DeepSeekApiFeature = "projectCreate" | "projectReplan" | "nextAction" | "globalPlanning" | "financeReport" | "healthAdvice";
 
 export type DeepSeekModelSettings = {
   defaultModel: string;
@@ -110,6 +110,12 @@ export type NextActionProposal = {
     details: string;
     dueDate: string;
   };
+};
+
+export type GlobalPlanningProposal = {
+  summary: string;
+  suggestions: Array<{ projectId: string | null; taskId: string | null; reason: string; nextStep: string }>;
+  questions: string[];
 };
 
 export type ActionDaysEstimate = {

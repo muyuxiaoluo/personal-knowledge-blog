@@ -17,7 +17,7 @@ test("goal summary handles missing and impossible plans without claiming success
   snapshot.expenseCents = 119_418;
   const html = renderToStaticMarkup(createElement(FinanceGoalSummary, { snapshot }));
   assert.match(html, /805.82/);
-  assert.match(html, /不是完整月份预测/);
+  assert.match(html, /需覆盖尚未入账的房租、三餐、通勤等开支/);
 });
 
 test("legacy reports do not leak old jargon and new reports keep evidence private", () => {

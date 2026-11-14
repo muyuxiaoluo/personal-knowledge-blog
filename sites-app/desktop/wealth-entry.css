@@ -1,0 +1,3 @@
+@layer pages, visual, controls;
+@import "../app/finance-capture.css" layer(pages.wealth);
+@import "./styles/wealth.css";

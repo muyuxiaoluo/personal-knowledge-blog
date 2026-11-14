@@ -7,6 +7,10 @@ import androidx.core.view.WindowInsetsCompat
 import android.view.View
 
 class MainActivity : TauriActivity() {
+  override fun onNewIntent(intent: android.content.Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+  }
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)

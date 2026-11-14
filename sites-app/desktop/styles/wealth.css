@@ -123,6 +123,25 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 
 .wealth-table-panel { padding: 0; overflow: hidden; }
 .wealth-table-panel > header { padding: 21px 21px 0; }
+.wealth-transaction-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.wealth-table-note { padding: 0 21px 16px; font-size: 12px; }
+.wealth-edit-fields { margin: 16px 0 0; padding: 0; border: 0; min-width: 0; }
+.wealth-spending-fields { display: grid; gap: 18px; margin-top: 18px; }
+.wealth-choice-section { border: 0; padding: 0; margin: 0; min-width: 0; }
+.wealth-choice-section legend { margin-bottom: 9px; color: var(--ink); font-size: 13px; font-weight: 700; }
+.wealth-category-choices { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; }
+.wealth-role-choices { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }
+.wealth-choice-copy { display: flex; width: 100%; min-height: 48px; flex-direction: column; align-items: flex-start; justify-content: center; gap: 5px; text-align: left; }
+.wealth-spending-fields strong { font-size: 13px; }
+.wealth-spending-fields small { font-size: 10px; line-height: 1.5; font-weight: 400; opacity: .8; }
+.wealth-edit-intro { font-size: 12px; }
+.wealth-original-record { margin-top: 14px; font-size: 11px; overflow-wrap: anywhere; }
+.wealth-row-actions { display: flex; gap: 6px; }
+.wealth-dialog footer .wealth-delete-entry { margin-right: auto; }
+.wealth-delete-summary { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; padding: 16px; margin-bottom: 16px; border-radius: 12px; background: var(--wealth-blue-soft); }
+.wealth-delete-summary small { grid-column: 1 / -1; color: var(--muted); }
+.wealth-delete-summary strong { overflow-wrap: anywhere; }
+@media (max-width: 620px) { .wealth-category-choices { grid-template-columns: repeat(2,minmax(0,1fr)); } .wealth-role-choices { grid-template-columns: 1fr; } }
 .wealth-table-empty { display: grid; gap: 13px; padding: 0 21px 21px; }
 .wealth-table-empty > div { display: flex; flex-wrap: wrap; gap: 8px; }
 .wealth-table-empty .wealth-muted { line-height: 1.65; }
@@ -256,6 +275,26 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .wealth-manual-advanced { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 13px; }
 .wealth-manual-advanced summary { color: var(--wealth-blue); cursor: pointer; font-size: 12px; font-weight: 700; }
 .wealth-manual-advanced .wealth-form-grid { margin-top: 13px; }
+
+.wealth-monthly-launcher { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 12px 0; }
+.wealth-monthly-launcher p { margin: 6px 0 0; }
+.wealth-optional-captures { margin: 14px 0; color: var(--muted); font-size: 12px; }
+.wealth-optional-captures > summary { cursor: pointer; }
+.wealth-review-group h3 { margin: 6px 0 0; font-size: 18px; }
+.wealth-review-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin: 14px 0; padding: 0; border: 0; min-width: 0; }
+.wealth-review-controls .wealth-check { margin: 0; }
+.wealth-review-controls > .ui-button { margin-left: auto; }
+.wealth-review-group summary { color: var(--wealth-blue); cursor: pointer; font-size: 12px; }
+.wealth-review-items { display: grid; gap: 10px; padding: 12px 0; margin: 0; list-style: none; }
+.wealth-review-items label { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+.wealth-review-items label span { flex: 1; overflow-wrap: anywhere; }
+.wealth-review-items label strong { flex-shrink: 0; }
+.wealth-import-matches { margin: 16px 0; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--wealth-blue-soft); }
+.wealth-import-matches h3 { margin: 0 0 8px; }
+.wealth-import-matches > div { border-top: 1px solid var(--line); padding: 12px 0; }
+.wealth-import-matches .wealth-check { align-items: flex-start; line-height: 1.6; }
+.wealth-transport-detail { display: flex; gap: 12px; align-items: center; margin-top: 12px; font-size: 12px; }
+.wealth-transport-detail select { min-width: 180px; padding: 8px; background: var(--cream); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; }
 
 @media (max-width: 1080px) {
   .wealth-header { align-items: flex-start; flex-direction: column; }

@@ -458,7 +458,6 @@
 
 @media (max-width: 1220px), (max-height: 660px) {
   .theme-sticker-heading,
-  .theme-sticker-home-heading,
   .theme-sticker-project-hero,
   .theme-sticker-project-editor,
   .theme-sticker-health-hero,
@@ -476,6 +475,10 @@
   }
 
   .project-editor-companion { display: none; }
+}
+
+@media (max-width: 680px) {
+  .theme-sticker-home-heading { display: none; }
 }
 
 @media (max-width: 760px) {

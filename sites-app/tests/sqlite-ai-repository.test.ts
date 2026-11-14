@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { mkdtempSync, rmdirSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SqliteAiRepository } from "../app/data/sqlite-ai-repository";
+import type { GlobalPlanningRecord } from "../app/global-planning";
 import type { SqliteDatabase, SqliteExecuteResult, SqliteValue } from "../app/data/sqlite-article-repository";
 
 class NodeSqliteAdapter implements SqliteDatabase {
@@ -14,6 +18,40 @@ class NodeSqliteAdapter implements SqliteDatabase {
     return this.database.prepare(sql).all(...bindValues as Array<string | number | null>) as T[];
   }
 }
+
+test("planning history survives closing the database, supports pagination and is not expired with chats", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "planning-history-"));
+  const path = join(directory, "history.db");
+  let database: DatabaseSync | null = new DatabaseSync(path);
+  const record = (index: number): GlobalPlanningRecord => ({
+    id: `record-${index}`, createdAt: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+    request: `当时只有${index}分钟`, model: "deepseek-flash", titles: ["当时的行动名称"],
+    proposal: { summary: `先做第${index}件事`, suggestions: [{ projectId: "deleted-project", taskId: "deleted-task", reason: "保留判断依据", nextStep: "核对一条结果" }], questions: ["是否提交？"] },
+    clarifications: [{ question: "还有哪些限制？", answer: "只核对结果" }],
+  });
+  try {
+    const repository = new SqliteAiRepository(new NodeSqliteAdapter(database));
+    for (let index = 0; index < 25; index += 1) await repository.savePlanningRecord(record(index));
+    await repository.savePlanningRecord(record(24));
+    database.close(); database = null;
+    database = new DatabaseSync(path);
+    const reopened = new SqliteAiRepository(new NodeSqliteAdapter(database), () => new Date("2028-01-01"));
+    await reopened.cleanupExpired();
+    const first = await reopened.listPlanningHistory(20);
+    assert.equal(first.length, 20);
+    assert.equal(first[0].id, "record-24");
+    assert.equal(first[19].id, "record-5");
+    const rest = await reopened.listPlanningHistory(20, 20);
+    assert.equal(rest.length, 5);
+    assert.equal(rest[4].id, "record-0");
+    assert.deepEqual(await reopened.getPlanningRecord("record-24"), record(24));
+    assert.equal(await reopened.getPlanningRecord("missing"), null);
+  } finally {
+    database?.close();
+    unlinkSync(path);
+    rmdirSync(directory);
+  }
+});
 
 test("stores ordered AI messages and remote restore state", async () => {
   const database = new DatabaseSync(":memory:");

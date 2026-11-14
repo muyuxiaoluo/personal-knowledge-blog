@@ -11,6 +11,7 @@ export async function privateRequest(server: string, endpoint: string, body: unk
       throw new PrivateRequestError(response.status === 401
         ? login ? "账户或密码不正确，请检查服务器地址与同步账户。" : "登录已过期，请重新登录。"
         : response.status === 429 ? "尝试次数过多，请稍后再试。"
+        : response.status === 404 && endpoint === "/v4/private/photos/sync" ? "服务器尚未支持餐食照片同步，请先升级同步服务；照片仍保存在本机。"
         : response.status === 404 && endpoint.startsWith("/v4/") ? "服务器尚未支持私人同步，请先升级同步服务。"
         : response.status === 400 ? login ? "请检查用户名和密码是否填写完整。" : "私人同步校验失败，请确认恢复码与服务器版本。"
         : "同步服务暂不可用，请稍后重试。");
@@ -73,20 +74,28 @@ export class PrivateSyncClient {
     return running;
   }
   private async run() {
+    await this.runStream(this.repository, "/v4/private/sync");
+    if (await this.repository.meta("photo_enabled") === "1") {
+      await this.runStream(this.repository.photoRepository(), "/v4/private/photos/sync");
+    }
+  }
+  private async runStream(repository: PrivateRepository, endpoint: string) {
     const binding = await accountBinding(this.server, this.username);
-    if (await this.repository.meta("enabled") !== "1" || await this.repository.meta("binding") !== binding) return;
+    const enabled = async () => await repository.meta("enabled") === "1" && (!repository.photoStream || await repository.meta("photo_enabled") === "1");
+    if (!await enabled() || await repository.meta("binding") !== binding) return;
     const code = await this.secrets.get(`private_${binding}`);
     if (!code) throw new Error("请用恢复码配对私人同步。");
     const cipher = await PrivateCrypto.fromRecoveryCode(code);
-    if (cipher.keyId !== await this.repository.meta("key_id")) throw new Error("私人同步密钥不匹配。");
+    if (cipher.keyId !== await repository.meta("key_id")) throw new Error("私人同步密钥不匹配。");
     for (let page = 0; page < 100; page++) {
-      if (await this.repository.meta("enabled") !== "1") return;
-      const changes = await this.repository.prepare(cipher);
-      const cursor = Number(await this.repository.meta("cursor") || 0);
+      if (!await enabled()) return;
+      const changes = await repository.prepare(cipher);
+      const cursor = Number(await repository.meta("cursor") || 0);
       const token = await this.token();
-      if (await this.repository.meta("enabled") !== "1") return;
-      const response = await this.transport(this.server, "/v4/private/sync", { version: 4, keyId: cipher.keyId, deviceId: await this.repository.deviceId(), cursor, changes }, token) as PrivateResponse;
-      await this.repository.receive(response, cipher, changes, cursor);
+      if (!await enabled()) return;
+      const response = await this.transport(this.server, endpoint, { version: 4, keyId: cipher.keyId, deviceId: await repository.deviceId(), cursor, changes }, token) as PrivateResponse;
+      if (!await enabled()) return;
+      await repository.receive(response, cipher, changes, cursor);
       if (!response.hasMore && changes.length === 0) return;
     }
     throw new Error("本轮同步已达分页上限，请继续同步。");

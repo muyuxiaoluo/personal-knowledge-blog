@@ -26,6 +26,7 @@ test("uses the agreed DeepSeek defaults and feature overrides", () => {
   assert.equal(resolveDeepSeekModel("projectCreate", settings), "deepseek-flash");
   assert.equal(resolveDeepSeekModel("projectReplan", settings), "deepseek-flash");
   assert.equal(resolveDeepSeekModel("nextAction", settings), "deepseek-flash");
+  assert.equal(resolveDeepSeekModel("globalPlanning", settings), "deepseek-flash");
   assert.equal(resolveDeepSeekModel("financeReport", settings), "deepseek-flash");
   assert.equal(resolveDeepSeekModel("healthAdvice", settings), "deepseek-flash");
 });
@@ -34,7 +35,7 @@ test("prefers an explicit feature model and keeps preferences device-local", () 
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: new MemoryStorage() });
   const saved = saveDeepSeekModelSettings({
     defaultModel: "deepseek-flash",
-    overrides: { projectCreate: "", projectReplan: "", nextAction: "deepseek-custom", financeReport: "", healthAdvice: "" },
+    overrides: { projectCreate: "", projectReplan: "", nextAction: "deepseek-custom", globalPlanning: "", financeReport: "", healthAdvice: "" },
   });
   assert.equal(resolveDeepSeekModel("nextAction", saved), "deepseek-custom");
   assert.equal(resolveDeepSeekModel("financeReport", saved), "deepseek-flash");
@@ -45,7 +46,7 @@ test("migrates retired V4 web-era aliases to the unified model", () => {
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: new MemoryStorage() });
   const saved = saveDeepSeekModelSettings({
     defaultModel: "deepseek-v4-flash",
-    overrides: { projectCreate: "deepseek-v4-pro", projectReplan: "deepseek-v4-flash-vision-exp", nextAction: "", financeReport: "", healthAdvice: "" },
+    overrides: { projectCreate: "deepseek-v4-pro", projectReplan: "deepseek-v4-flash-vision-exp", nextAction: "", globalPlanning: "", financeReport: "", healthAdvice: "" },
   });
   assert.equal(saved.defaultModel, "deepseek-flash");
   assert.equal(saved.overrides.projectCreate, "deepseek-flash");

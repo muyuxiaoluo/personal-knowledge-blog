@@ -132,7 +132,7 @@ test("unconfirmed roles stay unknown and worthwhile spending is protected", () =
   const snapshot = buildFinanceInsightSnapshot(summary, emptyFinanceBudget("2026-08"), transactions, []);
   assert.equal(summary.budgetRoleTotals["fixed-essential"], 0);
   assert.equal(summary.budgetRoleTotals.unknown, 7_000);
-  assert.deepEqual(snapshot.pendingConfirmation, { count: 2, amountCents: 7_000 });
+  assert.deepEqual(snapshot.pendingConfirmation, { count: 0, amountCents: 0 });
   assert.equal(summary.savingCandidates.length, 0);
 });
 

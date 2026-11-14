@@ -1,6 +1,6 @@
 /* Fixed sublayer order also applies to styles loaded with lazy page modules. */
 @layer pages, visual, controls;
-@layer pages.foundation, pages.workbench, pages.theme, pages.semantic, pages.editor, pages.dashboard, pages.ai, pages.project, pages.capture, pages.health, pages.wealth, pages.notes, pages.avatar, pages.shared, pages.typography, pages.situation, pages.estimate, pages.focus;
+@layer pages.foundation, pages.workbench, pages.theme, pages.semantic, pages.editor, pages.dashboard, pages.ai, pages.project, pages.capture, pages.health, pages.wealth, pages.notes, pages.avatar, pages.shared, pages.typography, pages.situation, pages.estimate, pages.focus, pages.planning, pages.home, pages.observer;
 @import "./styles/foundation.css" layer(pages.foundation);
 @import "./styles/workbench.css" layer(pages.workbench);
 @import "./styles/theme-foundation.css" layer(pages.theme);
@@ -10,7 +10,6 @@
 @import "./styles/themes-typography.css" layer(pages.typography);
 @import "./styles/daily-situation.css" layer(pages.situation);
 @import "./styles/action-estimate.css" layer(pages.estimate);
-@import "./styles/focus-tools.css" layer(pages.focus);
-@import "./styles/work-observer.css" layer(pages.observer);
+@import "./styles/home-overview.css" layer(pages.home);
 @import "./styles/visual-system.css" layer(visual);
 @import "./styles/controls.css" layer(controls);

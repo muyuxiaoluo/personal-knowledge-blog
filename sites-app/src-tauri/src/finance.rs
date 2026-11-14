@@ -7,7 +7,7 @@ use std::{collections::HashMap, path::Path};
 
 const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_ROWS: usize = 50_000;
-const PARSER_VERSION: &str = "finance-parser/3";
+const PARSER_VERSION: &str = "finance-parser/4";
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -445,6 +445,8 @@ fn classify_status(status: &str) -> &'static str {
         "已收钱",
         "已转账",
         "已退款",
+        "部分退款",
+        "全额退款",
         "已存入",
         "对方已收钱",
     ]
@@ -463,14 +465,30 @@ fn classify_kind<'a>(
     description: &'a str,
 ) -> (&'static str, &'static str) {
     let text = format!("{transaction_type}|{direction}|{status}|{description}");
-    if text.contains("退款") {
+    // Refund status on the original payment does not reverse its cash direction.
+    if transaction_type.contains("退款") {
         return ("refund", "in");
     }
-    if text.contains("还款") {
+    if transaction_type.contains("还款") {
         return ("repayment", "out");
     }
     if transaction_type.contains("转账") || transaction_type.contains("资金转移") {
-        return ("transfer", "neutral");
+        return (
+            "transfer",
+            if direction.contains("支出") {
+                "out"
+            } else if direction.contains("收入") {
+                "in"
+            } else {
+                "neutral"
+            },
+        );
+    }
+    if direction.contains("支出") || direction.trim() == "支" || direction.contains("付款") {
+        return ("expense", "out");
+    }
+    if text.contains("退款") {
+        return ("refund", "in");
     }
     if direction.contains("收入")
         || direction.trim() == "收"
@@ -479,9 +497,6 @@ fn classify_kind<'a>(
         || transaction_type.contains("奖金")
     {
         return ("income", "in");
-    }
-    if direction.contains("支出") || direction.trim() == "支" || direction.contains("付款") {
-        return ("expense", "out");
     }
     ("adjustment", "neutral")
 }
@@ -658,11 +673,12 @@ fn finance_system_prompt() -> &'static str {
 严格要求：
 1. 不猜测用户身份、商户或项目名称；不得索要账户号、流水号、姓名或原始备注。
 2. 必要支出只依据输入中已经确认的预算角色；待确认项必须明确标记，不得擅自改分类。
+消费金额已抵扣关联到原付款的退款，借还款等资金往来已排除；不得再次从消费额减去 refundCents。actualNetCents 按当月收付款计算，跨月退款可能使它与当月消费口径不同。
 3. 不提供投资、借贷、保险或具体金融产品的购买建议。
 4. 节约机会只能引用 savingCandidates 中的 evidenceId，每个编号最多用于一个机会。minimumSavingCents 与 maximumSavingCents 必须为非负整数，且不得超过候选的 maximumSavingCents；上限为零表示节省额尚不能确定，可以给出有条件的替代方法，但不能自行估价。周期和异常证据只能用于解释或提问。
 5. 最多给出三项 nextActions。情景金额可以提出解释，但客户端会以本地重算值为准。
 6. 所有展示文本必须是自然、简短的中文。字段名、英文分类、布尔值、证据编号只能留在结构化字段，绝不能出现在标题、原因、行动或任何正文中。正文金额必须除以100，使用“元”（最多两位小数），不得显示以分计的整数。无需逐字段复述输入，不要使用“匿名汇总”“本地证据”“复核某字段”等开发术语。
-7. 分类翻译：fixed-essential=固定必要，variable-essential=弹性必要，growth=成长投入，quality=生活体验，optional=自由消费，unknown=待确认；housing=居住，food=餐饮，transport=交通，daily=日用，health=健康，learning=学习成长，digital=数码工具，relationships=人情关系，entertainment=娱乐兴趣，travel=旅行，fees=金融费用，other=其他。
+7. 分类翻译：fixed-essential=固定必要，variable-essential=弹性必要，growth=成长投入，quality=生活体验，optional=自由消费，unknown=待确认；housing=居住，food=餐饮，transport=交通（含地铁、公交、打车、骑行），metro=地铁，bus=公交，taxi=打车，cycling=骑行，daily=日用，health=健康，learning=学习成长，digital=数码工具，relationships=人情关系，entertainment=娱乐兴趣，travel=旅行，fees=金融费用，other=其他。
 8. overview 用不超过100字给出最重要的结论：按稳定月收入减储蓄目标得到可用生活费，结合已有支出说明余量或缺口。账单可能只覆盖部分月份，不能把当前支出当作完整月度预测，也不能将实际收入未到账说成收入不足。没设收入或目标就先提醒补全，不默认目标为零。目标已够时不要为了省钱继续压缩生活。
 9. essentialStructure 用不超过150字解释先保障哪些需求，再考虑购买方式、单价和频次；固定必要不等于永远不可调整。正常三餐、饮水、通勤、医疗及必要日用品优先保障；弹性必要不等于全额不可省。不能用少吃饭、放弃必要医疗、影响上班或安全的方式达标。若保障生活后仍难达标，建议调整目标或时间。
 10. worthwhileSpending 最多3条，优先保留用户标记值得的消费。成长、社交与适度享受不是天然浪费；生活体验可以设额度而非全取消。pendingConfirmations 只列真实未确认事项，数量为零时返回空数组。历史不足只需一句“记录还不够，暂不判断长期变化”，不要写无意义的检查结果。
@@ -840,6 +856,34 @@ mod tests {
         let records = parse_best_table(vec![rows], "alipay").expect("alipay fixture should parse");
         assert_eq!(records[0].kind, "refund");
         assert_eq!(records[0].amount_cents, 3550);
+    }
+
+    #[test]
+    fn keeps_original_payment_outgoing_when_status_mentions_refunds() {
+        let csv = "交易时间,交易类型,交易对方,商品,收/支,金额(元),当前状态,交易单号\n2026-10-25 17:38:00,商户消费,匿名火锅店,锅底及押金,支出,117.00,已部分退款(20.00元),WX-PAY\n2026-10-25 20:00:00,商户退款,匿名火锅店,退押金,收入,20.00,退款成功,WX-REFUND\n2026-10-26 12:00:00,商户消费,匿名商户,可退款商品,支出,30.00,全额退款,WX-FULL\n";
+        let rows = parse_csv_table(csv.as_bytes()).unwrap();
+        let records = parse_best_table(vec![rows], "wechat").unwrap();
+        assert_eq!(
+            (
+                records[0].kind.as_str(),
+                records[0].direction.as_str(),
+                records[0].amount_cents
+            ),
+            ("expense", "out", 11700)
+        );
+        assert_eq!(
+            (
+                records[1].kind.as_str(),
+                records[1].direction.as_str(),
+                records[1].amount_cents
+            ),
+            ("refund", "in", 2000)
+        );
+        assert_eq!(
+            (records[2].kind.as_str(), records[2].direction.as_str()),
+            ("expense", "out")
+        );
+        assert!(records.iter().all(|record| record.decision == "candidate"));
     }
 
     #[test]

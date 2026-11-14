@@ -1,0 +1,238 @@
+/* Keep the home screen focused on an overview, with details available on demand. */
+.home-overview .home-context-line { margin-bottom: 18px; }
+.home-overview .home-primary-grid { align-items: start; margin-bottom: 16px; }
+.home-overview .home-strategy-card { min-height: 0; }
+.home-overview .home-strategy-card > header { padding: 14px 20px; }
+.home-overview .home-strategy-card > header > div:first-child { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.home-overview .home-strategy-card > header strong { font-size: 15px; }
+.home-overview .home-strategy-card > header span { font-size: 12px; letter-spacing: 0; }
+.home-overview .home-result-summary { padding: 3px 5px; gap: 3px; }
+.home-overview .home-result-summary p { display: none; }
+.home-overview .home-result-summary i { font-size: 14px; }
+.home-overview .home-strategy-body { padding: 14px 20px 16px; gap: 0; }
+.home-overview .home-action-meta { font-size: 12px; gap: 12px; }
+.home-overview .home-action-meta > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: transparent; padding: 0; }
+.home-overview .home-action-meta > time { flex-shrink: 0; }
+.home-overview .home-action-core h1 { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; margin: 10px 0; font-size: 22px; line-height: 1.45; font-weight: 600; }
+.home-overview .home-strategy-actions { flex-wrap: wrap; margin-top: 10px; }
+.home-overview .home-strategy-actions > button { min-height: 34px; padding: 6px 12px; font-size: 13px; }
+.home-overview .home-focus-status { margin: 0; padding: 4px 8px; }
+.home-overview .home-focus-status strong { font-size: 14px; }
+.home-action-details { margin-top: 10px; }
+.home-action-details > summary { color: var(--ui-muted); font-size: 12px; cursor: pointer; }
+.home-action-details > div { padding-top: 8px; color: var(--ui-muted); font-size: 13px; line-height: 1.65; }
+.home-action-details p { margin: 4px 0; }
+.home-next-trigger { display: flex; align-items: center; gap: 12px; width: 100%; padding: 14px 18px; color: var(--ui-ink); font: inherit; text-align: left; cursor: pointer; }
+.home-next-trigger > strong { font-size: 14px; }
+.home-next-trigger > span { margin-left: auto; color: var(--ui-muted); font-size: 12px; }
+.home-next-trigger > i { color: var(--ui-muted); font-style: normal; }
+.home-next-popover { position: fixed; inset: auto; margin: 0; padding: 4px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--ui-border); border-radius: 12px; background: var(--ui-surface); color: var(--ui-ink); box-shadow: 0 12px 32px rgba(31, 37, 66, .18); }
+.home-next-popover > button { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; width: 100%; padding: 12px; border: 0; border-radius: 8px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.home-next-popover > button:hover { background: var(--ui-surface-soft); }
+.home-next-popover > button strong { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: 14px; line-height: 1.6; }
+.home-next-popover > button small { display: block; margin-top: 4px; color: var(--ui-muted); font-size: 12px; }
+.home-next-popover > button em { color: var(--ui-muted); font-size: 12px; font-style: normal; }
+.home-overview .home-rest-body { min-height: 0; padding: 20px; gap: 16px; }
+.home-overview .home-rest-body > i { width: 54px; height: 54px; font-size: 28px; }
+.home-overview .home-rest-body h1 { margin: 6px 0; font-size: 22px; }
+.home-overview .home-empty-today { min-height: 0; padding: 16px 20px; }
+.home-overview .home-empty-today .workspace-empty { padding: 8px 0; }
+
+/* Row spans follow measured card heights, including cache updates and disclosures. */
+.home-adaptive-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: 1px; grid-auto-flow: row dense; align-items: start; gap: 14px; margin-bottom: 14px; }
+.home-adaptive-grid > .morning-overview-grid, .home-adaptive-grid > .morning-information-grid { display: contents; }
+.home-overview .home-adaptive-grid > .home-primary-grid, .home-overview .home-adaptive-grid .home-primary-side { display: contents; }
+.home-adaptive-grid [data-home-tile] { min-width: 0; margin: 0; align-self: start; }
+.home-adaptive-grid :is(.home-strategy-card, .morning-ai-card, .morning-news-card, .home-context-card, .home-rediscovery-card) { grid-column: 1 / span 2; }
+.home-adaptive-grid :is(.global-planning-launcher, .home-next-trigger, .morning-weather-card, .morning-calendar-card, .health-home-strip),
+.home-adaptive-grid:has([data-news-density="long"]) :is(.home-context-card, .home-rediscovery-card) { grid-column: 3; }
+.home-adaptive-grid:not(:has(.morning-information-grid)) :is(.morning-weather-card, .morning-calendar-card, .health-home-strip) { grid-column: auto; }
+.home-adaptive-grid:not(:has(.morning-information-grid)) :is(.home-context-card, .home-rediscovery-card) { grid-column: 1 / -1; }
+.home-overview .home-context-line { gap: 12px; min-height: 56px; margin-bottom: 14px; align-items: center; }
+.home-overview .home-context-line > div:first-child { min-width: 0; }
+.home-overview .home-context-line > div:first-child > strong { color: var(--ui-ink); font-size: 20px; line-height: 1.5; }
+.home-overview .home-context-actions { flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.home-overview .theme-sticker-home-heading { width: 72px; height: 56px; flex-shrink: 0; }
+.home-overview .home-primary-grid { gap: 14px; margin-bottom: 14px; }
+.home-overview .home-primary-side { gap: 12px; }
+.home-overview .global-planning-launcher { gap: 8px; padding: 16px; }
+.home-overview .planning-launcher-description { font-size: 12px; }
+.home-overview .home-strategy-card { --workspace-surface: var(--home-strong); color: #fff; }
+.home-overview .home-strategy-card > header { border-color: rgba(255,255,255,.2); }
+.home-overview .home-strategy-card > header :is(span, strong),
+.home-overview .home-action-core h1, .home-overview .home-rest-body :is(h1, p, span) { color: #fff; }
+.home-overview .home-action-meta > span, .home-overview .home-action-details > summary { color: rgba(255,255,255,.83); }
+.home-overview .home-action-meta > time { color: #ffe0aa; }
+.home-overview .home-action-details > div { color: rgba(255,255,255,.9); }
+.home-overview .home-action-details .action-structure-disclosure { color: var(--ui-ink); }
+.home-overview .home-result-summary { border-color: rgba(255,255,255,.15); background: rgba(255,255,255,.1); }
+.home-overview .home-result-summary i, .home-overview .home-result-summary span { color: #fff; }
+.home-overview .home-result-summary span { background: transparent; }
+.home-overview .home-rest-body > i { background: rgba(255,255,255,.12); }
+.home-overview .home-empty-today .workspace-empty :is(h3, p) { color: #fff; }
+.home-overview .home-action-core { min-width: 0; }
+.home-overview .home-focus-status { background: rgba(255,255,255,.1); color: #fff; }
+.home-overview .home-focus-status :is(span, strong) { color: inherit; }
+
+.home-adaptive-grid .morning-card-heading { min-height: 0; flex-wrap: wrap; gap: 8px; padding: 11px 13px; border-color: var(--ui-border); }
+.home-adaptive-grid .morning-card-heading > div { gap: 1px; }
+.home-adaptive-grid .morning-card-heading strong { color: var(--ui-ink); font-size: 15px; white-space: normal; }
+.home-adaptive-grid .morning-card-heading span { color: var(--ui-primary); font-size: 11px; letter-spacing: 0; }
+.home-adaptive-grid .morning-information-actions { gap: 6px; }
+.home-adaptive-grid .morning-information-actions .morning-brief-header-entry { min-width: 102px; min-height: 34px; padding: 5px 9px; background: var(--home-panel); border-color: var(--ui-border); color: var(--ui-primary); }
+.home-adaptive-grid .morning-brief-header-entry small { font-size: 11px; color: var(--ui-muted); }
+.home-adaptive-grid .morning-weather-card { --workspace-surface: var(--home-panel-deep); }
+.home-adaptive-grid .morning-calendar-card { --workspace-surface: var(--home-panel); }
+.home-adaptive-grid .health-home-strip { --workspace-surface: var(--home-health); }
+.home-adaptive-grid :is(.morning-ai-card, .morning-news-card, .home-context-card, .home-rediscovery-card) { --workspace-surface: var(--ui-surface); }
+.home-adaptive-grid :is(.morning-ai-card, .morning-news-card) > .morning-card-heading { background: var(--home-panel); }
+.home-adaptive-grid .weather-compact-body { grid-template-columns: minmax(0, 1fr); gap: 9px; min-height: 0; padding: 11px 13px; }
+.home-adaptive-grid .weather-now { grid-template-columns: 38px minmax(0, 1fr); gap: 8px; }
+.home-adaptive-grid .weather-now > i { width: 36px; height: 36px; border-radius: 10px; background: rgba(255,255,255,.55); font-size: 22px; }
+.home-adaptive-grid .weather-now > div { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.home-adaptive-grid .weather-now > div strong { color: var(--ui-primary); font-size: 29px; }
+.home-adaptive-grid .weather-now > div span { color: var(--ui-ink); font-size: 12px; }
+.home-adaptive-grid .rain-verdict { grid-template-columns: auto minmax(0,1fr); align-items: baseline; gap: 2px 8px; padding: 6px 8px; border-color: var(--ui-primary); background: rgba(255,255,255,.4); }
+.home-adaptive-grid .rain-verdict :is(b, span) { color: var(--ui-ink); font-size: 11px; }
+.home-adaptive-grid .rain-verdict small { grid-column: 1 / -1; font-size: 11px; color: var(--ui-muted); }
+.home-adaptive-grid .weather-three-days { grid-column: auto; border-color: var(--ui-border); }
+.home-adaptive-grid .weather-three-days article { padding: 5px 4px; background: rgba(255,255,255,.45); }
+.home-adaptive-grid .weather-three-days article > :is(span, strong, small) { color: var(--ui-ink); font-size: 11px; }
+.home-adaptive-grid .weather-three-days article > i { color: var(--ui-primary); font-size: 14px; }
+.home-adaptive-grid :is(.morning-source-status, .calendar-source) { gap: 4px; flex-wrap: wrap; padding: 4px 10px; border-color: var(--ui-border); color: var(--ui-muted); font-size: 11px; }
+.home-adaptive-grid .morning-source-status > div { gap: 4px; }
+.home-adaptive-grid .morning-source-status em { display: none; }
+.home-adaptive-grid .calendar-compact-body { gap: 10px; padding: 10px 13px; }
+.home-adaptive-grid .calendar-today-tile { width: 66px; min-height: 72px; padding: 6px; background: rgba(255,255,255,.5); border-color: var(--ui-border); }
+.home-adaptive-grid .calendar-today-tile strong { color: var(--ui-primary); font-size: 30px; }
+.home-adaptive-grid .calendar-today-tile :is(span, small) { color: var(--ui-muted); font-size: 11px; }
+.home-adaptive-grid .calendar-upcoming { min-width: 0; margin: 0; }
+.home-adaptive-grid .calendar-upcoming :is(strong, p, small) { color: var(--ui-muted); font-size: 11px; }
+.home-adaptive-grid .health-home-strip { padding: 13px; }
+.home-adaptive-grid .health-home-strip > header { gap: 8px; flex-wrap: wrap; }
+.home-adaptive-grid .health-home-strip > header strong { font-size: 14px; color: var(--ui-ink); }
+.home-adaptive-grid .health-home-strip > header span { color: var(--ui-primary); font-size: 11px; letter-spacing: 0; }
+.home-adaptive-grid .health-home-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+.home-adaptive-grid .health-home-metrics p { grid-column: 1 / -1; }
+.home-adaptive-grid .health-home-metrics > div { border-color: var(--ui-primary); }
+.home-adaptive-grid :is(.health-home-empty, .health-home-metrics p) { color: var(--ui-muted); font-size: 12px; }
+.home-adaptive-grid .ai-daily-ribbon { margin-top: 10px; padding: 8px 10px; background: var(--home-detail); border-color: var(--ui-border); }
+.home-adaptive-grid .ai-daily-ribbon :is(span, p) { color: var(--ui-ink); font-size: 12px; }
+.home-adaptive-grid .ai-brief-list article { padding: 11px 0; border-color: var(--ui-border); }
+.home-adaptive-grid .ai-brief-list article.highlighted { padding: 10px 7px; background: var(--home-detail); border-color: var(--ui-border); }
+.home-adaptive-grid .ai-brief-list article > i { background: var(--home-panel); color: var(--ui-primary); }
+.home-adaptive-grid .ai-item-link strong { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; color: var(--ui-ink); font-size: 14px; line-height: 1.6; }
+.home-adaptive-grid .ai-item-link p { -webkit-line-clamp: 2; color: var(--ui-muted); font-size: 12px; line-height: 1.6; }
+.home-adaptive-grid .ai-item-footer { gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.home-adaptive-grid .ai-item-footer small { color: var(--ui-muted); font-size: 11px; }
+.home-adaptive-grid .ai-item-footer nav { margin-left: auto; }
+.home-adaptive-grid .morning-empty { min-height: 96px; padding: 16px; }
+.home-adaptive-grid .weather-setup { grid-template-columns: minmax(0, 1fr); min-height: 0; padding: 13px; }
+.home-adaptive-grid .weather-setup > i { display: none; }
+.home-adaptive-grid .weather-setup :is(strong, p) { color: var(--ui-ink); }
+.home-adaptive-grid .card-header { padding: 12px 14px; border-color: var(--ui-border); }
+.home-adaptive-grid .card-header strong { font-size: 15px; color: var(--ui-ink); }
+.home-adaptive-grid .card-header span { font-size: 12px; color: var(--ui-muted); }
+.home-adaptive-grid .home-context-echo { padding: 12px 14px; }
+.home-adaptive-grid .home-context-card { min-height: 0; }
+.home-adaptive-grid .home-context-echo summary { padding: 0; }
+.home-adaptive-grid .home-context-echo summary strong { font-size: 17px; line-height: 1.5; color: var(--ui-ink); }
+.home-adaptive-grid .home-context-echo summary :is(span, small) { font-size: 12px; color: var(--ui-muted); }
+.home-adaptive-grid .home-rediscovery-card > div:not(.card-header) { padding: 12px 14px; }
+.home-adaptive-grid .home-rediscovery-card > div > p { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.home-overview > .home-developer-card { margin-bottom: 14px; --workspace-surface: var(--ui-surface); }
+.home-overview .home-developer-card > header { gap: 8px; padding: 11px 14px; border-color: var(--ui-border); }
+.home-overview .home-developer-card > header > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; }
+.home-overview .home-developer-card > header :is(span, strong) { color: var(--ui-ink); margin: 0; font-size: 13px; }
+.home-overview .home-developer-card > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.home-overview .home-developer-card > div > button { grid-template-columns: 28px minmax(0,1fr); gap: 8px; padding: 12px 14px; border-color: var(--ui-border); }
+.home-overview .home-developer-card > div > button + button { border-left: 1px solid var(--ui-border); }
+.home-overview .home-developer-card > div > button i { width: 28px; height: 28px; background: var(--home-panel); color: var(--ui-primary); }
+.home-overview .home-developer-card button strong { font-size: 13px; color: var(--ui-ink); }
+.home-overview .home-developer-card button small { font-size: 12px; color: var(--ui-muted); }
+.home-overview .home-developer-card button em { grid-column: 2; font-size: 11px; color: var(--ui-primary); }
+.home-balance-entry { display: inline-flex; }
+.home-balance-entry svg { width: 17px; height: 17px; }
+.home-balance-popover { position: fixed; inset: auto; margin: 0; padding: 16px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--ui-border); border-radius: 14px; background: var(--ui-surface); color: var(--ui-ink); font-family: var(--font-ui); font-size: 13px; line-height: 1.5; box-shadow: 0 16px 48px rgba(24,30,44,.22); }
+.home-balance-popover > header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding-bottom: 6px; }
+.home-overview .home-balance-popover > header strong { font-family: var(--font-ui); font-size: 15px; }
+.home-balance-popover > header span { font-size: 11px; color: var(--ui-muted); }
+.home-balance-popover article { display: grid; grid-template-columns: 32px minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 13px 0; border-bottom: 1px solid var(--ui-border); }
+.home-balance-popover article i { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: var(--ui-surface-soft); }
+.home-balance-popover article :is(strong, small) { display: block; }
+.home-overview .home-balance-popover article strong { font-family: var(--font-ui); font-size: 13px; }
+.home-balance-popover article small { margin-top: 3px; color: var(--ui-muted); font-size: 11px; }
+.home-balance-popover article b { color: var(--ui-primary); font-size: 15px; white-space: nowrap; }
+.home-balance-popover ul { display: grid; gap: 6px; list-style: none; padding: 10px 0; margin: 0; font-size: 11px; }
+.home-balance-popover li { display: flex; justify-content: space-between; gap: 10px; overflow-wrap: anywhere; }
+.home-balance-popover footer { display: flex; justify-content: flex-end; padding-top: 10px; }
+
+@container workspace (max-width: 1000px) {
+  .home-overview .home-primary-grid.with-alternatives { grid-template-columns: minmax(0, 1.7fr) minmax(240px, .8fr); }
+  .home-overview .home-result-summary { display: none; }
+  .home-overview .home-context-line { flex-wrap: wrap; }
+  .home-overview .home-context-actions { width: 100%; justify-content: flex-start; }
+}
+@container workspace (max-width: 850px) {
+  .home-overview .home-primary-grid.with-alternatives { grid-template-columns: minmax(0, 1fr); }
+  .home-overview .home-primary-side { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+  .home-adaptive-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .home-adaptive-grid :is(.home-strategy-card, .morning-ai-card, .morning-news-card, .home-context-card, .home-rediscovery-card, .health-home-strip),
+  .home-adaptive-grid:has([data-news-density="long"]) :is(.home-context-card, .home-rediscovery-card) { grid-column: 1 / -1; }
+  .home-adaptive-grid .morning-weather-card { grid-column: 1; }
+  .home-adaptive-grid .morning-calendar-card { grid-column: 2; }
+  .home-adaptive-grid .global-planning-launcher { grid-column: 1; }
+  .home-adaptive-grid .home-next-trigger { grid-column: 2; }
+  .home-adaptive-grid .health-home-strip { grid-column: 2; }
+}
+@container workspace (max-width: 620px) {
+  .home-adaptive-grid { grid-template-columns: minmax(0, 1fr); }
+  .home-adaptive-grid [data-home-tile], .home-adaptive-grid:has([data-news-density="long"]) :is(.home-context-card, .home-rediscovery-card) { grid-column: 1 / -1; }
+  .home-overview .home-primary-side { grid-template-columns: minmax(0,1fr); }
+  .home-overview .home-context-line { flex-wrap: wrap; }
+  .home-overview .home-context-actions { width: 100%; justify-content: flex-start; }
+  .home-overview .home-developer-card > div { grid-template-columns: minmax(0,1fr); }
+  .home-overview .home-developer-card > div > button + button { border-left: 0; }
+}
+.project-week-dialog {
+  width: min(48rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 3rem);
+  overflow-y: auto;
+}
+
+.project-week-dialog fieldset {
+  min-inline-size: 0;
+  border: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.project-week-dialog fieldset > button {
+  justify-self: start;
+}
+
+.project-week-capacity, .project-week-heading, .project-week-heading > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.project-week-capacity input[type="number"] {
+  width: 4.5rem;
+}
+
+.project-week-heading {
+  justify-content: space-between;
+}
+
+.project-week-summary {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.85rem 1rem;
+}
+
+.project-week-summary p, .project-week-summary h2, .project-week-summary li p {
+  margin: 0;
+}

@@ -39,6 +39,80 @@
   --ui-focus: rgba(169, 71, 82, .22);
 }
 
+/* The default theme remembers its own palette; character themes keep their full palette. */
+:root[data-workspace-theme="default"][data-workspace-palette]:not([data-workspace-palette="original"]),
+:root[data-workspace-theme="default"][data-workspace-palette]:not([data-workspace-palette="original"]) .desktop-workbench.theme-default {
+  --ui-primary: var(--default-theme-primary);
+  --ui-primary-hover: color-mix(in srgb, var(--default-theme-primary) 82%, #172a25);
+  --ui-ink: color-mix(in srgb, var(--default-theme-primary) 25%, #242b33);
+  --ui-muted: color-mix(in srgb, var(--default-theme-primary) 24%, #656a74);
+  --ui-border: color-mix(in srgb, var(--default-theme-primary) 24%, #e2e5e9);
+  --ui-surface: color-mix(in srgb, var(--default-theme-primary) 2%, #fff);
+  --ui-surface-soft: color-mix(in srgb, var(--default-theme-primary) 10%, #f5f6f8);
+  --ui-focus: color-mix(in srgb, var(--default-theme-primary) 25%, transparent);
+  --accent: var(--ui-primary);
+  --ink: var(--ui-ink);
+  --muted: var(--ui-muted);
+  --line: var(--ui-border);
+  --moss: var(--ui-primary);
+  --moss-deep: var(--ui-primary-hover);
+  --moss-soft: var(--ui-surface-soft);
+  --paper: var(--ui-surface);
+  --paper-deep: var(--ui-surface-soft);
+  --cream: var(--ui-surface);
+  --workspace-border: var(--ui-border);
+  --workspace-surface: var(--ui-surface);
+  --workspace-surface-strong: var(--ui-surface);
+  --workspace-surface-soft: var(--ui-surface-soft);
+}
+:root[data-workspace-theme="default"][data-workspace-palette]:not([data-workspace-palette="original"]) .theme-default .workbench-sidebar {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--ui-primary) 65%, #17252b), color-mix(in srgb, var(--ui-primary) 40%, #17252b));
+}
+:root[data-workspace-theme="default"][data-workspace-palette]:not([data-workspace-palette="original"]) .theme-default :is(.workspace-main-stage, .project-workspace, .notes-list-stage) {
+  background: radial-gradient(circle at 90% 6%, color-mix(in srgb, var(--ui-primary) 10%, transparent), transparent 30%), var(--ui-surface-soft);
+}
+.settings-palette-options { display: grid; gap: 10px; padding: 0 20px 20px; }
+.settings-palette-options > span { color: var(--ui-ink); font-size: 13px; font-weight: 600; }
+.settings-palette-options > div { display: flex; gap: 8px; flex-wrap: wrap; }
+.settings-palette-option { display: inline-flex; gap: 7px; align-items: center; border: 1px solid var(--ui-border); border-radius: 9px; padding: 8px 10px; background: var(--ui-surface); color: var(--ui-ink); font: inherit; font-size: 12px; cursor: pointer; }
+.settings-palette-option i { width: 15px; height: 15px; border-radius: 50%; }
+.settings-palette-option[aria-pressed="true"] { border-color: var(--ui-primary); background: var(--ui-surface-soft); box-shadow: 0 0 0 1px var(--ui-primary); }
+.settings-palette-option:focus-visible { outline: 3px solid var(--ui-focus); outline-offset: 2px; }
+.settings-palette-options > small { color: var(--ui-muted); font-size: 12px; }
+
+.home-overview {
+  --home-accent: var(--ui-primary);
+  --home-strong: color-mix(in srgb, var(--home-accent) 88%, #222a38);
+  --home-panel: color-mix(in srgb, var(--home-accent) 14%, var(--ui-surface));
+  --home-panel-deep: color-mix(in srgb, var(--home-accent) 24%, var(--ui-surface));
+  --home-health: color-mix(in srgb, var(--home-accent) 18%, var(--ui-surface));
+  --home-detail: color-mix(in srgb, var(--home-accent) 6%, var(--ui-surface));
+}
+.theme-roxy .home-overview {
+  --home-strong: linear-gradient(125deg, #424d88, #6263a3);
+  --home-panel-deep: linear-gradient(135deg, #d1ddf4, #dad9f0);
+  --home-panel: #e3e4f6;
+  --home-health: #dce7f3;
+}
+.theme-asuna .home-overview {
+  --home-strong: linear-gradient(125deg, #923d4c, #bd6269);
+  --home-panel-deep: linear-gradient(135deg, #f2dbc3, #f3dfd8);
+  --home-panel: #f4e4df;
+  --home-health: #eee5d3;
+}
+.home-overview .home-strategy-card { --workspace-surface: var(--home-strong); }
+.home-overview .home-strategy-actions {
+  --ui-primary: #dfc47c;
+  --ui-primary-hover: #e9d397;
+  --ui-on-primary: #3d3422;
+}
+.home-overview.home-launchpad { padding-top: 22px; padding-bottom: 32px; }
+.home-adaptive-grid .card-header { padding: 12px 14px; }
+.home-adaptive-grid .card-header strong { font-size: 15px; }
+.home-adaptive-grid .card-header span { font-size: 12px; }
+.home-overview .home-strategy-card > header { --ui-surface: rgba(255,255,255,.12); --ui-ink: #fff; --ui-border: rgba(255,255,255,.28); --ui-surface-soft: rgba(255,255,255,.2); --ui-primary: #fff; }
+.home-overview .home-empty-today .workspace-empty :is(strong, p) { color: #fff; }
+
 .desktop-workbench.font-preset-modern {
   --font-display: var(--font-ui);
   --font-reading: var(--font-ui);

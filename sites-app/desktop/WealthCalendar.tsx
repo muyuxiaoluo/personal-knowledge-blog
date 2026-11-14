@@ -16,7 +16,7 @@ export function WealthCalendar({ month, today, transactions }: { month: string; 
         <div><span>最高消费日</span><strong>{calendar.peak ? `${Number(calendar.peak.date.slice(8))}日 · ${money(calendar.peak.amountCents)}` : "暂无支出"}</strong></div>
         <div><span>消费最高两天占比</span><strong>{calendar.totalCents ? `${(calendar.topTwoShare * 100).toFixed(1)}%` : "—"}</strong><small>{calendar.spendingDays} 天有支出记录</small></div>
       </div>
-      <p className="wealth-muted">仅统计消费支出，退款、转账和还款另计。点击日期查看明细；无记录不代表当天没有消费。</p>
+      <p className="wealth-muted">消费按关联退款抵扣后的金额统计，退押金抵扣原付款当天；借还款等资金往来已排除。点击日期查看明细；无记录不代表当天没有消费。</p>
       <div className="wealth-calendar-scroll"><div className="wealth-calendar-grid" aria-label={`${calendar.label}每日消费`}>
         {["一", "二", "三", "四", "五", "六", "日"].map((day) => <div className="wealth-calendar-weekday" key={day}>周{day}</div>)}
         {Array.from({ length: calendar.leadingDays }, (_, index) => <div aria-hidden="true" key={`blank-${index}`} />)}

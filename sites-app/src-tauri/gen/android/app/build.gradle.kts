@@ -30,14 +30,15 @@ android {
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false
-            packaging {                jniLibs.keepDebugSymbols.add("*/arm64-v8a/*.so")
-                jniLibs.keepDebugSymbols.add("*/armeabi-v7a/*.so")
-                jniLibs.keepDebugSymbols.add("*/x86/*.so")
-                jniLibs.keepDebugSymbols.add("*/x86_64/*.so")
-            }
         }
         getByName("release") {
             isMinifyEnabled = true
+            isShrinkResources = true
+            // Locally delivered optimized builds must upgrade the existing test app.
+            // Ordinary release builds remain unsigned unless configured separately.
+            if (providers.gradleProperty("workbenchLocalSigning").orNull == "true") {
+                signingConfig = signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))

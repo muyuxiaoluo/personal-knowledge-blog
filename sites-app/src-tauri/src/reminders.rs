@@ -160,6 +160,8 @@ async fn save_last_reminder_date(
 fn dispatch_health_reminder(app: &tauri::AppHandle, body: &str) -> Result<(), String> {
     // Windows development builds and disabled OS notification centers can silently
     // discard a native toast. Always pair it with an actionable in-app prompt.
+    #[cfg(windows)]
+    crate::developer_mode::record("health_reminder");
     crate::reveal_main_window(app)?;
     app.emit(
         "health-reminder-due",
@@ -168,12 +170,18 @@ fn dispatch_health_reminder(app: &tauri::AppHandle, body: &str) -> Result<(), St
         },
     )
     .map_err(|error| format!("无法显示应用内健康提醒：{error}"))?;
-    let _ = app
+    let notification = app
         .notification()
         .builder()
         .title("今晚的健康记录")
         .body(body)
         .show();
+    #[cfg(windows)]
+    crate::developer_mode::record(
+        if notification.is_ok() { "notification_queued" } else { "notification_request_failed" },
+    );
+    #[cfg(not(windows))]
+    let _ = notification;
     Ok(())
 }
 

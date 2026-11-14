@@ -1,0 +1,99 @@
+{
+  "version": 3,
+  "width": 256,
+  "height": 320,
+  "fps": 60,
+  "columns": 6,
+  "rows": 4,
+  "pageFrames": 24,
+  "neutral": "neutral.webp",
+  "clips": {
+    "blink": {
+      "frames": 20,
+      "durationMs": 316.6666666666667,
+      "pages": [
+        "blink-00.webp"
+      ]
+    },
+    "thinking": {
+      "frames": 106,
+      "durationMs": 1750.0,
+      "pages": [
+        "thinking-00.webp",
+        "thinking-01.webp",
+        "thinking-02.webp",
+        "thinking-03.webp",
+        "thinking-04.webp"
+      ]
+    },
+    "stretch": {
+      "frames": 85,
+      "durationMs": 1400.0,
+      "pages": [
+        "stretch-00.webp",
+        "stretch-01.webp",
+        "stretch-02.webp",
+        "stretch-03.webp"
+      ]
+    },
+    "spin": {
+      "frames": 1,
+      "durationMs": 4200,
+      "pages": [
+        "neutral.webp"
+      ],
+      "procedural": true
+    },
+    "cheer": {
+      "frames": 241,
+      "durationMs": 4000.0,
+      "pages": [
+        "cheer-00.webp",
+        "cheer-01.webp",
+        "cheer-02.webp",
+        "cheer-03.webp",
+        "cheer-04.webp",
+        "cheer-05.webp",
+        "cheer-06.webp",
+        "cheer-07.webp",
+        "cheer-08.webp",
+        "cheer-09.webp",
+        "cheer-10.webp"
+      ]
+    },
+    "cuddle": {
+      "frames": 241,
+      "durationMs": 4000.0,
+      "pages": [
+        "cuddle-00.webp",
+        "cuddle-01.webp",
+        "cuddle-02.webp",
+        "cuddle-03.webp",
+        "cuddle-04.webp",
+        "cuddle-05.webp",
+        "cuddle-06.webp",
+        "cuddle-07.webp",
+        "cuddle-08.webp",
+        "cuddle-09.webp",
+        "cuddle-10.webp"
+      ]
+    },
+    "sleepy": {
+      "frames": 241,
+      "durationMs": 4000.0,
+      "pages": [
+        "sleepy-00.webp",
+        "sleepy-01.webp",
+        "sleepy-02.webp",
+        "sleepy-03.webp",
+        "sleepy-04.webp",
+        "sleepy-05.webp",
+        "sleepy-06.webp",
+        "sleepy-07.webp",
+        "sleepy-08.webp",
+        "sleepy-09.webp",
+        "sleepy-10.webp"
+      ]
+    }
+  }
+}

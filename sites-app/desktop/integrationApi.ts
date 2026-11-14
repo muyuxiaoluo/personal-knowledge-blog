@@ -6,6 +6,7 @@ import type {
   DeepSeekStructuredResponse,
   ActionDaysEstimate,
   NextActionProposal,
+  GlobalPlanningProposal,
   ProjectCreationProposal,
   ProjectReplanProposal,
   ProjectRouteProposal,
@@ -32,12 +33,27 @@ import type {
   FinanceInsightSnapshot,
 } from "../app/finance-types";
 import type { HealthAiAdviceContent } from "../app/health-types";
+import type { XiaomiConnection, XiaomiLoginReply, XiaomiQrLoginReply, XiaomiSnapshot } from "../app/xiaomi-health";
+import type { WeekAiDraft, WeekDayChange } from "../app/project-week";
 
 function requireTauri() {
   if (!isTauri()) throw new Error("该功能需要在真实桌面应用中使用");
 }
 
 export const desktopApi = {
+  xiaomi: {
+    status: () => { requireTauri(); return invoke<XiaomiConnection>("xiaomi_health_status"); },
+    qrStart: () => { requireTauri(); return invoke<XiaomiQrLoginReply>("xiaomi_health_qr_start"); },
+    qrPoll: (loginId: string) => { requireTauri(); return invoke<XiaomiQrLoginReply>("xiaomi_health_qr_poll", { loginId }); },
+    terminalLogin: () => { requireTauri(); return invoke<void>("xiaomi_health_terminal_login"); },
+    login: (username: string, password: string, loginId: string | null = null, captcha: string | null = null) => {
+      requireTauri(); return invoke<XiaomiLoginReply>("xiaomi_health_login", { username, password, loginId, captcha });
+    },
+    verify: (loginId: string, code: string) => { requireTauri(); return invoke<XiaomiLoginReply>("xiaomi_health_verify", { loginId, code }); },
+    diagnostics: () => { requireTauri(); return invoke<unknown[]>("xiaomi_health_diagnostics"); },
+    fetch: () => { requireTauri(); return invoke<XiaomiSnapshot>("xiaomi_health_fetch"); },
+    disconnect: () => { requireTauri(); return invoke<void>("xiaomi_health_disconnect"); },
+  },
   finance: {
     previewImport: (path: string, source: FinanceImportSource) => {
       requireTauri();
@@ -49,8 +65,11 @@ export const desktopApi = {
     },
   },
   deepseek: {
+    planGlobally: (request: { model: string; input: unknown }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<GlobalPlanningProposal>>("deepseek_api_global_planning", { request }); },
     apiModels: () => { requireTauri(); return invoke<DeepSeekModel[]>("deepseek_api_list_models"); },
     createProjectPlan: (request: { model: string; input: unknown; allowedMilestoneIds?: string[]; allowedTaskIds?: string[] }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<ProjectCreationProposal>>("deepseek_api_project_create", { request }); },
+    projectWeek: (request: { model: string; input: unknown }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<WeekAiDraft>>("deepseek_api_project_week", { request }); },
+    weekChange: (request: { model: string; input: unknown }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<{ days: WeekDayChange[]; question: string }>>("deepseek_api_week_change", { request }); },
     replanProject: (request: { model: string; input: unknown; allowedMilestoneIds: string[]; allowedTaskIds: string[] }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<ProjectReplanProposal>>("deepseek_api_project_replan", { request }); },
     planProjectRoute: (request: { model: string; input: unknown; allowedMilestoneIds: string[]; allowedTaskIds: string[] }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<ProjectRouteProposal>>("deepseek_api_project_route", { request }); },
     suggestNextAction: (request: { model: string; input: unknown; allowedMilestoneIds: string[]; allowedTaskIds: string[] }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<NextActionProposal>>("deepseek_api_next_action", { request }); },

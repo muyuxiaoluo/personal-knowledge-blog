@@ -1,0 +1,26 @@
+{
+  "cell": [
+    256,
+    320
+  ],
+  "clips": {
+    "cheer": {
+      "durationMs": 4060,
+      "sourceFrames": 24,
+      "frames": 120,
+      "fps": 30
+    },
+    "cuddle": {
+      "durationMs": 4060,
+      "sourceFrames": 24,
+      "frames": 120,
+      "fps": 30
+    },
+    "sleepy": {
+      "durationMs": 4060,
+      "sourceFrames": 24,
+      "frames": 120,
+      "fps": 30
+    }
+  }
+}

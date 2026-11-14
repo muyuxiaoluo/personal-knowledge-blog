@@ -31,6 +31,10 @@ import { MarkdownDocument } from "./MarkdownDocument";
 import { ThemeSticker } from "./DesktopThemes";
 import { SelectMenu } from "./DesktopControls";
 import { desktopApi } from "./integrationApi";
+import { XiaomiHealthPanel } from "./XiaomiHealthPanel";
+import { MealPhotoPanel } from "./MealPhotoPanel";
+import { pauseXiaomiForEditing, XIAOMI_BUSY_EVENT, XIAOMI_SYNC_EVENT, xiaomiSyncBusy } from "./xiaomi-sync";
+import type { XiaomiDayState } from "../app/xiaomi-health";
 
 type HealthTab = "today" | "trends" | "profile";
 
@@ -64,22 +68,33 @@ export function HealthPage({
   const [recentLogs, setRecentLogs] = useState<HealthDailyLog[]>([]);
   const [report, setReport] = useState<HealthAiReport | null>(null);
   const [loading, setLoading] = useState(true);
+  const [savedSignature, setSavedSignature] = useState("");
+  const [syncRevision, setSyncRevision] = useState(0);
+  const [xiaomiDay, setXiaomiDay] = useState<XiaomiDayState | null>(null);
+  const [sourceBusy, setSourceBusy] = useState(xiaomiSyncBusy);
+  const [photoSaving, setPhotoSaving] = useState(false);
+  const dirty = !loading && savedSignature !== JSON.stringify([daily, mealDrafts]);
+  useEffect(() => {
+    pauseXiaomiForEditing(dirty);
+    return () => pauseXiaomiForEditing(false);
+  }, [dirty]);
+  useEffect(() => {
+    const reload = () => setSyncRevision(value => value + 1);
+    const updateBusy = () => setSourceBusy(xiaomiSyncBusy());
+    window.addEventListener(XIAOMI_SYNC_EVENT, reload);
+    window.addEventListener(XIAOMI_BUSY_EVENT, updateBusy);
+    return () => { window.removeEventListener(XIAOMI_SYNC_EVENT, reload); window.removeEventListener(XIAOMI_BUSY_EVENT, updateBusy); };
+  }, []);
   const [saving, setSaving] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiStage, setAiStage] = useState("");
   const [mealAdviceOpen, setMealAdviceOpen] = useState(false);
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
   const [hasDeepSeekKey, setHasDeepSeekKey] = useState(false);
-  const [mealImageBusySlot, setMealImageBusySlot] = useState<HealthMealSlot | null>(null);
-  const [mealImageError, setMealImageError] = useState("");
-  const [mealRecognition, setMealRecognition] = useState<{ slot: HealthMealSlot; text: string; model: string } | null>(null);
-  const mealImageInputs = useRef<Partial<Record<HealthMealSlot, HTMLInputElement>>>({});
-  const mealImageRequestRef = useRef(0);
-  const mealDraftsRef = useRef(mealDrafts);
   const selectedDateRef = useRef(selectedDate);
   const aiRequestRef = useRef(0);
   selectedDateRef.current = selectedDate;
-  mealDraftsRef.current = mealDrafts;
 
   useEffect(() => {
     let active = true;
@@ -91,11 +106,14 @@ export function HealthPage({
       repository.listDaily("", 28),
       repository.getReport(selectedDate),
       desktopApi.secrets.status("deepseek_api_key").catch(() => false),
-    ]).then(([nextProfile, nextDaily, meals, logs, nextReport, keyAvailable]) => {
+      repository.getXiaomiDay(selectedDate),
+    ]).then(([nextProfile, nextDaily, meals, logs, nextReport, keyAvailable, source]) => {
       if (!active) return;
       setProfile(nextProfile);
       setDaily(nextDaily);
       setMealDrafts(mealsToDrafts(meals));
+      setSavedSignature(JSON.stringify([nextDaily, mealsToDrafts(meals)]));
+      setXiaomiDay(source);
       setRecentLogs(logs);
       setReport(nextReport);
       setHasDeepSeekKey(keyAvailable);
@@ -105,7 +123,7 @@ export function HealthPage({
       if (active) setLoading(false);
     });
     return () => { active = false; };
-  }, [onNotice, repository, selectedDate]);
+  }, [onNotice, repository, selectedDate, syncRevision]);
 
   const meals = useMemo(() => draftsToMeals(selectedDate, mealDrafts), [mealDrafts, selectedDate]);
   const analysis = useMemo(() => analyzeHealthDay(profile, daily, meals), [daily, meals, profile]);
@@ -120,6 +138,7 @@ export function HealthPage({
     try {
       const { daily: savedDaily } = await saveHealthDay(repository, daily, meals);
       setDaily(savedDaily);
+      setSavedSignature(JSON.stringify([savedDaily, mealDrafts]));
       const refreshed = await repository.listDaily("", 28);
       setRecentLogs(refreshed);
       onChanged();
@@ -180,6 +199,7 @@ export function HealthPage({
       const savedReport = await repository.saveReport({ date: requestDate, content: answer, generatedAt: "" });
       if (requestId !== aiRequestRef.current || selectedDateRef.current !== requestDate) return;
       setReport(savedReport);
+      setReportOpen(true);
       setAiStage("");
       onChanged();
       onNotice(`AI 健康建议已通过 ${response.model} 生成并保存。`);
@@ -192,44 +212,13 @@ export function HealthPage({
     }
   }
 
-  async function recognizeMeal(slot: HealthMealSlot, file: File) {
-    const requestId = ++mealImageRequestRef.current;
-    const requestDate = selectedDate;
-    setMealRecognition(null);
-    setMealImageError("");
-    if (!hasDeepSeekKey) {
-      setMealImageError("请先在“设置 → AI 与模型”配置 DeepSeek API Key。");
-      return;
-    }
-    setMealImageBusySlot(slot);
-    try {
-      const imageDataUrl = await prepareMealImage(file);
-      const response = await desktopApi.deepseek.recognizeMeal(imageDataUrl);
-      if (requestId !== mealImageRequestRef.current || selectedDateRef.current !== requestDate) return;
-      const recognized = response.content.description.trim();
-      if (!recognized || recognized.length > 240) throw new Error("餐食识别结果无效，请手动填写。");
-      const existing = mealDraftsRef.current[slot].description.trim();
-      const text = existing && !existing.includes(recognized) ? `${existing}\n${recognized}` : existing || recognized;
-      setMealRecognition({ slot, text, model: response.model });
-    } catch (error) {
-      if (requestId === mealImageRequestRef.current && selectedDateRef.current === requestDate) {
-        setMealImageError(error instanceof Error ? error.message : String(error));
-      }
-    } finally {
-      if (requestId === mealImageRequestRef.current) setMealImageBusySlot(null);
-    }
-  }
-
   function selectDate(date: string) {
-    if (!date || date === selectedDate || aiBusy || saving) return;
-    mealImageRequestRef.current += 1;
-    setMealImageBusySlot(null);
-    setMealImageError("");
-    setMealRecognition(null);
+    if (!date || date === selectedDate || aiBusy || saving || sourceBusy || photoSaving) return;
     selectedDateRef.current = date;
     setReport(null);
     setMealAdviceOpen(false);
     setAiPanelOpen(false);
+    setReportOpen(false);
     setLoading(true);
     setSelectedDate(date);
   }
@@ -254,13 +243,15 @@ export function HealthPage({
         </nav>
       </header>
 
+      <XiaomiHealthPanel repository={repository} date={selectedDate} daily={daily} dirty={dirty} onChanged={onChanged} onNotice={onNotice} />
+
       {tab === "today" && <>
         <div className="health-date-row">
-          <label><span>记录日期</span><input type="date" max={today} value={selectedDate} disabled={aiBusy || saving} onChange={(event) => selectDate(event.target.value)} /></label>
-          <span>{selectedDate === today ? "今天" : "历史记录"} · 由你手动填写</span>
+          <label><span>记录日期</span><input type="date" max={today} value={selectedDate} disabled={aiBusy || saving || sourceBusy || photoSaving} onChange={(event) => selectDate(event.target.value)} /></label>
+          <span>{selectedDate === today ? "今天" : "历史记录"} · 可手动记录或从小米同步</span>
         </div>
 
-        <form className="health-layout" onSubmit={(event) => void saveDay(event)}>
+        <form className="health-layout" inert={sourceBusy || photoSaving} aria-busy={sourceBusy || photoSaving} onSubmit={(event) => void saveDay(event)}>
           <div className="health-entry-column">
             <section className="health-card">
               <CardTitle eyebrow="01" title="睡眠与状态" subtitle="填写入睡和起床时间后自动估算时长，也可以手动修正" />
@@ -270,7 +261,7 @@ export function HealthPage({
                 <NumberOrTimeField label="起床" type="time" value={daily.sleepEnd} onChange={(value) => setDaily((current) => updateSleepClock(current, "sleepEnd", value))} />
                 <NumberField label="睡眠感受" suffix="/ 5" value={daily.sleepQuality} min={1} max={5} onChange={(value) => setDaily({ ...daily, sleepQuality: value })} />
               </div>
-              <p className="health-inline-result">当前采用：<strong>{formatSleepDuration(analysis.sleepMinutes)}</strong><span>{sleepEstimate !== null && daily.sleepMinutes === sleepEstimate ? "由起止时间估算；夜间清醒不一定能反映在内" : daily.sleepMinutes !== null ? "手动修正的时长" : sleepEstimate !== null ? "由起止时间估算" : ""}</span></p>
+              <p className="health-inline-result">当前采用：<strong>{formatSleepDuration(analysis.sleepMinutes)}</strong><span>{xiaomiDay?.latest.sleep && !xiaomiDay.sleepLocked && daily.sleepMinutes !== null && daily.sleepMinutes === xiaomiDay.latest.sleep.sleepMinutes ? "小米报告的睡眠时长" : sleepEstimate !== null && daily.sleepMinutes === sleepEstimate ? "由起止时间估算；夜间清醒不一定能反映在内" : daily.sleepMinutes !== null ? "手动修正的时长" : sleepEstimate !== null ? "由起止时间估算" : ""}</span></p>
             </section>
 
             <section className="health-card">
@@ -286,29 +277,18 @@ export function HealthPage({
 
             <section className="health-card">
               <CardTitle eyebrow="03" title="今天吃了什么" subtitle="可手写，也可上传照片生成可编辑的餐食草稿" />
+              <MealPhotoPanel repository={repository.mealPhotos} date={selectedDate} dirty={dirty} hasKey={hasDeepSeekKey} onSaving={setPhotoSaving} onConfirmed={async () => {
+                const next = mealsToDrafts(await repository.listMeals(selectedDate));
+                if (selectedDateRef.current !== selectedDate) { onChanged(); return; }
+                setMealDrafts(next); setSavedSignature(JSON.stringify([daily, next])); onChanged();
+              }} />
               <div className="health-meal-list">
                 {healthMealSlots.map((slot) => <div className="health-meal-row" key={slot.value}>
                   <strong>{slot.label}</strong>
                   <input type="time" aria-label={`${slot.label}时间`} value={mealDrafts[slot.value].eatenAt} onChange={(event) => updateMeal(slot.value, "eatenAt", event.target.value, setMealDrafts)} />
-                  <textarea rows={2} aria-label={`${slot.label}餐食记录`} value={mealDrafts[slot.value].description} disabled={mealRecognition?.slot === slot.value} onChange={(event) => updateMeal(slot.value, "description", event.target.value, setMealDrafts)} placeholder={mealPlaceholder(slot.value)} />
-                  <input ref={(node) => { mealImageInputs.current[slot.value] = node ?? undefined; }} className="health-meal-file" type="file" accept="image/jpeg,image/png,image/webp" aria-label={`选择${slot.label}照片`} onChange={(event) => {
-                    const file = event.currentTarget.files?.[0];
-                    event.currentTarget.value = "";
-                    if (file) void recognizeMeal(slot.value, file);
-                  }} />
-                  <Button variant="secondary" size="small" type="button" disabled={mealImageBusySlot !== null} onClick={() => mealImageInputs.current[slot.value]?.click()}>{mealImageBusySlot === slot.value ? "识别中…" : "识别照片"}</Button>
+                  <textarea rows={2} aria-label={`${slot.label}餐食记录`} value={mealDrafts[slot.value].description} onChange={(event) => updateMeal(slot.value, "description", event.target.value, setMealDrafts)} placeholder={mealPlaceholder(slot.value)} />
                 </div>)}
               </div>
-              <p className="health-meal-photo-note">仅在点击识别后发送这张压缩照片；图片不会随记录保存。份量只作粗略估计，请核对后填入。</p>
-              {mealImageError && <p className="health-meal-image-error" role="alert">{mealImageError}{!hasDeepSeekKey && <Button variant="secondary" size="small" type="button" onClick={onOpenAiSettings}>前往 AI 与模型设置</Button>}</p>}
-              {mealRecognition && <div className="health-meal-recognition" role="region" aria-label="餐食识别预览">
-                <header><strong>{healthMealSlots.find((slot) => slot.value === mealRecognition.slot)?.label}识别草稿</strong><span>{mealRecognition.model} · 请检查内容</span></header>
-                <textarea rows={3} aria-label="编辑餐食识别草稿" value={mealRecognition.text} onChange={(event) => setMealRecognition({ ...mealRecognition, text: event.target.value })} />
-                <footer><Button variant="quiet" size="small" type="button" onClick={() => setMealRecognition(null)}>取消</Button><Button variant="primary" size="small" type="button" disabled={!mealRecognition.text.trim()} onClick={() => {
-                  updateMeal(mealRecognition.slot, "description", mealRecognition.text, setMealDrafts);
-                  setMealRecognition(null);
-                }}>填入该餐</Button></footer>
-              </div>}
             </section>
 
             <section className="health-card">
@@ -339,7 +319,10 @@ export function HealthPage({
 
             <section className="health-card health-ai-launcher">
               <div className="health-ai-launcher-copy"><span aria-hidden="true">✨</span><div><strong>AI 健康建议</strong><small>{report ? `${formatReportTime(report.generatedAt)} 已生成` : "按需生成，不会自动上传"}</small></div></div>
-              <Button variant="secondary" size="small" type="button" aria-expanded={aiPanelOpen} onClick={() => setAiPanelOpen((value) => !value)}>{aiPanelOpen ? "收起" : report ? "查看建议" : "了解更多"}</Button>
+              <div className="health-ai-launcher-actions">
+                {report && <Button variant="primary" size="small" type="button" aria-haspopup="dialog" onClick={() => setReportOpen(true)}>查看建议</Button>}
+                <Button variant="secondary" size="small" type="button" aria-expanded={aiPanelOpen} onClick={() => setAiPanelOpen((value) => !value)}>{aiPanelOpen ? "收起" : report ? "生成选项" : "了解更多"}</Button>
+              </div>
             </section>
             {aiPanelOpen && <section className="health-card health-ai-card">
                 <CardTitle eyebrow="AI 建议" title="结合档案和近 7 天记录" subtitle="由你决定何时调用，不会自动上传" />
@@ -347,7 +330,6 @@ export function HealthPage({
                 {!hasDeepSeekKey && <div className="health-ai-stage warning">尚未配置 DeepSeek API Key。<Button variant="secondary" type="button" onClick={onOpenAiSettings}>前往 AI 与模型设置</Button></div>}
                 <Button variant="primary" type="button" className="health-ai-button" disabled={aiBusy || !hasDeepSeekKey} onClick={() => void generateAiAdvice()}>{aiBusy ? "正在生成…" : report ? "重新生成 AI 建议" : "生成 AI 健康建议"}</Button>
                 {aiStage && <div className="health-ai-stage">{aiStage}</div>}
-                {report && <div className="health-ai-report"><header><span>{formatReportTime(report.generatedAt)} · DeepSeek API · 基于当时已保存的数据</span><strong>{report.date} 的建议</strong></header><MarkdownDocument body={report.content} /></div>}
               </section>}
           </aside>
         </form>
@@ -402,8 +384,26 @@ export function HealthPage({
         </section>
         <Button variant="primary" type="submit" className="health-save" disabled={saving}>{saving ? "正在保存…" : "保存我的档案"}</Button>
       </form>}
+      {reportOpen && report && <HealthAdviceDialog report={report} onClose={() => setReportOpen(false)} />}
     </section>
   );
+}
+
+function HealthAdviceDialog({ report, onClose }: { report: HealthAiReport; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    dialog?.showModal();
+    return () => dialog?.close();
+  }, []);
+
+  return <dialog ref={dialogRef} className="health-advice-dialog" aria-labelledby="health-advice-title" onCancel={(event) => { event.preventDefault(); onClose(); }}>
+    <header className="health-advice-header">
+      <div><span>AI 健康建议 · {formatReportTime(report.generatedAt)}</span><h2 id="health-advice-title">{report.date} 的建议</h2><p>DeepSeek API · 基于生成时已保存的数据</p></div>
+      <Button variant="ghost" iconOnly autoFocus aria-label="关闭健康建议" onClick={onClose}>×</Button>
+    </header>
+    <div className="health-advice-body" tabIndex={0} role="region" aria-label="健康建议正文"><MarkdownDocument body={report.content} /></div>
+  </dialog>;
 }
 
 function CardTitle({ eyebrow, title, subtitle }: { eyebrow: string; title: string; subtitle: string }) {
@@ -462,40 +462,6 @@ function SleepDurationField({ value, onChange }: { value: number | null; onChang
 
 function NumberOrTimeField({ label, type, value, onChange }: { label: string; type: "time"; value: string; onChange: (value: string) => void }) {
   return <label><span>{label}</span><input type={type} value={value} onChange={(event) => onChange(event.currentTarget.value)} /></label>;
-}
-
-async function prepareMealImage(file: File) {
-  if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
-    throw new Error("请选择 JPG、PNG 或 WebP 餐食照片。");
-  }
-  if (file.size > 10 * 1024 * 1024) throw new Error("照片超过 10 MB，请换一张。");
-  let bitmap: ImageBitmap;
-  try {
-    bitmap = await createImageBitmap(file);
-  } catch {
-    throw new Error("照片无法读取，请换一张清晰的图片。");
-  }
-  try {
-    if (!bitmap.width || !bitmap.height || bitmap.width * bitmap.height > 40_000_000) {
-      throw new Error("照片尺寸过大或无效，请换一张。");
-    }
-    const scale = Math.min(1, 1024 / Math.max(bitmap.width, bitmap.height));
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("当前设备无法压缩餐食照片。");
-    context.fillStyle = "#ffffff";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    for (const quality of [0.75, 0.6, 0.45]) {
-      const dataUrl = canvas.toDataURL("image/jpeg", quality);
-      if (dataUrl.startsWith("data:image/jpeg;base64,") && dataUrl.length <= 1_400_000) return dataUrl;
-    }
-    throw new Error("压缩后的照片仍超过 1 MB，请换一张。");
-  } finally {
-    bitmap.close();
-  }
 }
 
 function updateMeal(slot: HealthMealSlot, field: "eatenAt" | "description", value: string, setDrafts: React.Dispatch<React.SetStateAction<MealDraft>>) {

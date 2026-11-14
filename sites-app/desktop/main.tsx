@@ -4,7 +4,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isTauri } from "@tauri-apps/api/core";
 
 const captureWindow = isTauri() && getCurrentWindow().label === "entertainment-capture";
-const WindowRoot = lazy(() => captureWindow
+const companionWindow = isTauri() && getCurrentWindow().label === "companion";
+const WindowRoot = lazy(() => companionWindow ? import("./CompanionRoot") : captureWindow
   ? import("./EntertainmentRoot")
   : import("./DesktopRoot"));
 

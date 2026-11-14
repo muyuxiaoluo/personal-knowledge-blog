@@ -18,8 +18,12 @@ serde_json = "1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-companion-secrets = { path = "plugins/companion-secrets" }
-tokio = { version = "1", features = ["fs", "io-util", "sync", "time"] }
+
+tokio = { version = "1", features = ["fs", "io-util", "sync", "time", "process"] }
 tauri-plugin-sql = { version = "2.4.0", features = ["sqlite"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+tauri-plugin-companion-finance = { path = "plugins/companion-finance" }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
@@ -35,7 +39,9 @@ csv = "1.3"
 encoding_rs = "0.8"
 hex = "0.4"
 hmac = "0.12"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
+md-5 = "0.10"
+sha1 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream", "cookies"] }
 sha2 = "0.10"
 tokio-util = { version = "0.7", features = ["io"] }
 url = "2"
@@ -47,5 +53,19 @@ tauri-plugin-opener = "2"
 tauri-plugin-notification = "2.4.0"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61.3", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications"] }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_Registry"] }
+windows = { version = "0.61.3", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Graphics_Capture", "Graphics_DirectX_Direct3D11", "Win32_Media_Speech", "Win32_System_Com", "Win32_Graphics_Dwm", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Controls", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_Registry", "Win32_Security", "Win32_System_EventLog"] }
+
+# Keep frontend hot reload and useful Rust backtraces without large native caches.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+# Third-party libraries do not need native debug symbols for everyday UI work.
+[profile.dev.package."*"]
+debug = 0
+
+[patch.crates-io]
+# Backport https://github.com/tauri-apps/tao/pull/1410 to the version Tauri uses.
+# Also keep the Windows event-target subclass data alive across nested callbacks.
+tao = { path = "vendor/tao-0.35.3" }

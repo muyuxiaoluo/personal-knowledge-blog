@@ -128,6 +128,11 @@ export function createSyncServer({
         return;
       }
 
+      if (request.method === "POST" && url.pathname === "/v4/private/photos/sync") {
+        sendJson(response, 200, database.syncPrivatePhotos(Number(user.sub), await readJson(request)));
+        return;
+      }
+
       if (request.method === "POST" && url.pathname === "/v4/private/pair") {
         sendJson(response, 200, database.pairPrivate(Number(user.sub), await readJson(request)));
         return;

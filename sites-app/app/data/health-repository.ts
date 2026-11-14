@@ -7,6 +7,8 @@ import type {
   HealthSex,
 } from "../health-types";
 import { emptyHealthDailyLog, emptyHealthProfile } from "../health-types";
+import { MealPhotoRepository } from "./meal-photo-repository";
+import type { XiaomiDayState, XiaomiSnapshot, XiaomiSyncSettings } from "../xiaomi-health";
 import {
   executeSqliteTransaction,
   type SqliteDatabase,
@@ -56,6 +58,8 @@ type MealRow = {
 type ReportRow = { report_date: string; content: string; generated_at: string };
 
 const migrations = [
+  `CREATE TABLE IF NOT EXISTS health_xiaomi_settings (id INTEGER PRIMARY KEY CHECK(id=1), settings_json TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS health_xiaomi_days (log_date TEXT PRIMARY KEY, state_json TEXT NOT NULL, batch_id TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS health_profile (
     id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
     age INTEGER,
@@ -107,15 +111,17 @@ const migrations = [
 /** Health data stays outside sync v3. Opt-in private v4 journaling is installed separately. */
 export class HealthRepository {
   private initialization: Promise<void> | null = null;
+  readonly mealPhotos: MealPhotoRepository;
 
   constructor(
     private readonly database: SqliteDatabase,
     private readonly clock: () => Date = () => new Date(),
-  ) {}
+  ) { this.mealPhotos = new MealPhotoRepository(database); }
 
   private async initialize() {
     this.initialization ??= (async () => {
       for (const statement of migrations) await this.database.execute(statement);
+      await this.mealPhotos.ready();
       const dailyColumns = new Set((await this.database.select<{ name: string }>("PRAGMA table_info(health_daily_logs)")).map((column) => column.name));
       if (!dailyColumns.has("sleep_minutes")) await this.database.execute("ALTER TABLE health_daily_logs ADD COLUMN sleep_minutes INTEGER");
       if (!dailyColumns.has("awake_minutes_known")) {
@@ -132,6 +138,16 @@ export class HealthRepository {
   async ready() {
     await this.initialize();
   }
+
+  private async xiaomiSource() {
+    const { XiaomiHealthRepository } = await import("./xiaomi-health-repository");
+    return new XiaomiHealthRepository(this.database, this, this.clock);
+  }
+  async getXiaomiSettings(): Promise<XiaomiSyncSettings> { return (await this.xiaomiSource()).getXiaomiSettings(); }
+  async saveXiaomiSettings(patch: Partial<XiaomiSyncSettings>) { return (await this.xiaomiSource()).saveXiaomiSettings(patch); }
+  async getXiaomiDay(date: string): Promise<XiaomiDayState | null> { return (await this.xiaomiSource()).getXiaomiDay(date); }
+  async applyXiaomiSnapshot(snapshot: XiaomiSnapshot) { return (await this.xiaomiSource()).applyXiaomiSnapshot(snapshot); }
+  async restoreXiaomiDay(date: string) { return (await this.xiaomiSource()).restoreXiaomiDay(date); }
 
   async getProfile(): Promise<HealthProfile> {
     await this.initialize();
@@ -263,7 +279,7 @@ export async function saveHealthDay(
   return saveDay.call(repository, log, meals);
 }
 
-function dailyWriteStatement(log: HealthDailyLog): SqliteStatement {
+export function dailyWriteStatement(log: HealthDailyLog): SqliteStatement {
   return {
     sql: `INSERT INTO health_daily_logs(
       log_date, sleep_minutes, sleep_start, sleep_end, awake_minutes, awake_minutes_known,
@@ -337,7 +353,7 @@ function normalizeProfile(profile: HealthProfile, now: Date): HealthProfile {
   };
 }
 
-function normalizeDaily(log: HealthDailyLog, now: Date): HealthDailyLog {
+export function normalizeDaily(log: HealthDailyLog, now: Date): HealthDailyLog {
   assertDate(log.date);
   assertClock(log.sleepStart, true);
   assertClock(log.sleepEnd, true);
@@ -367,7 +383,7 @@ function nullableNumber(value: number | null, label: string, min: number, max: n
   return value;
 }
 
-function assertDate(value: string) {
+export function assertDate(value: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error("日期格式无效");
   const [year, month, day] = value.split("-").map(Number);
   const parsed = new Date(Date.UTC(year, month - 1, day));

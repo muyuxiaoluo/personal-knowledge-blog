@@ -32,6 +32,7 @@
         "form-action": "'none'",
         "frame-ancestors": "'none'",
         "img-src": "'self' asset: http://asset.localhost data: blob:",
+        "media-src": "'self' blob:",
         "object-src": "'none'",
         "style-src": "'self' 'unsafe-inline'"
       }
@@ -39,6 +40,7 @@
   },
   "bundle": {
     "active": true,
+    "resources": ["licenses/mihealth-api.txt", "resources/companion-runtime.mjs", "resources/companion-runtime.patch.yml"],
     "targets": ["nsis"],
     "createUpdaterArtifacts": true,
     "windows": {

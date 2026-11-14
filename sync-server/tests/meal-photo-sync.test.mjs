@@ -1,0 +1,43 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { SyncDatabase } from "../src/database.mjs";
+import { createSyncServer } from "../src/app.mjs";
+
+test("photo HTTP endpoint authenticates, requires pairing, limits pages and isolates users and old text clients", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "photo-http-"));
+  const database = new SyncDatabase(path.join(directory, "fixture.sqlite3"));
+  database.ensureOwner("owner", "photo-fixture-password"); database.ensureOwner("other", "photo-fixture-password");
+  const server = createSyncServer({ database, authSecret: "photo-fixture-secret-with-at-least-32-characters" });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve)); database.close();
+    assert.ok(directory.startsWith(path.join(os.tmpdir(), "photo-http-")));
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const post = (endpoint, body, token) => fetch(url + endpoint, { method: "POST", headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+  const login = async username => (await (await post("/v1/auth/login", { username, password: "photo-fixture-password", deviceId: username })).json()).accessToken;
+  const token = await login("owner"), other = await login("other"), keyId = randomBytes(32).toString("hex");
+  const body = { version: 4, keyId, deviceId: "photo-phone", cursor: 0, changes: [] };
+  assert.equal((await post("/v4/private/photos/sync", body)).status, 401);
+  assert.equal((await post("/v4/private/photos/sync", body, token)).status, 400);
+  for (const access of [token, other]) assert.equal((await post("/v4/private/pair", { keyId, create: true }, access)).status, 200);
+  const change = i => ({ id: randomBytes(32).toString("hex"), mutationId: `photo-${i}`, baseVersion: 0, envelope: { version: 4, algorithm: "AES-256-GCM", keyId, nonce: randomBytes(12).toString("hex"), ciphertext: "ab".repeat(64) } });
+  const changes = Array.from({ length: 17 }, (_, i) => change(i));
+  assert.equal((await post("/v4/private/photos/sync", { ...body, changes }, token)).status, 400);
+  assert.equal((await post("/v4/private/photos/sync", { ...body, changes: changes.slice(0, 16) }, token)).status, 200);
+  assert.equal((await post("/v4/private/photos/sync", { ...body, changes: changes.slice(16) }, token)).status, 200);
+  const first = await (await post("/v4/private/photos/sync", body, token)).json();
+  assert.equal(first.records.length, 16); assert.equal(first.hasMore, true);
+  const next = await (await post("/v4/private/photos/sync", { ...body, cursor: first.cursor }, token)).json();
+  assert.equal(next.records.length, 1); assert.equal(next.hasMore, false);
+  assert.equal((await (await post("/v4/private/sync", body, token)).json()).records.length, 0);
+  assert.equal((await (await post("/v4/private/photos/sync", body, other)).json()).records.length, 0);
+  assert.equal((await post("/v4/private/photos/sync", { ...body, changes: [{ ...changes[0], mutationId: "plaintext", envelope: { ...changes[0].envelope, ciphertext: "餐食照片" } }] }, token)).status, 400);
+  database.runMaintenance({ now: new Date("2030-01-01T00:00:00Z") });
+  assert.equal(database.database.prepare("SELECT count(*) n FROM private_photo_records").get().n, 17);
+});

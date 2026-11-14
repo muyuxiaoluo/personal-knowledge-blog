@@ -787,6 +787,9 @@ kbd {
 .account-password, .account-private { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 12px; }
 .account-password form { margin-top: 12px; }
 .account-password p { font-size: 13px; line-height: 1.6; margin: 0; }
+.account-recovery { border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.account-recovery summary { cursor: pointer; }
+.account-recovery p { margin: 12px 0 0; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
 
 .sync-center {
   min-width: 0;
@@ -1208,3 +1211,4 @@ button:disabled {
     transition-duration: 0.01ms !important;
   }
 }
+.companion-launcher { position: fixed !important; right: 20px; bottom: 18px; z-index: 60; box-shadow: 0 4px 18px #263c2920; }
