@@ -172,7 +172,10 @@ fn persist(app: &tauri::AppHandle, store: &Store) -> Result<(), String> {
     fs::rename(&temporary, directory.join("records.json"))
         .map_err(|error| format!("工作记录保存失败：{error}"))
 }
-pub(crate) fn snapshot(app: &tauri::AppHandle, state: &ObserverState) -> Result<ObserverStatus, String> {
+pub(crate) fn snapshot(
+    app: &tauri::AppHandle,
+    state: &ObserverState,
+) -> Result<ObserverStatus, String> {
     initialize(app, state)?;
     let inner = state.inner.lock().map_err(|_| "工作记录状态不可用")?;
     Ok(ObserverStatus {
@@ -303,9 +306,14 @@ pub(crate) fn work_observer_set_enabled(
 }
 
 pub(crate) fn pause(app: &tauri::AppHandle, state: &ObserverState) -> Result<(), String> {
-    initialize(app,state)?;
-    {let mut inner=state.inner.lock().map_err(|_|"工作记录状态不可用")?;inner.enabled=false;inner.status="自动观察已暂停".into();}
-    announce(app);Ok(())
+    initialize(app, state)?;
+    {
+        let mut inner = state.inner.lock().map_err(|_| "工作记录状态不可用")?;
+        inner.enabled = false;
+        inner.status = "自动观察已暂停".into();
+    }
+    announce(app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -535,11 +543,12 @@ async fn collect(
             .application
             .eq_ignore_ascii_case("life-strategy-library.exe");
         let codex_window = activity.application.eq_ignore_ascii_case("codex.exe");
-        let screenshot = if config_capture.screenshot && !(automatic && (own_window || codex_window)) {
-            Some(screen::capture())
-        } else {
-            None
-        };
+        let screenshot =
+            if config_capture.screenshot && !(automatic && (own_window || codex_window)) {
+                Some(screen::capture())
+            } else {
+                None
+            };
         Ok::<_, String>(Some((activity, scan, screenshot)))
     })
     .await

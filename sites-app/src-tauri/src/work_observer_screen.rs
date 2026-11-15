@@ -64,11 +64,10 @@ pub(crate) fn activity() -> DesktopActivity {
             let mut size = path.len() as u32;
             if QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut size) != 0 {
                 executable = String::from_utf16_lossy(&path[..size as usize]);
-                application =
-                    std::path::Path::new(&executable)
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_default();
+                application = std::path::Path::new(&executable)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
             }
             CloseHandle(process);
         }

@@ -12,29 +12,41 @@ use tauri::Emitter;
 use tauri::Manager;
 
 #[cfg(desktop)]
+mod asaba;
+#[cfg(desktop)]
 mod attachments;
 #[cfg(desktop)]
 mod backup;
+#[cfg(desktop)]
+mod companion;
+#[cfg(windows)]
+mod companion_capture;
+#[cfg(desktop)]
+mod companion_codex;
+#[cfg(desktop)]
+mod companion_dictation;
+#[cfg(desktop)]
+mod companion_stage;
+#[cfg(desktop)]
+mod companion_tts;
+#[cfg(desktop)]
+mod companion_worker;
 #[cfg(desktop)]
 mod dashboard;
 #[cfg(desktop)]
 mod deepseek;
 #[cfg(desktop)]
 mod deepseek_api;
+#[cfg(windows)]
+mod developer_mode;
 #[cfg(desktop)]
 mod finance;
 #[cfg(desktop)]
 mod focus_reminders;
 #[cfg(desktop)]
 mod integrations;
-#[cfg(desktop)]
-mod xiaomi_health;
-#[cfg(desktop)]
-mod xiaomi_protocol;
 #[cfg(windows)]
 mod ollama_runtime;
-#[cfg(windows)]
-mod developer_mode;
 #[cfg(desktop)]
 mod reminders;
 #[cfg(desktop)]
@@ -50,21 +62,9 @@ mod work_observer_files;
 #[cfg(desktop)]
 mod work_observer_screen;
 #[cfg(desktop)]
-mod companion;
+mod xiaomi_health;
 #[cfg(desktop)]
-mod companion_codex;
-#[cfg(desktop)]
-mod asaba;
-#[cfg(windows)]
-mod companion_capture;
-#[cfg(desktop)]
-mod companion_worker;
-#[cfg(desktop)]
-mod companion_tts;
-#[cfg(desktop)]
-mod companion_stage;
-#[cfg(desktop)]
-mod companion_dictation;
+mod xiaomi_protocol;
 
 #[cfg(desktop)]
 #[derive(Serialize)]

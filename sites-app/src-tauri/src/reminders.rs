@@ -177,9 +177,11 @@ fn dispatch_health_reminder(app: &tauri::AppHandle, body: &str) -> Result<(), St
         .body(body)
         .show();
     #[cfg(windows)]
-    crate::developer_mode::record(
-        if notification.is_ok() { "notification_queued" } else { "notification_request_failed" },
-    );
+    crate::developer_mode::record(if notification.is_ok() {
+        "notification_queued"
+    } else {
+        "notification_request_failed"
+    });
     #[cfg(not(windows))]
     let _ = notification;
     Ok(())

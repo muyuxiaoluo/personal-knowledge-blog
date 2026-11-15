@@ -257,7 +257,11 @@ pub(super) fn show(
         scene.emit(&pet);
         if visible {
             #[cfg(windows)]
-            crate::developer_mode::record(if expanded { "pet_expanded" } else { "pet_shown" });
+            crate::developer_mode::record(if expanded {
+                "pet_expanded"
+            } else {
+                "pet_shown"
+            });
             let _ = pet.show();
             if expanded {
                 let _ = pet.set_focus();
@@ -405,14 +409,24 @@ fn tick(app: &tauri::AppHandle) {
     } else {
         // Smalltalk is passive. Its entire surface lets clicks through; the
         // character remains the only interactive surface while collapsed.
-        pet.inner_size().map(|size| {
-            collapsed_click_through(over_pet, (x, y), (size.width as f64 / scale, size.height as f64 / scale))
-        }).unwrap_or(false)
+        pet.inner_size()
+            .map(|size| {
+                collapsed_click_through(
+                    over_pet,
+                    (x, y),
+                    (size.width as f64 / scale, size.height as f64 / scale),
+                )
+            })
+            .unwrap_or(false)
     };
     if scene.ignore_cursor != ignore {
         if pet.set_ignore_cursor_events(ignore).is_ok() {
             scene.ignore_cursor = ignore;
-            crate::developer_mode::record(if ignore { "pet_click_through_on" } else { "pet_click_through_off" });
+            crate::developer_mode::record(if ignore {
+                "pet_click_through_on"
+            } else {
+                "pet_click_through_off"
+            });
         }
     }
     if scene.expanded || scene.speech || scene.busy || scene.reduced_motion || over_pet {
@@ -468,7 +482,12 @@ mod tests {
 
     #[test]
     fn passive_speech_preserves_anchor_and_stays_beside_the_head() {
-        let area = Area { left: 0., top: 0., width: 1920., height: 1080. };
+        let area = Area {
+            left: 0.,
+            top: 0.,
+            width: 1920.,
+            height: 1080.,
+        };
         for anchor in [(1780., 900.), (0., 0.)] {
             let (window, size, layout) = place(anchor, area, Some(SMALLTALK), true);
             assert_eq!((window.0 + layout.pet_x, window.1 + layout.pet_y), anchor);
