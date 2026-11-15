@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { actionCenterLanes } from "../app/action-planning";
+import { analyzeProjectProgress, readAuthorizedProjectEvidence } from "../app/asaba-planning";
 import {
   buildQuickCloseout,
   contextualEchoTerms,
@@ -51,6 +53,57 @@ test("home prioritizes today's plan and hides future or blocked actions", () => 
     task("today", { plan: plan("today", today) }),
   ], today, null);
   assert.deepEqual(choices.map((choice) => choice.id), ["today", "missed"]);
+});
+
+test("action center treats legacy automatic dates as suggestions and keeps manual dates separate", () => {
+  const today = "2026-11-12";
+  const plan = (taskId: string, plannedDate: string, source?: "manual" | "auto") => ({ taskId, plannedDate, source, priority: "normal" as const, estimateMinutes: 30, sortOrder: 0, updatedAt: "" });
+  const tasks = [
+    task("manual", { plan: plan("manual", today) }),
+    { ...task("auto", { plan: plan("auto", today, "auto"), dueDate: "2026-11-15", dueDateKind: "target" }), estimatedDays: 4 },
+    task("undated", { status: "next" }),
+    task("future", { status: "next", plan: plan("future", "2026-11-13", "manual") }),
+    { ...task("planned-stage", { status: "next" }), milestoneStatus: "planned" as const },
+    task("waiting", { status: "waiting" }),
+    task("blocked", { status: "next", weekBlocked: true }),
+    task("paused", { status: "next", projectStatus: "paused" }),
+    task("draft", { status: "next", projectDraft: true }),
+    task("done", { status: "done" }),
+  ];
+  const lanes = actionCenterLanes(tasks, today);
+  assert.deepEqual(lanes.schedule.map(({ id }) => id), ["manual"]);
+  assert.deepEqual(lanes.ready.map(({ id }) => id), ["auto", "undated"]);
+  assert.deepEqual([...lanes.dateSuggestions], ["auto"]);
+  assert.equal(lanes.pending.length, tasks.length - 1);
+  assert.deepEqual(selectHomeTaskCandidates(tasks, today, null).map(({ id }) => id), ["manual", "undated"]);
+});
+
+test("project investigation only reads selected linked notes when the first answer has gaps", async () => {
+  const input = { request: "目前还差什么？", project: { title: "验收项目", outcome: "完成验收", background: "", status: "active", deadline: "", reviewDate: "" } as const, evidence: [] };
+  const read: string[] = [];
+  const readApproved = () => readAuthorizedProjectEvidence("project-1", ["chosen", "chosen", "different", "removed", "outside-limit"], async (id) => {
+    read.push(id);
+    const note = article(id, "验收记录", "2026-11-10");
+    return { ...note, body: "完成复验。".repeat(400), projectId: id === "different" ? "other-project" : "project-1",
+      storage: { ...note.storage, deletedAt: id === "removed" ? "2026-11-11" : null } };
+  });
+  const answer = { summary: "维持已有安排", findings: [], unknowns: [], nextAction: "", decision: "keep" as const, taskEvidenceId: null };
+  await analyzeProjectProgress(input, async () => answer, readApproved);
+  assert.deepEqual(read, []);
+  const passes: string[][] = [];
+  const result = await analyzeProjectProgress(input, async (context) => {
+    passes.push(context.evidence.map((source) => source.id));
+    return context.investigation ? answer : { ...answer, unknowns: ["复验结果"] };
+  }, readApproved);
+  assert.deepEqual(read, ["chosen", "different", "removed"]);
+  assert.deepEqual(passes, [[], ["note:chosen"]]);
+  assert.match(result.evidence[0].text, /（节选）$/);
+  const fallback = await analyzeProjectProgress(input, async (context) => {
+    if (context.investigation) throw new Error("model unavailable");
+    return { ...answer, unknowns: ["复验结果"] };
+  }, readApproved);
+  assert.deepEqual(fallback.answer.unknowns, ["复验结果"]);
+  assert.equal(fallback.evidence.length, 0);
 });
 
 test("quick closeout needs only a choice and keeps the current focus by default", () => {

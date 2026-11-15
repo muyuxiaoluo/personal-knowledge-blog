@@ -98,9 +98,9 @@ export const companionApi = {
   async archiveWorker(command: WorkerArchive) {
     await askWorkbench<object>("asaba-save-worker", { id: crypto.randomUUID(), ...command }, 15_000, "归档尚未确认，可重试。");
   },
-  async plan(request: string, projectId: string | null) {
-    const command = { id: crypto.randomUUID(), request, projectId };
-    return (await askWorkbench<{ result: AsabaPlanningResult }>("asaba-plan", command, 180_000, "规划尚未返回，请稍后再试。")).result;
+  async plan(request: string, projectId: string | null, authorizedNoteIds: string[] = []) {
+    const command = { id: crypto.randomUUID(), request, projectId, authorizedNoteIds };
+    return (await askWorkbench<{ result: AsabaPlanningResult }>("asaba-plan", command, authorizedNoteIds.length ? 240_000 : 180_000, "规划尚未返回，请稍后再试。")).result;
   },
   async openAdjustment(command: Omit<AsabaAdjustmentRequest, "id">) {
     await askWorkbench<object>("asaba-open-adjustment", { id: crypto.randomUUID(), ...command }, 15_000, "计划调整窗口未响应，请重试。");

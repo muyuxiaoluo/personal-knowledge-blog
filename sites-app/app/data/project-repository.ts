@@ -34,11 +34,11 @@ export interface ProjectRepository {
   listStandaloneTasks(): Promise<ProjectTask[]>;
   listTaskLogs(taskId: string): Promise<ProjectLog[]>;
   get(id: string): Promise<ProjectDetail | null>;
-  saveProject(project: Project): Promise<Project>;
+  saveProject(project: Project, recordGoalChange?: boolean): Promise<Project>;
   saveWorkspace(project: Project, milestones: Milestone[], task: ProjectTask | null, branches?: Project[]): Promise<Project>;
   updateProjectStatus(id: string, status: ProjectStatus, logBody: string): Promise<void>;
   removeProject(id: string): Promise<void>;
-  saveMilestone(milestone: Milestone): Promise<Milestone>;
+  saveMilestone(milestone: Milestone, useDependencies?: boolean): Promise<Milestone>;
   completeMilestone(id: string, logBody: string): Promise<Milestone | null>;
   removeMilestone(id: string): Promise<void>;
   saveTask(task: ProjectTask): Promise<ProjectTask>;

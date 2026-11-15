@@ -82,11 +82,16 @@ if (capture) {
   const commandFile = path.join(session, `debugger-${process.pid}.txt`);
   const debuggerLog = path.join(session, `debugger-${process.pid}.log`);
   const dump = path.join(session, `crash-${process.pid}.dmp`);
+  const breakpointDump = path.join(session, `breakpoint-${process.pid}.dmp`);
   const dumpCommand = `.lastevent; .dump /ma \\"${dump.replaceAll("\\", "/")}\\"; gn`;
+  // The Windows heap manager can report corruption via int 3 before raising
+  // the fatal status. Capture that stack and resume without a console prompt.
+  const breakpointCommand = `.lastevent; k; .dump /ma /u \\"${breakpointDump.replaceAll("\\", "/")}\\"; gh`;
   await writeFile(commandFile, [
     ...["av", "0xc0000374", "0xc0000409", "0xc000001d", "0xc00000fd", "*"].map(
       (exception) => `sxd -c2 "${dumpCommand}" ${exception}`,
     ),
+    `sxe -c "${breakpointCommand}" -c2 "${dumpCommand}" bpe`,
     'sxe -c ".lastevent; q" epr',
     '.printf "WORKBENCH_DEBUG_PID=%d\\n", @$tpid',
     "g",

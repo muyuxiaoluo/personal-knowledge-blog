@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
+import { backup, DatabaseSync } from "node:sqlite";
+import { mkdtemp, rm, rmdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { initialProjectSeeds } from "../app/data/project-seeds";
 import { SqliteProjectRepository } from "../app/data/sqlite-project-repository";
 import { SqliteWorkRepository } from "../app/data/sqlite-work-repository";
 import { DashboardRepository } from "../app/data/dashboard-repository";
-import { projectProgress, rootProjectStatusCounts } from "../app/project-selectors";
+import { filterProjects, projectJobGroups, projectCalendarEvents, projectProgress, projectWorkStatus, projectStatusCounts } from "../app/project-selectors";
+import type { AsabaJob } from "../app/companion-types";
 import { buildAsabaProgressInput, previewAsabaPlan, type AsabaPlanSave } from "../app/asaba-planning";
 import { writeAsabaPlan } from "../app/save-asaba-plan";
 import type {
@@ -230,7 +234,7 @@ test("seeds staged projects and persists project progress", async () => {
 
   const seeded = await repository.list();
   assert.equal(seeded.length, 9);
-  assert.deepEqual(rootProjectStatusCounts(seeded), { active: 7, paused: 2, completed: 0 });
+  assert.deepEqual(projectStatusCounts(seeded), { active: 7, paused: 2, completed: 0 });
   assert.equal(seeded[0].title, "机器人岗位投递与面试迭代");
   assert.equal(seeded[0].category, "career");
   assert.equal(seeded[0].isDraft, false);
@@ -667,7 +671,9 @@ test("stores one-level project branches and can detach them without losing conte
   assert.equal(branch.projectType, "side");
   assert.equal(branch.parentProjectId, parent.project.id);
   assert.equal(branch.supportsMilestoneId, currentMilestone.id);
-  assert.equal((await repository.list()).find((project) => project.id === branch.id)?.parentProjectId, parent.project.id);
+  const projects = await repository.list();
+  assert.equal(projects.find((project) => project.id === branch.id)?.parentProjectId, parent.project.id);
+  assert.equal(projectStatusCounts(projects)[branch.status], projectStatusCounts(projects.filter((item) => item.id !== branch.id))[branch.status] + 1);
 
   await assert.rejects(
     () => repository.saveProject({
@@ -692,7 +698,7 @@ test("stores one-level project branches and can detach them without losing conte
   database.close();
 });
 
-test("deletes a project tree while preserving and detaching linked history", async () => {
+test("deletes only the parent and preserves its detached child and the child's data", async () => {
   const database = new DatabaseSync(":memory:");
   const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), {
     seedProjects: initialProjectSeeds,
@@ -703,7 +709,7 @@ test("deletes a project tree while preserving and detaching linked history", asy
   const branch = await repository.saveProject({
     ...parent.project,
     id: "project-delete-test-branch",
-    title: "待随主线删除的支线",
+    title: "保留的子项目",
     projectType: "side",
     parentProjectId: parent.project.id,
     supportsMilestoneId: parent.milestones[0].id,
@@ -718,14 +724,21 @@ test("deletes a project tree while preserving and detaching linked history", asy
   );
   database.prepare("INSERT INTO focus_sessions(id, project_id) VALUES (?, ?)").run("focus-parent", parent.project.id);
   database.prepare("INSERT INTO task_plans(task_id) VALUES (?)").run(parent.tasks[0].id);
+  const childTask = await repository.saveTask({ ...parent.tasks[0], id: "child-action", projectId: branch.id, milestoneId: null });
+  await repository.addLog(branch.id, "子项目记录");
 
   await repository.removeProject(parent.project.id);
 
   const remaining = await repository.list();
   assert.equal(remaining.some((project) => project.id === parent.project.id), false);
-  assert.equal(remaining.some((project) => project.id === branch.id), false);
+  const child = (await repository.get(branch.id))!;
+  assert.equal(child.project.parentProjectId, null);
+  assert.equal(child.project.supportsMilestoneId, null);
+  assert.equal(child.project.projectType, "main");
+  assert.equal(child.tasks[0]?.id, childTask.id);
+  assert.equal(child.logs[0]?.body, "子项目记录");
   assert.equal(database.prepare("SELECT project_id FROM articles WHERE id = ?").get("article-parent")?.project_id, "");
-  assert.equal(database.prepare("SELECT project_id FROM articles WHERE id = ?").get("article-branch")?.project_id, "");
+  assert.equal(database.prepare("SELECT project_id FROM articles WHERE id = ?").get("article-branch")?.project_id, branch.id);
   assert.equal(database.prepare("SELECT project_id FROM focus_sessions WHERE id = ?").get("focus-parent")?.project_id, null);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM task_plans").get()?.count, 0);
   assert.equal((await repository.get("project-life-workbench-v01"))?.project.title, "人生攻略库");
@@ -1027,7 +1040,7 @@ test("adaptive checkpoints and actions progress independently and survive reopen
   assert.equal(detail?.tasks.find((item) => item.id === "parallel-action")?.status, "next");
 });
 
-test("retires legacy branch relationships without losing their workspace", async () => {
+test("preserves parent, child and their links after restart and SQLite backup", async () => {
   const database = new DatabaseSync(":memory:");
   const adapter = new NodeSqliteAdapter(database);
   const repository = new SqliteProjectRepository(adapter, { seedProjects: initialProjectSeeds });
@@ -1039,13 +1052,96 @@ test("retires legacy branch relationships without losing their workspace", async
   await repository.addLog(branch.id, "课程看到第三章");
   const reopened = new SqliteProjectRepository(adapter);
   const detail = await reopened.get(branch.id);
-  assert.equal(detail?.project.parentProjectId, null);
-  assert.equal(detail?.project.projectType, "main");
+  assert.equal(detail?.project.parentProjectId, parent.project.id);
+  assert.equal(detail?.project.supportsMilestoneId, parent.milestones[0].id);
+  assert.equal(detail?.project.projectType, "side");
   assert.equal(detail?.milestones.length, 1);
   assert.equal(detail?.tasks[0].milestoneId, "legacy-node");
   assert.ok(detail?.logs.some((log) => log.body === "课程看到第三章"));
-  const again = await new SqliteProjectRepository(adapter).get(branch.id);
-  assert.deepEqual(again, detail);
+  const directory = await mkdtemp(join(tmpdir(), "workbench-project-backup-"));
+  const snapshotPath = join(directory, "snapshot.sqlite3");
+  try {
+    await backup(database, snapshotPath);
+    const snapshot = new DatabaseSync(snapshotPath);
+    try {
+      const restored = await new SqliteProjectRepository(new NodeSqliteAdapter(snapshot)).get(branch.id);
+      assert.deepEqual(restored, detail);
+    } finally {
+      snapshot.close();
+    }
+  } finally {
+    database.close();
+    await rm(snapshotPath, { force: true });
+    await rmdir(directory);
+  }
+});
+
+test("persists project tags and records directional changes without rewriting the route", async () => {
+  const database = new DatabaseSync(":memory:");
+  const adapter = new NodeSqliteAdapter(database);
+  const repository = new SqliteProjectRepository(adapter, { seedProjects: initialProjectSeeds });
+  const original = (await repository.get("project-research-direction"))!;
+  const project = await repository.saveProject({ ...original.project, tags: [" 学业 ", "研究", "学业", ""] });
+  const revised = await repository.saveProject({ ...project, outcome: "修订后的研究目标" }, true);
+  await repository.saveProject(revised, true);
+  const reopened = new SqliteProjectRepository(adapter);
+  const detail = (await reopened.get(project.id))!;
+  assert.deepEqual(detail.project.tags, ["学业", "研究"]);
+  assert.deepEqual(detail.milestones, original.milestones);
+  assert.deepEqual(detail.tasks, original.tasks);
+  const revisions = detail.logs.filter((log) => log.kind === "goal_revision");
+  assert.equal(revisions.length, 1);
+  assert.deepEqual(JSON.parse(revisions[0].body), { before: original.project.outcome, after: revised.outcome });
+  const projects = await reopened.list();
+  assert.deepEqual(filterProjects(projects, project.status, "修订", ["研究", "学业"]).map((item) => item.id), [project.id]);
+  assert.deepEqual(filterProjects(projects, project.status, "修订", ["研究", "兴趣"]), []);
+  database.exec("CREATE TRIGGER reject_goal_update BEFORE UPDATE OF outcome ON projects BEGIN SELECT RAISE(ABORT, 'test rollback'); END;");
+  await assert.rejects(() => reopened.saveProject({ ...detail.project, outcome: "应回滚的方向" }, true));
+  assert.equal((await reopened.get(project.id))?.project.outcome, revised.outcome);
+  assert.equal((await reopened.get(project.id))?.logs.filter((log) => log.kind === "goal_revision").length, 1);
+  database.close();
+});
+
+test("keeps next actions and waiting visible while projecting milestone dates and confirmed outcomes", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), { seedProjects: initialProjectSeeds });
+  const source = (await repository.get("project-research-direction"))!;
+  const project = await repository.saveProject({ ...source.project, id: "stage-two", isDraft: false, planningMode: "direct" });
+  const first = await repository.saveMilestone({ ...source.milestones[0], id: "", projectId: project.id, status: "current", predecessorIds: [], dueDate: "", dueDateKind: null });
+  assert.equal((await repository.get(project.id))?.project.planningMode, "staged");
+  const second = await repository.saveMilestone({ ...first, id: "", title: "发表论文", dueDate: "2027-08-20", dueDateKind: "target", sortOrder: first.sortOrder + 10 }, true);
+  const next = await repository.saveTask({ ...source.tasks[0], id: "stage-two-next", projectId: project.id, milestoneId: first.id, status: "next" });
+  const wait = await repository.saveTask({ ...source.tasks[0], id: "stage-two-wait", projectId: project.id, milestoneId: second.id, status: "waiting", waitingFor: "外审反馈" });
+  const outcome = { id: "", projectId: project.id, milestoneId: null, title: "第一篇论文", content: "已经发表", reference: "论文链接", isOutcome: true, createdAt: "", updatedAt: "" };
+  await repository.saveAccumulation(outcome);
+  await repository.saveAccumulation({ ...outcome, title: "第二篇论文" });
+  let detail = (await repository.get(project.id))!;
+  assert.equal(detail.project.planningMode, "adaptive");
+  assert.equal(detail.milestones.filter((node) => node.status === "current").length, 2);
+  assert.equal(detail.accumulations.filter((record) => record.isOutcome).length, 2);
+  const status = projectWorkStatus(detail);
+  assert.equal(status.next?.id, next.id);
+  assert.equal(status.waiting[0]?.id, wait.id);
+  assert.equal(status.recent?.source, "已确认成果");
+  assert.deepEqual(projectCalendarEvents([detail]).map((event) => [event.date, event.milestone?.dateKind]), [["2027-08-20", "target"]]);
+  await repository.saveMilestone({ ...second, dueDate: "2027-09-01", dueDateKind: "deadline" });
+  detail = (await repository.get(project.id))!;
+  assert.deepEqual(projectCalendarEvents([detail]).map((event) => [event.date, event.milestone?.dateKind]), [["2027-09-01", "deadline"]]);
+  await repository.removeMilestone(second.id);
+  assert.deepEqual(projectCalendarEvents([(await repository.get(project.id))!]), []);
+  database.close();
+});
+
+test("retains the latest attempt and keeps unrelated jobs with no note id", () => {
+  const job = (id: string, updatedAt: string, fields: Partial<AsabaJob> = {}): AsabaJob => ({
+    id, updatedAt, noteId: "", projectId: "test", title: "委托", description: "", repository: "", agent: "codex", workspaceMode: "copy",
+    hadLocalChanges: false, previousJobId: null, base: null, sessionId: null, summary: null, commands: [], diff: null, error: null, state: "failed", ...fields,
+  });
+  const first = job("first", "2026-10-01", { noteId: "note" });
+  const retried = job("retry", "2026-10-02", { noteId: "note", state: "review", previousJobId: first.id });
+  const groups = projectJobGroups([first, job("other", "2026-10-01"), retried, job("later", "2026-10-03")]);
+  assert.deepEqual(groups.map(({ latest }) => latest.id), ["later", "retry", "other"]);
+  assert.deepEqual(groups[1].previous.map(({ id }) => id), [first.id]);
 });
 
 test("persists fork and merge edges, preserves lanes on completion, and gates a merge on all parents", async () => {

@@ -13,7 +13,7 @@ export type MilestoneStatus = "current" | "planned" | "completed" | "superseded"
 
 export type ProjectTaskStatus = "next" | "later" | "waiting" | "done" | "cancelled";
 
-export type ProjectLogKind = "general" | "continuation" | "task_progress" | "task_completed" | "plan_revision";
+export type ProjectLogKind = "general" | "continuation" | "task_progress" | "task_completed" | "plan_revision" | "goal_revision";
 
 export type ProjectTaskStep = {
   id: string;
@@ -48,6 +48,7 @@ export type Project = {
   supportsMilestoneId: string | null;
   status: ProjectStatus;
   category: ProjectCategory;
+  tags?: string[];
   sortOrder: number;
   isDraft: boolean;
   sourceNote: string;
@@ -128,6 +129,7 @@ export type ProjectAccumulation = {
   title: string;
   content: string;
   reference: string;
+  isOutcome?: boolean;
   createdAt: string;
   updatedAt: string;
 };

@@ -4,12 +4,18 @@ import "./styles/global-planning.css";
 import "./styles/capture.css";
 import "./styles/health.css";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { buildActivityDays, buildActivityWeeks, type ActivityDay } from "../app/activity-helpers";
 import { isSourceArticle, isThoughtInboxArticle, pickRediscoverySource } from "../app/article-helpers";
 import type { ArticleRepository } from "../app/data/article-repository";
 import { calendarDayDifference, localDate } from "../app/date-helpers";
+import { projectCalendarEvents, projectJobGroups } from "../app/project-selectors";
+import type { AsabaJob } from "../app/companion-types";
+import type { WorkerArchive } from "../app/asaba-worker";
+import { AsabaJobCard } from "./AsabaDetails";
+import { companionApi } from "./companionApi";
 import { LIFE_DOMAIN_LABELS, LIFE_DOMAIN_OPTIONS } from "../app/domain-taxonomy";
 import {
   buildQuickCloseout,
@@ -22,6 +28,7 @@ import {
   decodeTaskProgressLog,
 } from "../app/home-workflow";
 import type {
+  MilestoneStatus,
   ProjectDetail,
   ProjectStatus,
   ProjectSummary,
@@ -48,7 +55,7 @@ import {
   type CaptureRelation,
 } from "../app/entertainment-capture";
 import { Button, SearchField, SelectMenu } from "./DesktopControls";
-import { isContinuablePlan } from "../app/action-planning";
+import { isConfirmedTodayPlan, type actionCenterLanes } from "../app/action-planning";
 import type { DailySituation } from "../app/work-types";
 import { ActionPlanningAssistant } from "./ActionPlanningAssistant";
 import { GlobalPlanningAssistant } from "./GlobalPlanningAssistant";
@@ -68,6 +75,8 @@ import { formatFocusDuration } from "./focus-format";
 export type WorkspaceTask = ProjectTask & {
   projectTitle: string;
   projectStatus: ProjectStatus | null;
+  projectDraft?: boolean;
+  milestoneStatus?: MilestoneStatus;
   stageTitle: string;
   stageDueDate: string;
   stageDueDateKind?: ProjectTask["dueDateKind"];
@@ -111,7 +120,6 @@ type TaskActions = {
   onCloseToday: (task: WorkspaceTask, result: string, nextFocus: string) => Promise<boolean>;
   onPlanToday: (task: WorkspaceTask) => void;
   onRemoveFromToday: (task: WorkspaceTask) => void;
-  onResumeAutoSchedule: (task: WorkspaceTask) => void;
   onStartFocus: (task: WorkspaceTask) => void;
   onQuickStart: (title: string) => Promise<boolean>;
   onStopFocus: () => void;
@@ -193,20 +201,20 @@ export function HomeDashboard({
   const [selectedActivityDate, setSelectedActivityDate] = useState(today);
   const [restBusy, setRestBusy] = useState(false);
   const planningInput = useMemo(() => ({ today, projects: projectDetails, tasks, focusSessions: taskActions.focusSessions, weeklyFocus, dailySituations }), [today, projectDetails, tasks, taskActions.focusSessions, weeklyFocus, dailySituations]);
+  const displayCalendarEvents = useMemo(() => [...calendarEvents, ...projectCalendarEvents(projectDetails)], [calendarEvents, projectDetails]);
   useEffect(() => {
     setPrimaryOutcome(weeklyFocus?.primaryOutcome ?? "");
     setSecondaryOutcome(weeklyFocus?.secondaryOutcome ?? "");
   }, [weeklyFocus]);
   useEffect(() => setSelectedActivityDate(today), [today]);
-  // 与“添加行动”下拉框保持一致：只要项目未完成（含支线和已暂停项目），其任务都可以被安排到今天。
   const available = tasks
-    .filter((task) => task.status !== "done" && task.status !== "cancelled" && task.status !== "waiting" && task.projectStatus !== "completed")
+    .filter((task) => !task.projectDraft && task.status !== "done" && task.status !== "cancelled" && task.status !== "waiting" && (task.projectStatus === null || task.projectStatus === "active"))
     .sort((left, right) => taskRank(left, today) - taskRank(right, today));
-  const planned = available.filter((task) => task.plan?.plannedDate === today);
+  const planned = available.filter((task) => isConfirmedTodayPlan(task.plan, today));
   const homeChoices = selectHomeTaskCandidates(tasks, today, taskActions.activeSession?.taskId ?? null);
   const primaryTask = homeChoices[0] ?? null;
   const alternatives = homeChoices.slice(1);
-  const missed = available.find((task) => task.planCarriedFrom && !task.weekBlocked);
+  const missed = available.find((task) => task.plan?.source !== "auto" && task.planCarriedFrom && !task.weekBlocked);
   const restingToday = restDays.some((day) => day.date === today);
   const echoTerms = useMemo(
     () => contextualEchoTerms(primaryTask, weeklyFocus),
@@ -337,7 +345,7 @@ export function HomeDashboard({
                     <ActionStructureDisclosure task={primaryTask} onUpdate={taskActions.onUpdateTask} />
                     <div className="home-strategy-actions">
                       <Button variant="secondary" type="button" onClick={() => taskActions.onCompleteTask(primaryTask)}>完成行动</Button>
-                      {primaryTask.plan && <Button variant="secondary" type="button" onClick={() => taskActions.onRemoveFromToday(primaryTask)}>{primaryTask.plan.plannedDate === today ? "移入待继续" : "暂时收起"}</Button>}
+                      {primaryTask.plan && primaryTask.plan.source !== "auto" && <Button variant="secondary" type="button" onClick={() => taskActions.onRemoveFromToday(primaryTask)}>{primaryTask.plan.plannedDate === today ? "移入待继续" : "暂时收起"}</Button>}
                       <Button variant="ghost" type="button" onClick={() => onOpenTask(primaryTask.id)}>编辑行动</Button>
                     </div>
                   </div>
@@ -367,7 +375,8 @@ export function HomeDashboard({
           today={today}
           repository={dashboardRepository}
           preferences={dashboardPreferences}
-          events={calendarEvents}
+          events={displayCalendarEvents}
+          onOpenProject={onOpenProject}
           onSavePreferences={onSaveDashboardPreferences}
           onSaveEvent={onSaveCalendarEvent}
           onDeleteEvent={onDeleteCalendarEvent}
@@ -531,13 +540,16 @@ export function TasksPage({
   dailySituations,
   today,
   tasks,
+  lanes,
   projects,
   projectDetails,
+  loadProject,
   initialTaskId,
   onTaskOpened,
   onAddTask,
   onRemoveTask,
   onOpenProject,
+  onArchiveWorker,
   ...taskActions
 }: {
   onOpenFocusHistory: () => void;
@@ -545,16 +557,22 @@ export function TasksPage({
   dailySituations: DailySituation[];
   today: string;
   tasks: WorkspaceTask[];
+  lanes: ReturnType<typeof actionCenterLanes<WorkspaceTask>>;
   projects: ProjectSummary[];
   projectDetails: ProjectDetail[];
+  loadProject: (id: string) => Promise<ProjectDetail | null>;
   initialTaskId?: string | null;
   onTaskOpened?: () => void;
   onAddTask: (input: NewActionInput) => Promise<boolean>;
   onRemoveTask: (task: WorkspaceTask) => void;
   onOpenProject: (projectId: string) => void;
+  onArchiveWorker: (request: WorkerArchive) => Promise<void>;
 } & TaskActions) {
   const [showComposer, setShowComposer] = useState(false);
-  const [showPlanner, setShowPlanner] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const [query, setQuery] = useState("");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [requestedId, setRequestedId] = useState<string | null>(null);
   const [showAi, setShowAi] = useState(false);
   const [projectId, setProjectId] = useState("");
   const [milestoneId, setMilestoneId] = useState("");
@@ -572,28 +590,26 @@ export function TasksPage({
   const [closeoutTask, setCloseoutTask] = useState<WorkspaceTask | null>(null);
   const [editingTask, setEditingTask] = useState<WorkspaceTask | null>(null);
   useEffect(() => {
-    if (!initialTaskId) return;
-    const requested = tasks.find((task) => task.id === initialTaskId);
-    if (requested) setEditingTask(requested);
+    if (!initialTaskId || !tasks.some((task) => task.id === initialTaskId)) return;
+    setRequestedId(initialTaskId);
+    setExpandedId(initialTaskId);
+    setShowAll(!lanes.schedule.some((task) => task.id === initialTaskId) && !lanes.ready.slice(0, 6).some((task) => task.id === initialTaskId));
+    setQuery("");
     onTaskOpened?.();
-  }, [initialTaskId, onTaskOpened, tasks]);
+  }, [initialTaskId, onTaskOpened, tasks, lanes]);
   useEffect(() => {
-    if (!showComposer && !showPlanner) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setShowComposer(false);
-        setShowPlanner(false);
-      }
-    };
+    if (requestedId) document.getElementById("action-row-" + requestedId)?.scrollIntoView({ block: "nearest" });
+  }, [requestedId]);
+  useEffect(() => {
+    if (!showComposer) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setShowComposer(false); };
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [showComposer, showPlanner]);
-  const available = tasks.filter((task) => task.status !== "done" && task.status !== "cancelled" && task.status !== "waiting" && (task.projectStatus === null || task.projectStatus === "active")).sort((a, b) => taskRank(a, today) - taskRank(b, today));
-  const plannedToday = available.filter((task) => task.plan?.plannedDate === today);
-  const continuing = available.filter((task) => !task.weekBlocked && isContinuablePlan(task.plan, today));
-  const candidates = available.filter((task) => task.plan?.plannedDate !== today).sort((left, right) => planningRank(left, today) - planningRank(right, today) || taskRank(left, today) - taskRank(right, today));
-  const overdue = candidates.filter((task) => isTaskOverdue(task, today));
-  const focusNow = useLiveNow(Boolean(taskActions.activeSession));
+  }, [showComposer]);
+  const { schedule, ready, pending, dateSuggestions } = lanes;
+  const needle = query.trim().toLocaleLowerCase("zh-CN");
+  const allTasks = tasks.filter((task) => (pending.includes(task) || task.id === requestedId) &&
+    [task.title, task.currentFocus, task.projectTitle, task.stageTitle].join(" ").toLocaleLowerCase("zh-CN").includes(needle));
   const selectedProject = projectDetails.find((detail) => detail.project.id === projectId);
 
   function chooseProject(value: string) {
@@ -607,61 +623,62 @@ export function TasksPage({
     event.preventDefault();
     if (!title.trim()) return;
     if (!await onAddTask({ projectId: projectId || null, milestoneId: projectId ? milestoneId || null : null, direction, title: title.trim(), definitionOfDone: definitionOfDone.trim(), steps, currentFocus: currentFocus.trim(), details: details.trim(), dueDate, dueDateKind, estimatedDays, status: newTaskStatus, plannedToday: planOnSave })) return;
-    setTitle(""); setDefinitionOfDone(""); setSteps([]); setCurrentFocus(""); setDetails(""); setDueDate(""); setEstimatedDays(0); setNewTaskStatus("later"); setPlanOnSave(false); setShowComposer(false);
+    setTitle(""); setDefinitionOfDone(""); setSteps([]); setCurrentFocus(""); setDetails(""); setDueDate(""); setDueDateKind(null); setEstimatedDays(0); setNewTaskStatus("later"); setPlanOnSave(false); setShowComposer(false);
+  }
+
+  function row(task: WorkspaceTask) {
+    return <ActionRow key={task.id} task={task} today={today} suggested={dateSuggestions.has(task.id)}
+      expanded={expandedId === task.id} onToggle={() => setExpandedId((current) => current === task.id ? null : task.id)}
+      onOpenProject={onOpenProject} onRemoveTask={onRemoveTask} onRequestCloseout={setCloseoutTask} onEditTask={setEditingTask} {...taskActions} />;
   }
 
   return (
     <div className="tasks-page action-center workspace-scroll">
-      <header className="workspace-page-heading">
-        <div><h1>今日行动</h1><p>安排今天，也可以从上次的起点直接继续。</p><Button variant="secondary" size="small" onClick={taskActions.onChangeWeek}>计划有变</Button></div>
-        <ThemeSticker section="tasks" />
-        <div className="today-heading-actions"><Button variant="secondary" type="button" onClick={onOpenFocusHistory}>投入记录</Button><Button variant="secondary" type="button" onClick={() => onSupplementDay(today)}>补记当天情况</Button><Button variant="secondary" type="button" onClick={() => setShowAi(true)}>AI 帮我起步</Button><Button variant="secondary" type="button" onClick={() => setShowComposer(true)}>＋ 新建行动</Button><Button variant="primary" onClick={() => setShowPlanner(true)}>安排已有行动 <span>{candidates.length}</span></Button></div>
-      </header>
-
-      {showAi && <ActionPlanningAssistant onClose={() => setShowAi(false)} onAddTask={onAddTask} />}
-      {dailySituations[0] && <div className="situation-recent"><span>最近补记 · {dailySituations[0].date}</span><p>{dailySituations[0].reason}</p><Button variant="ghost" size="small" type="button" onClick={() => onSupplementDay(dailySituations[0].date)}>查看</Button></div>}
-      {overdue.length > 0 && <button className="today-overdue-alert" onClick={() => setShowPlanner(true)}><span>有 {overdue.length} 项行动已过截止时间</span><strong>查看行动 →</strong></button>}
-
-      {(plannedToday.length > 0 || continuing.length === 0) && <section className="task-list-shell action-list-shell">
-        <header><div><strong>今天已安排</strong><span>{plannedToday.length} 项</span></div></header>
-        <div className="task-list-large">
-          {plannedToday.length ? plannedToday.map((task) => (
-            <ActionRow
-              key={task.id}
-              task={task}
-              today={today}
-              onOpenProject={onOpenProject}
-              onRemoveTask={onRemoveTask}
-              onRequestCloseout={setCloseoutTask}
-              onEditTask={setEditingTask}
-              now={focusNow}
-              {...taskActions}
-            />
-          )) : <div className="today-empty-state"><EmptyState title="今天还没有安排" body="新建一条独立行动，或从项目中挑一两项；今天只关注真正准备开始的内容。" /></div>}
-        </div>
-      </section>}
-      {continuing.length > 0 && <section className="task-list-shell action-list-shell continuation-list"><header><div><strong>待继续</strong><span>{continuing.length} 项 · 有空直接开始，无需重新安排日期</span></div></header><div className="task-list-large">{continuing.map((task) => <ActionRow key={task.id} task={task} today={today} now={focusNow} onOpenProject={onOpenProject} onRemoveTask={onRemoveTask} onRequestCloseout={setCloseoutTask} onEditTask={setEditingTask} {...taskActions} />)}</div></section>}
-
-      {showPlanner && (
-        <div className="task-drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setShowPlanner(false); }}>
-          <aside className="task-drawer plan-today-drawer" role="dialog" aria-modal="true" aria-label="从项目中安排今日行动">
-            <header><div><span>项目行动</span><h2>安排到今天</h2><p>只显示正在推进的项目；逾期和临近截止会优先出现。</p></div><Button variant="secondary" size="small" iconOnly type="button" onClick={() => setShowPlanner(false)} aria-label="关闭">×</Button></header>
-            <div className="plan-today-list">
-              {candidates.length ? candidates.map((task) => {
-                const urgency = planningUrgency(task, today);
-                return <article key={task.id}><button className="plan-task-main" onClick={() => task.projectId ? onOpenProject(task.projectId) : setEditingTask(task)}><span>{task.projectTitle}</span><strong>{actionDisplayTitle(task)}</strong><small>{task.stageTitle || (task.projectId ? "未关联阶段" : LIFE_DOMAIN_LABELS[task.direction])}</small></button><div>{urgency && <em className={urgency.tone}>{urgency.label}</em>}{task.autoSchedulePaused && <em>自动安排已暂停</em>}<Button variant="primary" type="button" onClick={() => void Promise.resolve(taskActions.onPlanToday(task))}>安排到今天</Button>{task.autoSchedulePaused && <Button variant="secondary" type="button" onClick={() => taskActions.onResumeAutoSchedule(task)}>恢复自动安排</Button>}</div></article>;
-              }) : <EmptyState title="暂时没有可安排的行动" body="正在推进的项目里还没有未完成行动，可以先回到项目补充下一步。" />}
+      <header className="workspace-page-heading action-center-heading">
+        <h1>行动</h1>
+        <div className="action-center-controls">
+          <Button variant="primary" type="button" onClick={() => setShowComposer(true)}>＋ 新建行动</Button>
+          <details className="action-center-tools">
+            <summary>更多</summary>
+            <div>
+              <Button variant="ghost" type="button" onClick={() => setShowAi(true)}>AI 帮我起步</Button>
+              <Button variant="ghost" type="button" onClick={taskActions.onChangeWeek}>计划有变</Button>
+              <Button variant="ghost" type="button" onClick={onOpenFocusHistory}>投入记录</Button>
+              <Button variant="ghost" type="button" onClick={() => onSupplementDay(today)}>补记当天情况</Button>
+              {dailySituations[0] && dailySituations[0].date !== today && <Button variant="ghost" type="button" onClick={() => onSupplementDay(dailySituations[0].date)}>查看最近补记</Button>}
             </div>
-          </aside>
+          </details>
         </div>
-      )}
+      </header>
+      <nav className="action-center-views" aria-label="行动视图">
+        <Button variant={!showAll ? "secondary" : "ghost"} type="button" aria-pressed={!showAll} onClick={() => setShowAll(false)}>概览</Button>
+        <Button variant={showAll ? "secondary" : "ghost"} type="button" aria-pressed={showAll} onClick={() => setShowAll(true)}>全部行动</Button>
+        {showAll && <SearchField label="搜索行动" value={query} onChange={setQuery} placeholder="搜索行动或项目" />}
+      </nav>
+      {showAi && <ActionPlanningAssistant projects={projectDetails} loadProject={loadProject} onClose={() => setShowAi(false)} onAddTask={onAddTask} />}
+      <div className="action-center-grid">
+        <div className="action-center-list">
+          {showAll ? <section className="workspace-card action-center-panel"><h2>全部行动</h2>
+            {allTasks.map(row)}{!allTasks.length && <p>{needle ? "没有匹配的行动" : "暂无行动"}</p>}
+          </section> : <>
+            <section className="workspace-card action-center-panel"><h2>今天</h2>
+              {schedule.length ? schedule.map(row) : <p>今天没有确认的安排</p>}
+            </section>
+            <section className="workspace-card action-center-panel"><h2>可继续</h2>
+              {ready.length ? ready.slice(0, 6).map(row) : <p>暂无可继续的行动</p>}
+              {ready.length > 6 && <Button variant="ghost" size="small" onClick={() => setShowAll(true)}>查看全部行动</Button>}
+            </section>
+          </>}
+        </div>
+        <ActionCenterJobs projects={projects} onOpenProject={onOpenProject} onArchive={onArchiveWorker} showAll={showAll} />
+      </div>
 
       {showComposer && (
         <div className="task-drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setShowComposer(false); }}>
           <aside className="task-drawer action-drawer" role="dialog" aria-modal="true" aria-label="添加行动">
             <header><div><span>新的行动</span><h2>{projectId ? "添加项目行动" : "添加独立行动"}</h2></div><Button variant="secondary" size="small" iconOnly type="button" onClick={() => setShowComposer(false)} aria-label="关闭">×</Button></header>
             <form onSubmit={submit}>
-              <label><span>所属项目 · 可选</span><SelectMenu label="所属项目" value={projectId} onChange={chooseProject} options={[{ value: "", label: "不关联项目" }, ...projects.filter((project) => project.status === "active").map((project) => ({ value: project.id, label: project.title }))]} /></label>
+              <label><span>所属项目 · 可选</span><SelectMenu label="所属项目" value={projectId} onChange={chooseProject} options={[{ value: "", label: "不关联项目" }, ...projects.filter((project) => project.status === "active" && !project.isDraft).map((project) => ({ value: project.id, label: project.title }))]} /></label>
               {!projectId && <label><span>关注方向 · 可选</span><SelectMenu label="关注方向" value={direction} onChange={(value) => setDirection(value as ProjectTask["direction"])} options={LIFE_DOMAIN_OPTIONS} /></label>}
               {projectId && <label><span>所属阶段</span><SelectMenu label="所属阶段" value={milestoneId} onChange={setMilestoneId} options={[{ value: "", label: "暂不关联" }, ...(selectedProject?.milestones ?? []).filter((milestone) => milestone.status !== "superseded").map((milestone) => ({ value: milestone.id, label: `${milestone.status === "current" ? "当前 · " : ""}${milestone.title}` }))]} /></label>}
               <label><span>行动状态</span><SelectMenu label="行动状态" value={newTaskStatus} onChange={(value) => setNewTaskStatus(value as ProjectTask["status"])} options={[{ value: "later", label: "稍后" }, { value: "next", label: "下一步" }]} /></label>
@@ -1046,30 +1063,89 @@ export function ReviewPage({ dailySituations, onSupplementDay, projects, project
   );
 }
 
-function ActionRow({ task, today, now, onOpenProject, onRemoveTask, onRequestCloseout, onEditTask, onCompleteTask, onUpdateTask, onRemoveFromToday, onStartFocus, onStopFocus, activeSession, focusSessions }: { task: WorkspaceTask; today: string; now: number; onOpenProject: (projectId: string) => void; onRemoveTask: (task: WorkspaceTask) => void; onRequestCloseout: (task: WorkspaceTask) => void; onEditTask: (task: WorkspaceTask) => void } & TaskActions) {
-  const plannedToday = task.plan?.plannedDate === today;
-  const title = actionDisplayTitle(task);
-  const date = actionDate(task, today);
-  const isActive = activeSession?.taskId === task.id;
-  const focusSeconds = taskFocusSeconds(task.id, focusSessions, today, activeSession, now);
-  return (
-    <article className={`workspace-task action-row ${plannedToday ? "is-today" : ""} ${isActive ? "is-focusing" : ""} ${focusSeconds > 0 ? "has-focus-time" : ""}`}>
-      <div className="action-row-main">
-        <header>{task.projectId ? <button className="action-context" onClick={() => onOpenProject(task.projectId!)}>{task.projectTitle} <i>›</i></button> : <span className="action-context">独立行动 · {LIFE_DOMAIN_LABELS[task.direction]}</span>}{task.stageCount > 0 && <span>阶段 {task.stageIndex}/{task.stageCount}</span>}{plannedToday && <b>{task.plan?.source === "auto" ? `按工期自动安排 · 预计 ${task.estimatedDays} 天` : task.planCarriedFrom ? "上次未收尾 · 今日续做" : "已安排到今天"}</b>}</header>
-        <h2>{task.currentFocus || title}</h2>
-        {task.currentFocus && <p className="action-parent-title">所属行动：{title}</p>}
-        {task.stageTitle && title !== task.stageTitle && <p className="action-stage-title">当前阶段：{task.stageTitle}</p>}
-        {plannedToday && Boolean(task.plan?.estimateMinutes) && <p>预计 {task.plan?.estimateMinutes} 分钟{task.weekBlocked ? " · 等待前置行动完成" : ""}</p>}
-        <div className="action-row-meta"><span className={`${date.text ? "has-due" : ""} ${date.tone}`}>{date.text || "无日期"}</span><StageProgress task={task} compact /></div>
-      </div>
-      {focusSeconds > 0 && <div className={`action-focus-readout ${isActive ? "active" : ""}`}><span>{isActive ? "正在投入" : "今天已投入"}</span><strong>{formatFocusDuration(focusSeconds, true)}</strong></div>}
-      <ActionStructureDisclosure task={task} onUpdate={onUpdateTask} />
-      <footer className="action-row-actions"><Button variant="secondary" type="button" className="today-closeout" onClick={() => onRequestCloseout(task)}>今日收工</Button>{isActive ? <Button variant="secondary" type="button" className="focus-pause" onClick={onStopFocus}>Ⅱ 暂停投入</Button> : !activeSession && !task.weekBlocked && <Button variant="primary" type="button" className="focus-start" onClick={() => onStartFocus(task)}>▷ 开始投入</Button>}<Button variant="secondary" type="button" onClick={() => onCompleteTask(task)}>完成行动</Button><Button variant="ghost" type="button" onClick={() => onRemoveFromToday(task)}>{plannedToday ? "移出今天" : "暂时收起"}</Button><details className="action-more"><summary aria-label="更多操作">⋯</summary><Button variant="ghost" size="small" type="button" onClick={() => onEditTask(task)}>编辑行动</Button><Button variant="danger" onClick={() => onRemoveTask(task)}>删除行动</Button></details></footer>
-    </article>
-  );
+function ActionCenterJobs({ projects, onOpenProject, onArchive, showAll }: {
+  projects: ProjectSummary[];
+  onOpenProject: (id: string) => void;
+  onArchive: (request: WorkerArchive) => Promise<void>;
+  showAll: boolean;
+}) {
+  const [jobs, setJobs] = useState<AsabaJob[]>([]);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (!isTauri()) return;
+    let active = true;
+    const refresh = () => void companionApi.jobs().then((value) => { if (active) { setJobs(value); setError(""); } }, (cause) => { if (active) setError(String(cause)); });
+    const subscription = listen("asaba-jobs-changed", refresh);
+    void subscription.then(refresh, () => refresh());
+    return () => { active = false; void subscription.then((stop) => stop(), () => undefined); };
+  }, []);
+  const groups = projectJobGroups(jobs);
+  const needsReview = groups.filter(({ latest }) => latest.state === "review");
+  const running = groups.filter(({ latest }) => ["queued", "running", "recovering"].includes(latest.state));
+  const other = groups.filter(({ latest }) => !["review", "queued", "running", "recovering"].includes(latest.state));
+  const eligibleProjects = projects.filter((project) => !project.isDraft && project.status !== "completed");
+  function renderJob({ latest, previous }: ReturnType<typeof projectJobGroups>[number]) {
+    const project = projects.find(({ id }) => id === latest.projectId);
+    return <div key={latest.id} className="action-center-job">
+      <AsabaJobCard job={latest} projects={eligibleProjects} onArchive={onArchive} onReviewed={latest.agent === "codex" && latest.state === "review"
+        ? () => void companionApi.jobAction(latest.id, "reviewed").catch((cause) => setError(String(cause))) : undefined} />
+      {project && <Button variant="ghost" size="small" onClick={() => onOpenProject(project.id)}>{project.title} ↗</Button>}
+      {showAll && previous.length > 0 && <details><summary>之前的尝试（{previous.length}）</summary>{previous.map((job) => <AsabaJobCard key={job.id} job={job} />)}</details>}
+    </div>;
+  }
+  return <aside className="action-center-list" aria-label="委托">
+    <section className="workspace-card action-center-panel"><h2>待确认</h2>{needsReview.length ? needsReview.map(renderJob) : <p>暂无待确认的委托</p>}</section>
+    {running.length > 0 && <section className="workspace-card action-center-panel"><h2>正在委托</h2>{running.map(renderJob)}</section>}
+    {showAll && other.length > 0 && <section className="workspace-card action-center-panel"><h2>委托记录</h2>{other.map(renderJob)}</section>}
+    {error && <p role="status">{error}</p>}
+  </aside>;
 }
 
-function ActionStructureDisclosure({ task, onUpdate }: { task: WorkspaceTask; onUpdate: (task: WorkspaceTask) => Promise<boolean> }) {
+function ActionRow({ task, today, suggested, expanded, onToggle, onOpenProject, onRemoveTask, onRequestCloseout, onEditTask,
+  onCompleteTask, onUpdateTask, onPlanToday, onRemoveFromToday, onStartFocus, onStopFocus, activeSession }: {
+  task: WorkspaceTask; today: string; suggested: boolean; expanded: boolean; onToggle: () => void;
+  onOpenProject: (projectId: string) => void; onRemoveTask: (task: WorkspaceTask) => void;
+  onRequestCloseout: (task: WorkspaceTask) => void; onEditTask: (task: WorkspaceTask) => void;
+} & TaskActions) {
+  const confirmed = isConfirmedTodayPlan(task.plan, today);
+  const active = activeSession?.taskId === task.id;
+  const closed = task.status === "done" || task.status === "cancelled";
+  const blocked = Boolean(task.weekBlocked || task.status === "waiting" || task.projectDraft || (task.projectStatus && task.projectStatus !== "active"));
+  const date = actionDate(task, today);
+  const title = actionDisplayTitle(task);
+  const [completing, setCompleting] = useState(false);
+  return <article id={"action-row-" + task.id} className="action-center-row">
+    <div className="action-center-row-main">
+      <div>
+        <div className="action-center-context">
+          {task.projectId ? <Button variant="ghost" size="small" wrap onClick={() => onOpenProject(task.projectId!)}>{task.projectTitle} ↗</Button> : <span>独立行动</span>}
+          {task.stageTitle && <span>{task.stageTitle}</span>}
+        </div>
+        <h3><Button variant="ghost" wrap aria-expanded={expanded} onClick={onToggle}>{task.currentFocus || title}</Button></h3>
+        {(closed || blocked || active || suggested) && <small>{closed ? task.status === "done" ? "已完成" : "已取消" : active ? "正在计时" : task.status === "waiting" ? "等待中" : task.weekBlocked ? "等待前置行动" : blocked ? "所属项目未在推进" : "建议近期开始"}</small>}
+        {date.text && (date.tone || expanded) && <small className={date.tone}>{date.text}</small>}
+      </div>
+      <div className="action-center-row-buttons">
+        {!closed && !blocked && <Button variant="secondary" size="small" disabled={completing} onClick={async () => { setCompleting(true); try { await onCompleteTask(task); } finally { setCompleting(false); } }}>完成</Button>}
+        <Button variant="ghost" size="small" aria-expanded={expanded} onClick={onToggle}>{expanded ? "收起" : "详情"}</Button>
+      </div>
+    </div>
+    {expanded && <div className="action-center-row-details">
+      {task.currentFocus && task.currentFocus !== title && <p>{title}</p>}
+      <ActionStructureDisclosure task={task} onUpdate={onUpdateTask} initiallyOpen />
+      {task.resumeAction && <p>恢复后 · {task.resumeAction}</p>}
+      <footer>
+        {!closed && !blocked && <Button variant="secondary" size="small" onClick={() => confirmed ? onRemoveFromToday(task) : onPlanToday(task)}>{confirmed ? "移出今天" : "安排到今天"}</Button>}
+        {!closed && <Button variant="ghost" size="small" onClick={() => onEditTask(task)}>编辑行动</Button>}
+        {active ? <Button variant="ghost" size="small" onClick={onStopFocus}>停止计时</Button> : !closed && !blocked && !activeSession && <Button variant="ghost" size="small" onClick={() => onStartFocus(task)}>记录投入</Button>}
+        {!closed && !blocked && <Button variant="ghost" size="small" onClick={() => onRequestCloseout(task)}>今日收工</Button>}
+        {!closed && <Button variant="danger" size="small" onClick={() => onRemoveTask(task)}>删除</Button>}
+      </footer>
+    </div>}
+  </article>;
+}
+
+function ActionStructureDisclosure({ task, onUpdate, initiallyOpen }: { task: WorkspaceTask; onUpdate: (task: WorkspaceTask) => Promise<boolean>; initiallyOpen?: boolean }) {
   async function toggleStep(stepId: string) {
     await onUpdate({
       ...task,
@@ -1077,7 +1153,7 @@ function ActionStructureDisclosure({ task, onUpdate }: { task: WorkspaceTask; on
     });
   }
   if (!task.definitionOfDone && !task.steps.length && !task.details && !task.waitingFor) return null;
-  return <details className="action-disclosure action-structure-disclosure">
+  return <details className="action-disclosure action-structure-disclosure" open={initiallyOpen}>
     <summary>查看行动说明与步骤</summary>
     <div>
       {task.definitionOfDone && <section><strong>完成标志</strong><p>{task.definitionOfDone}</p></section>}
@@ -1129,7 +1205,11 @@ function ActionEditDialog({ task, projects, projectDetails, onCancel, onSave }: 
         <label><span>所属项目 · 可选</span><SelectMenu label="所属项目" value={draft.projectId || ""} onChange={chooseProject} options={[{ value: "", label: "独立行动" }, ...projects.filter((project) => project.status === "active").map((project) => ({ value: project.id, label: project.title }))]} /></label>
         {!draft.projectId && <label><span>关注方向 · 可选</span><SelectMenu label="关注方向" value={draft.direction} onChange={(value) => setDraft({ ...draft, direction: value as ProjectTask["direction"] })} options={LIFE_DOMAIN_OPTIONS} /></label>}
         {draft.projectId && <label><span>所属阶段 · 可选</span><SelectMenu label="所属阶段" value={draft.milestoneId || ""} onChange={(value) => setDraft({ ...draft, milestoneId: value || null })} options={[{ value: "", label: "暂不关联" }, ...(selectedProject?.milestones ?? []).filter((milestone) => milestone.status !== "superseded").map((milestone) => ({ value: milestone.id, label: `${milestone.status === "current" ? "当前 · " : ""}${milestone.title}` }))]} /></label>}
-        <label><span>行动状态</span><SelectMenu label="行动状态" value={draft.status} onChange={(value) => setDraft({ ...draft, status: value as ProjectTask["status"] })} options={[{ value: "next", label: "下一步" }, { value: "later", label: "稍后" }, { value: "waiting", label: "等待中" }, { value: "cancelled", label: "已取消" }, { value: "done", label: "已完成" }]} /></label>
+        <label><span>行动状态</span><SelectMenu label="行动状态" value={draft.status} onChange={(value) => setDraft({ ...draft, status: value as ProjectTask["status"] })} options={[{ value: "next", label: "下一步" }, { value: "later", label: "稍后" }, { value: "waiting", label: "等待中" }, { value: "cancelled", label: "已取消" }]} /></label>
+        {draft.status === "waiting" && <>
+          <label><span>等待条件</span><input value={draft.waitingFor} onChange={(event) => setDraft({ ...draft, waitingFor: event.target.value })} /></label>
+          <label><span>恢复后行动</span><input value={draft.resumeAction} onChange={(event) => setDraft({ ...draft, resumeAction: event.target.value })} /></label>
+        </>}
         <label><span>行动名称</span><input autoFocus value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label>
         <ActionOptionalFields hasContent={Boolean(draft.currentFocus || draft.definitionOfDone || draft.steps.length || draft.details)}>
         <label><span>本次推进</span><textarea value={draft.currentFocus} onChange={(event) => setDraft({ ...draft, currentFocus: event.target.value })} /></label>
@@ -1137,8 +1217,8 @@ function ActionEditDialog({ task, projects, projectDetails, onCancel, onSave }: 
         <ActionStepEditor steps={draft.steps} onChange={(steps) => setDraft({ ...draft, steps })} />
         <label><span>补充说明 · 可选</span><textarea value={draft.details} onChange={(event) => setDraft({ ...draft, details: event.target.value })} /></label>
         </ActionOptionalFields>
-        <ProjectDateField label="行动日期" value={draft.dueDate} kind={draft.dueDateKind} onChange={(dueDate, dueDateKind) => setDraft({ ...draft, dueDate, dueDateKind, autoSchedulePaused: false })} />
-        <ActionEstimateField dateKind={draft.dueDateKind} dueDate={scheduledProjectDate(draft.dueDate, draft.dueDateKind)} estimatedDays={draft.estimatedDays || 0} title={draft.title} currentFocus={draft.currentFocus} definitionOfDone={draft.definitionOfDone} steps={draft.steps} details={draft.details} projectTitle={selectedProject?.project.title || ""} stageTitle={selectedProject?.milestones.find((item) => item.id === draft.milestoneId)?.title || ""} paused={Boolean(draft.autoSchedulePaused)} onChange={(days) => setDraft({ ...draft, estimatedDays: days, autoSchedulePaused: false })} onPauseChange={(paused) => setDraft({ ...draft, autoSchedulePaused: paused })} />
+        <ProjectDateField label="行动日期" value={draft.dueDate} kind={draft.dueDateKind} onChange={(dueDate, dueDateKind) => setDraft({ ...draft, dueDate, dueDateKind })} />
+        <ActionEstimateField dateKind={draft.dueDateKind} dueDate={scheduledProjectDate(draft.dueDate, draft.dueDateKind)} estimatedDays={draft.estimatedDays || 0} title={draft.title} currentFocus={draft.currentFocus} definitionOfDone={draft.definitionOfDone} steps={draft.steps} details={draft.details} projectTitle={selectedProject?.project.title || ""} stageTitle={selectedProject?.milestones.find((item) => item.id === draft.milestoneId)?.title || ""} onChange={(days) => setDraft({ ...draft, estimatedDays: days })} />
         <footer><Button variant="secondary" type="button" disabled={saving} onClick={onCancel}>取消</Button><Button variant="primary" type="submit" disabled={saving || !draft.title.trim()}>{saving ? "正在保存…" : "保存行动"}</Button></footer>
       </form>
     </aside>
@@ -1199,16 +1279,7 @@ async function openSourceUrl(url: string) {
   } catch { /* 交给系统打开器显示原有错误。 */ }
   await openUrl(url);
 }
-function taskRank(task: WorkspaceTask, today: string) { const todayRank = task.plan?.plannedDate === today ? 0 : task.status === "next" ? 4 : 10; const dueDifference = actionDeadline(task) ? calendarDayDifference(actionDeadline(task), today) : null; const dueRank = dueDifference === null ? 30 : Math.max(0, dueDifference); return todayRank + dueRank / 100 + task.sortOrder / 1000; }
-function deadlineDifference(task: WorkspaceTask, today: string) { const due = actionDeadline(task); return due ? calendarDayDifference(due, today) : null; }
-function isDueSoon(task: WorkspaceTask, today: string) { const difference = deadlineDifference(task, today); return difference !== null && difference >= 0 && difference <= 2; }
-function isTaskOverdue(task: WorkspaceTask, today: string) { const deadline = deadlineDifference(task, today); return deadline !== null && deadline < 0; }
-function planningUrgency(task: WorkspaceTask, today: string) {
-  if (isTaskOverdue(task, today)) return { tone: "overdue", label: "需要重新安排" };
-  if (isDueSoon(task, today)) return { tone: "soon", label: deadlineLabel(task, today) };
-  return actionDeadline(task) ? { tone: "quiet", label: deadlineLabel(task, today) } : null;
-}
-function planningRank(task: WorkspaceTask, today: string) { return isTaskOverdue(task, today) ? 0 : isDueSoon(task, today) ? 1 : 2; }
+function taskRank(task: WorkspaceTask, today: string) { const todayRank = isConfirmedTodayPlan(task.plan, today) ? 0 : task.status === "next" ? 4 : 10; const dueDifference = actionDeadline(task) ? calendarDayDifference(actionDeadline(task), today) : null; const dueRank = dueDifference === null ? 30 : Math.max(0, dueDifference); return todayRank + dueRank / 100 + task.sortOrder / 1000; }
 function actionDate(task: WorkspaceTask, today: string) {
   const due = actionDeadline(task);
   return due ? projectDateLabel(due, "deadline", today) : task.dueDate ? projectDateLabel(task.dueDate, task.dueDateKind, today) : task.stageDueDate ? projectDateLabel(task.stageDueDate, task.stageDueDateKind, today) : projectDateLabel(task.projectTargetDate ?? "", task.projectTargetDateKind, today);

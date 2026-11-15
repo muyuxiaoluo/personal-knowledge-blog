@@ -32,12 +32,14 @@ export function MorningOverview({
   repository,
   preferences,
   events,
+  onOpenProject,
   onSavePreferences,
   onSaveEvent,
   onDeleteEvent,
   onNotice,
 }: SharedProps & {
   events: CalendarEvent[];
+  onOpenProject: (projectId: string) => void;
   onSavePreferences: (preferences: DashboardPreferences) => Promise<void>;
   onSaveEvent: (event: CalendarEvent) => Promise<CalendarEvent>;
   onDeleteEvent: (id: string) => Promise<void>;
@@ -54,6 +56,17 @@ export function MorningOverview({
   const [editingEvent, setEditingEvent] = useState<CalendarEvent | null>(null);
   const location = preferences.location;
   const weatherKey = location ? `weather:${location.latitude.toFixed(4)}:${location.longitude.toFixed(4)}` : "";
+
+  function manageDate(date: string, event?: CalendarEvent) {
+    setCalendarViewOpen(false);
+    if (event?.milestone) {
+      onOpenProject(event.milestone.projectId);
+      return;
+    }
+    setCalendarDate(date);
+    setEditingEvent(event ?? null);
+    setCalendarOpen(true);
+  }
 
   const refreshWeather = useCallback(async (manual = false) => {
     if (!location || !weatherKey || !isTauri() || weatherRequestActive.current) return;
@@ -132,11 +145,7 @@ export function MorningOverview({
           today={today}
           events={events}
           onOpenCalendar={() => setCalendarViewOpen(true)}
-          onManage={(date, event) => {
-            setCalendarDate(date);
-            setEditingEvent(event ?? null);
-            setCalendarOpen(true);
-          }}
+          onManage={manageDate}
         />
       )}
       {cityOpen && (
@@ -153,7 +162,7 @@ export function MorningOverview({
         <CalendarManagerModal
           initialDate={calendarDate}
           initialEvent={editingEvent}
-          events={events}
+          events={events.filter((event) => !event.milestone)}
           onClose={() => setCalendarOpen(false)}
           onSave={onSaveEvent}
           onDelete={onDeleteEvent}
@@ -165,12 +174,7 @@ export function MorningOverview({
           today={today}
           events={events}
           onClose={() => setCalendarViewOpen(false)}
-          onManage={(date, event) => {
-            setCalendarViewOpen(false);
-            setCalendarDate(date);
-            setEditingEvent(event ?? null);
-            setCalendarOpen(true);
-          }}
+          onManage={manageDate}
         />
       )}
     </div>
@@ -442,8 +446,10 @@ function CalendarOverviewModal({ today, events, onClose, onManage }: {
   onManage: (date: string, event?: CalendarEvent) => void;
 }) {
   const [month, setMonth] = useState(today.slice(0, 7));
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const cells = useMemo(() => calendarCells(month), [month]);
   const upcoming = useMemo(() => combinedUpcoming(events, today), [events, today]);
+  const selectedEvents = selectedDate ? events.filter((event) => eventOccursOn(event, selectedDate)) : [];
   useDialogEscape(onClose);
   return <div className="morning-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="morning-modal calendar-overview-modal" role="dialog" aria-modal="true" aria-label="查看月历"><header><div><span>重要日期</span><h2>{Number(month.slice(0, 4))} 年 {Number(month.slice(5))} 月</h2></div><Button variant="secondary" size="small" iconOnly type="button" onClick={onClose} aria-label="关闭">×</Button></header>
     <div className="calendar-overview-toolbar"><Button variant="ghost" size="small" type="button" onClick={() => setMonth(shiftMonth(month, -1))}>‹ 上月</Button><Button variant="ghost" size="small" type="button" onClick={() => setMonth(today.slice(0, 7))}>回到本月</Button><Button variant="ghost" size="small" type="button" onClick={() => setMonth(shiftMonth(month, 1))}>下月 ›</Button></div>
@@ -451,8 +457,12 @@ function CalendarOverviewModal({ today, events, onClose, onManage }: {
       if (!date) return <i key={`blank-${index}`} />;
       const holiday = officialHolidayOn(date);
       const custom = events.filter((event) => eventOccursOn(event, date));
-      return <button key={date} className={`${date === today ? "today" : ""} ${holiday?.kind || ""} ${custom.length ? "custom" : ""}`} title={[holiday?.name, ...custom.map((event) => event.title)].filter(Boolean).join(" · ")} onClick={() => onManage(date, custom[0])}><span>{Number(date.slice(8))}</span>{holiday && <small>{holiday.kind === "workday" ? "班" : "休"}</small>}{custom.length > 0 && <b style={{ background: custom[0].color }} />}</button>;
+      return <button key={date} aria-pressed={selectedDate === date} className={`${date === today ? "today" : ""} ${holiday?.kind || ""} ${custom.length ? "custom" : ""}`} title={[holiday?.name, ...custom.map((event) => event.milestone ? event.title + " · " + milestoneDateLabel(event.milestone) : event.title)].filter(Boolean).join(" · ")} onClick={() => custom.length > 1 || custom[0]?.milestone ? setSelectedDate(date) : onManage(date, custom[0])}><span>{Number(date.slice(8))}</span>{holiday && <small>{holiday.kind === "workday" ? "班" : "休"}</small>}{custom.length > 0 && <b style={{ background: custom[0].color }} />}</button>;
     })}</div></div>
+    {selectedDate && selectedDate.startsWith(month) && <div className="calendar-upcoming"><strong>{formatShortDate(selectedDate)}</strong>
+      {selectedEvents.map((event) => <button className="editable" type="button" key={event.id} onClick={() => onManage(selectedDate, event)}><i style={{ background: event.color }} /><span><b>{event.title}</b>{event.milestone && <small>{milestoneDateLabel(event.milestone)}</small>}</span></button>)}
+      <Button variant="ghost" size="small" onClick={() => onManage(selectedDate)}>标记此日</Button>
+    </div>}
     <CalendarUpcoming upcoming={upcoming} onManage={onManage} />
     <footer className="calendar-overview-footer"><Button variant="secondary" type="button" onClick={() => onManage(today)}>＋ 标记重要日期</Button><Button wrap variant="ghost" size="small" type="button" onClick={() => void openExternal(officialHolidaySource.url)}>节假日来源：{officialHolidaySource.label} ↗</Button></footer>
   </section></div>;
@@ -461,7 +471,11 @@ function CalendarOverviewModal({ today, events, onClose, onManage }: {
 type UpcomingItem = ReturnType<typeof combinedUpcoming>[number];
 
 function CalendarUpcoming({ upcoming, onManage }: { upcoming: UpcomingItem[]; onManage: (date: string, event?: CalendarEvent) => void }) {
-  return <div className="calendar-upcoming"><strong>接下来</strong>{upcoming.length ? upcoming.map((item) => <button type="button" key={`${item.kind}-${item.date}-${item.title}`} className={item.event ? "editable" : ""} onClick={() => item.event ? onManage(item.date, item.event) : undefined}><i className={item.kind} style={item.color ? { background: item.color } : undefined} /><span><b>{item.title}</b><small>{formatShortDate(item.date)} · {remainingLabel(item.daysRemaining)}</small></span></button>) : <p>近期还没有重要日期。</p>}</div>;
+  return <div className="calendar-upcoming"><strong>接下来</strong>{upcoming.length ? upcoming.map((item) => <button type="button" key={item.event?.id ?? `${item.kind}-${item.date}-${item.title}`} className={item.event ? "editable" : ""} onClick={() => item.event ? onManage(item.date, item.event) : undefined}><i className={item.kind} style={item.color ? { background: item.color } : undefined} /><span><b>{item.title}</b><small>{formatShortDate(item.date)} · {item.event?.milestone ? milestoneDateLabel(item.event.milestone) : remainingLabel(item.daysRemaining)}</small></span></button>) : <p>近期还没有重要日期。</p>}</div>;
+}
+
+function milestoneDateLabel(milestone: NonNullable<CalendarEvent["milestone"]>) {
+  return `${milestone.dateKind === "deadline" ? "明确截止" : "预期日期"} · ${milestone.projectTitle}`;
 }
 
 function MorningBriefModal({ brief, cache, error, busy, onRefresh, onClose }: {

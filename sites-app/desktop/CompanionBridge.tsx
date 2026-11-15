@@ -20,7 +20,7 @@ export function CompanionBridge({ projects, tasks, articles, dashboardRepository
   projects: ProjectSummary[]; tasks: WorkspaceTask[]; articles: StoredArticle[]; dashboardRepository: DashboardRepository;
   onAction: (action: CompanionAction) => Promise<void>; onError: (message: string) => void;
   onSaveNote: (note: AsabaNote) => Promise<string>;
-  onPlan: (request: string, projectId: string | null) => Promise<AsabaPlanningResult>;
+  onPlan: (request: string, projectId: string | null, authorizedNoteIds?: string[]) => Promise<AsabaPlanningResult>;
   onArchiveWorker: (request: WorkerArchive) => Promise<void>;
   onStartCareer: (id: string, scope: CareerScope) => Promise<void>;
   onCareerReview: (jobId: string) => Promise<void>;
@@ -79,10 +79,10 @@ export function CompanionBridge({ projects, tasks, articles, dashboardRepository
         await emitTo("companion", "asaba-note-result", { id: payload.id, error: String(error) });
       }
     });
-    const plan = listen<{ id: string; request: string; projectId: string | null }>("asaba-plan", async ({ payload }) => {
+    const plan = listen<{ id: string; request: string; projectId: string | null; authorizedNoteIds?: string[] }>("asaba-plan", async ({ payload }) => {
       if (!active) return;
       try {
-        const result = await latest.current.onPlan(payload.request, payload.projectId);
+        const result = await latest.current.onPlan(payload.request, payload.projectId, payload.authorizedNoteIds);
         await emitTo("companion", "asaba-plan-result", { id: payload.id, result });
       } catch (error) { await emitTo("companion", "asaba-plan-result", { id: payload.id, error: String(error) }); }
     });

@@ -2,7 +2,7 @@ import { needsResearchReview, workerArchiveContent, type WorkerArchive } from ".
 import { careerArchiveText, type CareerReport, type CareerReview, type CareerScope } from "../app/asaba-career";
 import { CareerReviewDialog } from "./AsabaCareer";
 import { writeAsabaPlan } from "../app/save-asaba-plan";
-import { buildAsabaPlanningInput, buildAsabaProgressInput, previewAsabaPlan, type AsabaAdjustmentRequest, type AsabaPlanningResult, type AsabaPlanSave } from "../app/asaba-planning";
+import { analyzeProjectProgress, buildAsabaPlanningInput, buildAsabaProgressInput, previewAsabaPlan, readAuthorizedProjectEvidence, type AsabaAdjustmentRequest, type AsabaPlanningResult, type AsabaPlanSave } from "../app/asaba-planning";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { companionApi } from "./companionApi";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -54,7 +54,7 @@ import {
   resolveDeepSeekModel,
   saveDeepSeekModelSettings,
 } from "../app/ai-model-settings";
-import { rootProjectStatusCounts } from "../app/project-selectors";
+import { projectStatusCounts } from "../app/project-selectors";
 import type { ProjectDetail, ProjectProposal, ProjectSummary, ProjectTask } from "../app/project-types";
 import type { Article, StoredArticle } from "../app/types";
 import {
@@ -70,7 +70,7 @@ import type { DailySituation, SituationPlanChange, TaskPlanHistory, FocusSession
 import { DailySituationDialog } from "./DailySituationDialog";
 import { ProjectWeekDialog, type ProjectWeekTarget } from "./ProjectWeekDialog";
 import type { WeekSettings } from "../app/project-week";
-import { isContinuablePlan } from "../app/action-planning";
+import { actionCenterLanes } from "../app/action-planning";
 import { defaultDashboardPreferences, type CalendarEvent, type DashboardPreferences, type ExternalSourceInput, type RestDay } from "../app/dashboard-types";
 import { emptyHealthDailyLog, emptyHealthProfile, type HealthDailyLog, type HealthMeal, type HealthProfile } from "../app/health-types";
 import { normalizeExternalSourceInput } from "../app/dashboard-normalization";
@@ -177,7 +177,7 @@ const sections: Array<{
   group: "action" | "knowledge" | "tools";
 }> = [
   { id: "home", label: "首页", icon: "home", group: "action" },
-  { id: "tasks", label: "今日行动", icon: "today", group: "action" },
+  { id: "tasks", label: "行动", icon: "today", group: "action" },
   { id: "health", label: "健康", icon: "health", group: "action" },
   { id: "wealth", label: "财富", icon: "wealth", group: "action" },
   { id: "projects", label: "项目", icon: "projects", group: "action" },
@@ -615,6 +615,8 @@ export function DesktopWorkbench({
         ...task,
         projectTitle: detail.project.title,
         projectStatus: detail.project.status,
+        projectDraft: detail.project.isDraft,
+        milestoneStatus: milestone?.status,
         stageTitle: milestone?.title ?? "",
         stageDueDate: milestone?.dueDate ?? "",
         stageDueDateKind: milestone?.dueDateKind,
@@ -652,12 +654,7 @@ export function DesktopWorkbench({
     return [...projectTasks, ...independentTasks];
   }, [plans, projectDetails, standaloneTasks, today, projectWeekManaged]);
 
-  useEffect(() => {
-    if (loading) return;
-    void workRepository.autoScheduleDueTasks(today).then((count) => {
-      if (count > 0) return refreshWork();
-    }).catch((error) => showMessage(error instanceof Error ? error.message : "无法自动安排今日行动"));
-  }, [loading, today, workspaceTasks, workRepository, refreshWork, showMessage]);
+  const actionLanes = useMemo(() => actionCenterLanes(workspaceTasks, today, activeSession?.taskId ?? undefined), [workspaceTasks, today, activeSession?.taskId]);
 
   const inboxCount = useMemo(() => articles.filter(isThoughtInboxArticle).length, [articles]);
   const noteArticles = useMemo(() => {
@@ -681,10 +678,10 @@ export function DesktopWorkbench({
     }, {});
   }, [articles]);
 
-  const projectCounts = rootProjectStatusCounts(projects);
+  const projectCounts = projectStatusCounts(projects);
   const counts: Record<DeskSection, number | null> = {
     home: null,
-    tasks: workspaceTasks.filter((task) => !["done", "cancelled", "waiting"].includes(task.status) && (task.plan?.plannedDate === today || isContinuablePlan(task.plan, today))).length,
+    tasks: actionLanes.schedule.length,
     health: null,
     wealth: null,
     projects: projectCounts.active,
@@ -960,8 +957,9 @@ export function DesktopWorkbench({
 
   const planningSaves = useRef(new Map<string, Promise<{ projectId?: string }>>());
 
-  async function planWithAsaba(rawRequest: string, projectId: string | null): Promise<AsabaPlanningResult> {
+  async function planWithAsaba(rawRequest: string, projectId: string | null, authorizedNoteIds: string[] = []): Promise<AsabaPlanningResult> {
     const request = rawRequest.trim();
+    const authorizedProjectId = projectId;
     if (!request || request.length > 4000) throw new Error("请填写想实现的目标，最多 4000 字。");
     await projectRepository.list();
     const details = await projectRepository.listIndexDetails();
@@ -977,10 +975,25 @@ export function DesktopWorkbench({
     const detail = await projectRepository.get(projectId);
     if (!detail || detail.project.isDraft) throw new Error("当前项目已不可用，请清除关联后重试。");
     const input = buildAsabaProgressInput(request, detail);
-    const { content: answer } = await desktopApi.deepseek.asabaProgress({ model, input });
-    const canAdjust = detail.project.status !== "completed";
-    const actionDraft = canAdjust && answer.nextAction.trim() ? previewAsabaPlan({ kind: "existing_project", projectId, title: "", outcome: "", reason: answer.summary, questions: answer.unknowns, action: answer.nextAction }, [detail]) : null;
-    return { kind: "progress", projectId, projectTitle: detail.project.title, answer, evidence: input.evidence, actionDraft, canAdjust };
+    const selectedProjectId = projectId;
+    const approvedNoteIds = authorizedProjectId === selectedProjectId && Array.isArray(authorizedNoteIds) ? authorizedNoteIds : [];
+    const { answer, evidence, investigation } = await analyzeProjectProgress(input,
+      async (context) => (await desktopApi.deepseek.asabaProgress({ model, input: context })).content,
+      approvedNoteIds.length ? async () => {
+        const linkedIds = new Set((await loadProjectArticles(selectedProjectId)).map((note) => note.id));
+        return readAuthorizedProjectEvidence(selectedProjectId, approvedNoteIds.filter((id) => linkedIds.has(id)), (id) => repository.get(id));
+      } : undefined,
+    );
+    const suggestedTitle = answer.nextAction.trim();
+    const requestedExisting = evidence.find((source) => source.kind === "action" && source.id === answer.taskEvidenceId);
+    const existing = detail.project.status === "active" ? detail.tasks.find((task) => requestedExisting ? "task:" + task.id === requestedExisting.id :
+      (answer.decision === "new_action" || !answer.decision) && Boolean(suggestedTitle) &&
+      (task.status === "next" || task.status === "later") && (task.title === suggestedTitle || task.currentFocus === suggestedTitle)) : undefined;
+    const existingAction = existing && { id: existing.id, title: existing.title };
+    const canAdjust = detail.project.status === "active" && (answer.decision === "adjust" || !answer.decision);
+    const actionDraft = detail.project.status === "active" && !existingAction && (answer.decision === "new_action" || !answer.decision) && suggestedTitle ?
+      previewAsabaPlan({ kind: "existing_project", projectId, title: "", outcome: "", reason: answer.summary, questions: answer.unknowns, action: suggestedTitle }, [detail]) : null;
+    return { kind: "progress", projectId, projectTitle: detail.project.title, answer, evidence, actionDraft, canAdjust, existingAction, investigation };
   }
 
   function saveAsabaPlan(command: AsabaPlanSave) {
@@ -1075,8 +1088,9 @@ export function DesktopWorkbench({
   }
 
   async function openAsabaProjectPlanning(projectId: string) {
+    const notes = (await loadProjectArticles(projectId).catch(() => [])).map(({ id, title }) => ({ id, title }));
     await companionApi.window(true);
-    await emitTo("companion", "asaba-plan-project", { projectId });
+    await emitTo("companion", "asaba-plan-project", { projectId, notes });
   }
 
   async function saveAsabaNote(note: AsabaNote) {
@@ -1164,44 +1178,39 @@ export function DesktopWorkbench({
   }
 
   async function planToday(task: WorkspaceTask) {
-    if (task.autoSchedulePaused) await workRepository.resumeAutoSchedule(task.id);
-    await workRepository.savePlan({
-      taskId: task.id,
-      plannedDate: today,
-      source: "manual",
-      skipAutoDate: "",
-      priority: task.plan?.priority || "normal",
-      estimateMinutes: task.plan?.estimateMinutes || 0,
-      sortOrder: task.plan?.sortOrder || workspaceTasks.filter((item) => item.plan?.plannedDate === today).length,
-      updatedAt: "",
-    });
-    await Promise.all([refreshProjects(), refreshWork()]);
-    offerUndo("已安排到今天", async () => {
-      await workRepository.removePlan(task.id);
-      if (task.autoSchedulePaused) await workRepository.pauseAutoSchedule(task.id, today);
+    try {
+      await workRepository.savePlan({
+        taskId: task.id,
+        plannedDate: today,
+        source: "manual",
+        skipAutoDate: "",
+        priority: task.plan?.priority || "normal",
+        estimateMinutes: task.plan?.estimateMinutes || 0,
+        sortOrder: task.plan?.sortOrder ?? actionLanes.schedule.length,
+        updatedAt: "",
+      });
       await Promise.all([refreshProjects(), refreshWork()]);
-    });
+      offerUndo("已安排到今天", async () => {
+        if (task.plan) await workRepository.savePlan(task.plan);
+        else await workRepository.removePlan(task.id);
+        await Promise.all([refreshProjects(), refreshWork()]);
+      });
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "无法安排到今天");
+    }
   }
 
   async function removeFromToday(task: WorkspaceTask) {
     const previous = task.plan;
     if (!previous) return;
     const moveToPending = previous.plannedDate === today;
-    const pauseAutomatic = moveToPending && Boolean(task.dueDate && task.estimatedDays);
-    if (pauseAutomatic) await workRepository.pauseAutoSchedule(task.id, today);
-    else if (moveToPending) await workRepository.savePlan({ ...previous, plannedDate: "" });
+    if (moveToPending) await workRepository.savePlan({ ...previous, source: "manual", plannedDate: "" });
     else await workRepository.removePlan(task.id);
     await Promise.all([refreshProjects(), refreshWork()]);
     offerUndo(moveToPending ? "已移入待继续，有空再做" : "已暂时收起，可从已有行动找回", async () => {
-      if (pauseAutomatic) await workRepository.resumeAutoSchedule(task.id);
       await workRepository.savePlan(previous);
       await Promise.all([refreshProjects(), refreshWork()]);
     });
-  }
-
-  async function resumeAutoSchedule(task: WorkspaceTask) {
-    await workRepository.resumeAutoSchedule(task.id);
-    await refreshProjects();
   }
 
   async function startFocus(task: Pick<ProjectTask, "id" | "projectId" | "title">) {
@@ -1275,7 +1284,7 @@ export function DesktopWorkbench({
     }
   }
 
-  async function completeTask(task: WorkspaceTask) {
+  async function completeTask(task: ProjectTask) {
     try {
       const stopped = activeSession?.taskId === task.id ? await workRepository.stopSession(activeSession.id) : null;
       await projectRepository.completeTask(task.id, `完成行动：${task.title}`);
@@ -1284,8 +1293,10 @@ export function DesktopWorkbench({
         await projectRepository.updateTaskStatus(task.id, task.status);
         await refreshProjects();
       });
+      return true;
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "无法完成行动");
+      return false;
     }
   }
 
@@ -1626,7 +1637,6 @@ export function DesktopWorkbench({
     onCloseToday: closeToday,
     onPlanToday: planToday,
     onRemoveFromToday: removeFromToday,
-    onResumeAutoSchedule: resumeAutoSchedule,
     onStartFocus: startFocus,
     onQuickStart: quickStart,
     onStopFocus: stopFocus,
@@ -1735,6 +1745,8 @@ export function DesktopWorkbench({
           onAskAsaba={(id) => void openAsabaProjectPlanning(id).catch(error => showMessage(String(error)))}
           onBackToHall={() => setRequestedProjectId(null)}
           onRemoveTask={removeTask}
+          onOpenTask={openTask}
+          onCompleteTask={completeTask}
           onEditingStateChange={setProjectEditing}
         />
       ) : section === "notes" ? (
@@ -1769,7 +1781,7 @@ export function DesktopWorkbench({
       ) : (
         <section className="workspace-main-stage">
           {section === "home" && <HomeDashboard planningHistoryRepository={aiRepository} projectDetails={projectDetails} dailySituations={dailySituations} onSupplementDay={setSituationDate} today={today} tasks={workspaceTasks} articles={articles} articleRepository={repository} weeklyFocus={weeklyFocus} integrationRepository={integrationRepository} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} calendarEvents={calendarEvents} restDays={restDays} healthProfile={healthProfile} healthToday={healthToday} healthMeals={healthMealsToday} onOpenHealth={() => switchSection("health")} onOpenTools={() => switchSection("tools")} onSaveWeeklyFocus={saveWeeklyFocus} onSaveDashboardPreferences={saveDashboardPreferences} onSaveCalendarEvent={saveCalendarEvent} onDeleteCalendarEvent={deleteCalendarEvent} onSetRestDay={setRestDay} onSaveSource={saveExternalSource} onNotice={showMessage} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTask={openTask} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
-          {section === "tasks" && <TasksPage onOpenFocusHistory={() => setFocusHistoryOpen(true)} onSupplementDay={setSituationDate} dailySituations={dailySituations} today={today} tasks={workspaceTasks} projects={projects} projectDetails={projectDetails} initialTaskId={requestedTaskId} onTaskOpened={() => setRequestedTaskId(null)} onAddTask={addTask} onRemoveTask={removeTask} onOpenProject={openProject} {...taskActions} />}
+          {section === "tasks" && <TasksPage onOpenFocusHistory={() => setFocusHistoryOpen(true)} onSupplementDay={setSituationDate} dailySituations={dailySituations} today={today} tasks={workspaceTasks} lanes={actionLanes} projects={projects} projectDetails={projectDetails} loadProject={(id) => projectRepository.get(id)} initialTaskId={requestedTaskId} onTaskOpened={() => setRequestedTaskId(null)} onAddTask={addTask} onRemoveTask={removeTask} onOpenProject={openProject} onArchiveWorker={archiveAsabaWorker} {...taskActions} />}
           {section === "observer" && <WorkObserverPage tasks={workspaceTasks} activeSession={activeSession} onOpenTask={openTask} />}
           {section === "health" && <HealthPage repository={healthRepository} today={today} onChanged={() => void refreshHealth()} onNotice={showMessage} onOpenAiSettings={() => switchSection("settings")} />}
           {section === "wealth" && <WealthPage repository={financeRepository} projects={projects} today={today} onNotice={showMessage} quickCaptureRequested={expenseCaptureRequested} onQuickCaptureOpened={() => setExpenseCaptureRequested(false)} />}

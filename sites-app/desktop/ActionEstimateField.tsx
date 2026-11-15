@@ -8,7 +8,7 @@ import type { ProjectTaskStep } from "../app/project-types";
 import { Button } from "./DesktopControls";
 import { desktopApi } from "./integrationApi";
 
-export function ActionEstimateField({ dueDate, dateKind, estimatedDays, title, currentFocus, definitionOfDone, steps, details, projectTitle = "", stageTitle = "", paused = false, onChange, onPauseChange }: {
+export function ActionEstimateField({ dueDate, dateKind, estimatedDays, title, currentFocus, definitionOfDone, steps, details, projectTitle = "", stageTitle = "", onChange }: {
   dueDate: string;
   dateKind?: ProjectDateKind | null;
   estimatedDays: number;
@@ -19,9 +19,7 @@ export function ActionEstimateField({ dueDate, dateKind, estimatedDays, title, c
   details: string;
   projectTitle?: string;
   stageTitle?: string;
-  paused?: boolean;
   onChange: (days: number) => void;
-  onPauseChange?: (paused: boolean) => void;
 }) {
   const [suggestion, setSuggestion] = useState<ActionDaysEstimate | null>(null);
   const [busy, setBusy] = useState(false);
@@ -64,9 +62,7 @@ export function ActionEstimateField({ dueDate, dateKind, estimatedDays, title, c
     <Button variant="secondary" size="small" type="button" disabled={busy || !title.trim()} onClick={() => void suggest()}>{busy ? "正在估计…" : "AI 估计"}</Button>
     {suggestion && <div className="action-estimate-suggestion"><p>{suggestion.days === null ? "暂时无法估计" : `AI 建议：${suggestion.days} 天`} · {suggestion.reason}</p>{suggestion.days !== null && <Button variant="secondary" size="small" type="button" onClick={() => { onChange(suggestion.days!); setSuggestion(null); }}>采用建议</Button>}</div>}
     {error && <p className="action-estimate-error" role="alert">{error}</p>}
-    {startDate && <p className="action-estimate-note">状态为“下一步”时，预计从 {startDate} 起自动安排到今日；完成前每天继续显示。</p>}
-    {estimatedDays > 0 && !dueDate && <p className="action-estimate-note">确认行动日期后开始按工期安排。</p>}
+    {startDate && <p className="action-estimate-note">建议在 {startDate} 开始。</p>}
     {remaining !== null && estimatedDays > remaining && estimatedDays > 0 && <p className="action-estimate-warning">{dateKind === "deadline" ? (remaining < 0 ? `已逾期 ${-remaining} 天` : `距截止还剩 ${remaining} 天`) : (remaining < 0 ? `已过目标日 ${-remaining} 天` : `距目标日还剩 ${remaining} 天`)}，预计需要 {estimatedDays} 天；请调整范围或日期。</p>}
-    {onPauseChange && paused && <div className="action-estimate-resume"><span>自动安排已暂停</span><Button variant="secondary" size="small" type="button" onClick={() => onPauseChange(false)}>恢复自动安排</Button></div>}
   </div>;
 }

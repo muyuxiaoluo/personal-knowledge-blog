@@ -3,6 +3,19 @@ import type { Milestone, ProjectDetail, ProjectLog } from "./project-types";
 
 const MAX_INPUT_BYTES = 64 * 1024;
 
+export function projectDecisionRecords(detail: ProjectDetail) {
+  return detail.proposals
+    .filter((item) => item.status === "accepted" || item.status === "deferred" || item.status === "rejected")
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .slice(0, 8)
+    .map((item) => ({ id: item.id, title: item.title.slice(0, 140), status: item.status, reason: item.reviewNote.slice(0, 400), decidedAt: item.updatedAt }));
+}
+
+export function projectMaterialKind(item: ProjectDetail["accumulations"][number]) {
+  if (item.isOutcome) return "confirmed_outcome";
+  return item.id.startsWith("asaba-worker-") ? "worker_report" : "reference";
+}
+
 export function buildBranchAiContext(
   detail: ProjectDetail,
   milestone: Milestone | null,
@@ -68,6 +81,7 @@ function baseProjectContext(detail: ProjectDetail, fields: Record<string, unknow
       reviewDate: detail.project.reviewDate,
       category: detail.project.category,
     },
+    recordedDecisions: projectDecisionRecords(detail),
     ...fields,
   } as Record<string, unknown> & { recentRecords?: unknown[] };
 }
@@ -105,9 +119,11 @@ function compactTask(item: ProjectDetail["tasks"][number]) {
     definitionOfDone: item.definitionOfDone,
     details: item.details,
     status: item.status,
+    ...(item.status === "waiting" ? { waitingFor: item.waitingFor, resumeAction: item.resumeAction } : {}),
     dueDate: item.dueDate,
     dueDateKind: item.dueDateKind ?? null,
     completedAt: item.completedAt,
+    updatedAt: item.updatedAt,
   };
 }
 
@@ -118,6 +134,7 @@ function compactAccumulation(item: ProjectDetail["accumulations"][number]) {
     title: item.title,
     content: item.content,
     reference: item.reference,
+    materialKind: projectMaterialKind(item),
     updatedAt: item.updatedAt,
   };
 }

@@ -31,6 +31,7 @@ import {
 } from "./project-repository";
 import { executeSqliteTransaction, type SqliteDatabase, type SqliteStatement } from "./sqlite-article-repository";
 import { projectWeekKey, readWeekSettings, type WeekAction } from "../project-week";
+import { normalizeProjectTags } from "../project-selectors";
 
 const careerSnapshotSql = `SELECT json_array(p.updated_at, p.status, p.planning_mode,
   json((SELECT json_group_array(json_array(id, updated_at, status, sort_order))
@@ -71,6 +72,7 @@ type ProjectRow = {
   supports_milestone_id: string | null;
   status: ProjectStatus | "waiting";
   category: ProjectCategory;
+  tags_json: string;
   sort_order: number;
   is_draft: number;
   source_note: string;
@@ -186,6 +188,7 @@ const migrations = [
     supports_milestone_id TEXT REFERENCES project_milestones(id) ON DELETE SET NULL,
     status TEXT NOT NULL,
     category TEXT NOT NULL,
+    tags_json TEXT NOT NULL DEFAULT '[]',
     sort_order INTEGER NOT NULL DEFAULT 0,
     is_draft INTEGER NOT NULL DEFAULT 1,
     source_note TEXT NOT NULL DEFAULT '',
@@ -371,6 +374,7 @@ export class SqliteProjectRepository implements ProjectRepository {
     await this.ensureColumn("projects", "project_type", "TEXT NOT NULL DEFAULT 'main'");
     await this.ensureColumn("projects", "parent_project_id", "TEXT");
     await this.ensureColumn("projects", "supports_milestone_id", "TEXT");
+    await this.ensureColumn("projects", "tags_json", "TEXT NOT NULL DEFAULT '[]'");
     await this.ensureColumn("project_milestones", "due_date", "TEXT NOT NULL DEFAULT ''");
     await this.ensureColumn("project_milestones", "predecessor_ids", "TEXT");
     await this.ensureColumn("project_tasks", "action_type", "TEXT NOT NULL DEFAULT 'organize'");
@@ -417,10 +421,6 @@ export class SqliteProjectRepository implements ProjectRepository {
        END`,
     );
     await this.database.execute("CREATE INDEX IF NOT EXISTS idx_projects_parent_status ON projects(parent_project_id, status, sort_order)");
-    await this.database.execute(
-      "UPDATE projects SET project_type = 'main', parent_project_id = NULL, supports_milestone_id = NULL, updated_at = ? WHERE parent_project_id IS NOT NULL OR project_type != 'main'",
-      [this.now()],
-    );
     await this.database.execute("PRAGMA optimize");
 
     const seeded = await this.database.select<{ value: string }>(
@@ -695,7 +695,7 @@ export class SqliteProjectRepository implements ProjectRepository {
     return rows.map(rowToLog);
   }
 
-  async saveProject(project: Project): Promise<Project> {
+  async saveProject(project: Project, recordGoalChange = false): Promise<Project> {
     this.indexCache.clear();
     if (!project.title.trim() || !project.outcome.trim()) {
       throw new ProjectRepositoryError("项目名称和期望结果不能为空", "invalid_data");
@@ -716,7 +716,19 @@ export class SqliteProjectRepository implements ProjectRepository {
         createdAt: project.createdAt || now,
         updatedAt: now,
       };
-      await this.writeProject(saved, false);
+      if (recordGoalChange && project.id) {
+        await executeSqliteTransaction(this.database, [
+          {
+            sql: `INSERT INTO project_logs(id, project_id, task_id, kind, body, created_at)
+                  SELECT ?, id, NULL, 'goal_revision', json_object('before', outcome, 'after', ?), ?
+                  FROM projects WHERE id = ? AND outcome != ?`,
+            bindValues: [crypto.randomUUID(), saved.outcome, now, saved.id, saved.outcome],
+          },
+          projectWriteStatement(saved),
+        ]);
+      } else {
+        await this.writeProject(saved, false);
+      }
       return saved;
     } catch (error) {
       if (error instanceof ProjectRepositoryError) throw error;
@@ -852,7 +864,7 @@ export class SqliteProjectRepository implements ProjectRepository {
       }
       const savedMilestoneIds = new Set(savedMilestones.map((milestone) => milestone.id));
       const removedMilestones = existingMilestones.filter((milestone) => !savedMilestoneIds.has(milestone.id));
-      const statements: SqliteStatement[] = [projectWriteStatement(savedProject), ...savedBranches.map(projectWriteStatement)];
+      const statements: SqliteStatement[] = [projectWriteStatement(savedProject), ...savedBranches.map((branch) => projectWriteStatement(branch))];
       for (const milestone of removedMilestones) {
         statements.push({ sql: "DELETE FROM project_milestones WHERE id = ?", bindValues: [milestone.id] });
       }
@@ -903,7 +915,7 @@ export class SqliteProjectRepository implements ProjectRepository {
     }
   }
 
-  async saveMilestone(milestone: Milestone): Promise<Milestone> {
+  async saveMilestone(milestone: Milestone, useDependencies = false): Promise<Milestone> {
     this.indexCache.clear();
     if (!milestone.title.trim()) {
       throw new ProjectRepositoryError("里程碑名称不能为空", "invalid_data");
@@ -915,9 +927,11 @@ export class SqliteProjectRepository implements ProjectRepository {
         ? (await this.database.select<MilestoneRow>("SELECT * FROM project_milestones WHERE id = ? AND project_id = ? LIMIT 1", [milestone.id, milestone.projectId]))[0]
         : null;
       const project = (await this.database.select<ProjectRow>("SELECT * FROM projects WHERE id = ? LIMIT 1", [milestone.projectId]))[0];
+      if (!project) throw new ProjectRepositoryError("没有找到里程碑所属的项目", "invalid_data");
+      const planningMode = useDependencies ? "adaptive" : project.planning_mode === "direct" && !existing ? "staged" : project.planning_mode;
       const saved = {
         ...milestone,
-        id: milestone.id || `${milestone.projectId}-milestone-${Date.now()}`,
+        id: milestone.id || `${milestone.projectId}-milestone-${crypto.randomUUID()}`,
         title: milestone.title.trim(),
         definitionOfDone: milestone.definitionOfDone.trim(),
         createdAt: milestone.createdAt || now,
@@ -932,6 +946,9 @@ export class SqliteProjectRepository implements ProjectRepository {
         throw new ProjectRepositoryError("请先完成所有前置节点，或调整连接关系以并行开展。", "invalid_data");
       }
       const statements: SqliteStatement[] = [];
+      if (planningMode !== project.planning_mode) {
+        statements.push({ sql: "UPDATE projects SET planning_mode = ? WHERE id = ?", bindValues: [planningMode, saved.projectId] });
+      }
       if (saved.status === "current") {
         statements.push({
           sql: "UPDATE project_milestones SET status = 'planned', updated_at = ? WHERE project_id = ? AND (SELECT planning_mode FROM projects WHERE id = project_id) != 'adaptive' AND status = 'current' AND id != ?",
@@ -1028,35 +1045,36 @@ export class SqliteProjectRepository implements ProjectRepository {
         "SELECT name FROM sqlite_schema WHERE type = 'table'",
       );
       const tableNames = new Set(tables.map((table) => table.name));
-      const relatedProjectIds = "SELECT id FROM projects WHERE id = ? OR parent_project_id = ?";
-      const statements: SqliteStatement[] = [];
+      const statements: SqliteStatement[] = [{
+        sql: "UPDATE projects SET parent_project_id = NULL, supports_milestone_id = NULL, project_type = 'main', updated_at = ? WHERE parent_project_id = ?",
+        bindValues: [this.now(), id],
+      }];
       if (tableNames.has("articles")) {
         statements.push({
-          sql: `UPDATE articles SET project_id = '' WHERE project_id IN (${relatedProjectIds})`,
-          bindValues: [id, id],
+          sql: "UPDATE articles SET project_id = '' WHERE project_id = ?",
+          bindValues: [id],
         });
       }
       if (tableNames.has("focus_sessions")) {
         statements.push({
-          sql: `UPDATE focus_sessions SET project_id = NULL WHERE project_id IN (${relatedProjectIds})`,
-          bindValues: [id, id],
+          sql: "UPDATE focus_sessions SET project_id = NULL WHERE project_id = ?",
+          bindValues: [id],
         });
       }
       if (tableNames.has("task_plans")) {
         statements.push({
           sql: `DELETE FROM task_plans WHERE task_id IN (
-            SELECT id FROM project_tasks WHERE project_id IN (${relatedProjectIds})
+            SELECT id FROM project_tasks WHERE project_id = ?
           )`,
-          bindValues: [id, id],
+          bindValues: [id],
         });
       }
       for (const table of ["project_accumulations", "project_proposals", "project_logs", "project_tasks", "project_milestones"]) {
         statements.push({
-          sql: `DELETE FROM ${table} WHERE project_id IN (${relatedProjectIds})`,
-          bindValues: [id, id],
+          sql: `DELETE FROM ${table} WHERE project_id = ?`,
+          bindValues: [id],
         });
       }
-      statements.push({ sql: "DELETE FROM projects WHERE parent_project_id = ?", bindValues: [id] });
       statements.push({ sql: "DELETE FROM projects WHERE id = ?", bindValues: [id] });
       await executeSqliteTransaction(this.database, statements);
     } catch (error) {
@@ -1811,7 +1829,7 @@ export class SqliteProjectRepository implements ProjectRepository {
 
   private async listLogs(projectId: string) {
     const rows = await this.database.select<ProjectLogRow>(
-      "SELECT * FROM project_logs WHERE project_id = ? ORDER BY created_at DESC LIMIT 40",
+      "SELECT * FROM project_logs WHERE project_id = ? ORDER BY created_at DESC, id DESC",
       [projectId],
     );
     return rows.map(rowToLog);
@@ -1926,6 +1944,9 @@ export class SqliteProjectRepository implements ProjectRepository {
     if (parents[0].parent_project_id) {
       throw new ProjectRepositoryError("支线只允许一层，不能继续创建下级支线", "invalid_data");
     }
+    if (project.id && (await this.database.select("SELECT id FROM projects WHERE parent_project_id = ? LIMIT 1", [project.id])).length) {
+      throw new ProjectRepositoryError("已有子项目的项目不能再设置上级", "invalid_data");
+    }
     const supportsMilestoneId = project.supportsMilestoneId?.trim() || null;
     if (supportsMilestoneId) {
       const milestones = await this.database.select<{ id: string }>(
@@ -1945,49 +1966,8 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   private async writeProject(project: Project, seed: boolean) {
-    await this.database.execute(
-      `INSERT INTO projects(
-        id, title, outcome, motivation, project_type, planning_mode, parent_project_id, supports_milestone_id,
-        status, category, sort_order, is_draft, source_note, target_date, target_date_kind, review_date, completed_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO ${seed ? "NOTHING" : `UPDATE SET
-        title = excluded.title,
-        outcome = excluded.outcome,
-        motivation = excluded.motivation,
-        project_type = excluded.project_type,
-        planning_mode = excluded.planning_mode,
-        parent_project_id = excluded.parent_project_id,
-        supports_milestone_id = excluded.supports_milestone_id,
-        status = excluded.status,
-        category = excluded.category,
-        sort_order = excluded.sort_order,
-        is_draft = excluded.is_draft,
-        source_note = excluded.source_note,
-        target_date = excluded.target_date, target_date_kind = excluded.target_date_kind,
-        review_date = excluded.review_date,
-        completed_at = excluded.completed_at,
-        updated_at = excluded.updated_at`}`,
-      [
-        project.id,
-        project.title,
-        project.outcome,
-        project.motivation,
-        project.projectType,
-        project.planningMode,
-        project.parentProjectId,
-        project.supportsMilestoneId,
-        project.status,
-        project.category,
-        project.sortOrder,
-        project.isDraft ? 1 : 0,
-        project.sourceNote,
-        project.targetDate, projectDateKind(project.targetDate, project.targetDateKind),
-        project.reviewDate,
-        project.completedAt,
-        project.createdAt,
-        project.updatedAt,
-      ],
-    );
+    const statement = projectWriteStatement(project, seed);
+    await this.database.execute(statement.sql, statement.bindValues);
   }
 
   private async writeMilestone(milestone: Milestone, seed: boolean) {
@@ -2112,7 +2092,7 @@ export class SqliteProjectRepository implements ProjectRepository {
         accumulation.id,
         accumulation.projectId,
         accumulation.milestoneId,
-        "other",
+        accumulation.isOutcome ? "confirmed_outcome" : "other",
         accumulation.title,
         accumulation.content,
         "",
@@ -2121,6 +2101,14 @@ export class SqliteProjectRepository implements ProjectRepository {
         accumulation.updatedAt,
       ],
     );
+  }
+}
+
+function readProjectTags(value: string): string[] {
+  try {
+    return normalizeProjectTags(JSON.parse(value));
+  } catch {
+    return [];
   }
 }
 
@@ -2136,6 +2124,7 @@ function rowToProject(row: ProjectRow): Project {
     supportsMilestoneId: row.supports_milestone_id || null,
     status: row.status === "waiting" ? "paused" : row.status,
     category: normalizeLifeDomain(row.category),
+    tags: readProjectTags(row.tags_json),
     sortOrder: Number(row.sort_order),
     isDraft: Boolean(row.is_draft),
     sourceNote: row.source_note,
@@ -2226,29 +2215,30 @@ function rowToAccumulation(row: ProjectAccumulationRow): ProjectAccumulation {
     title: row.title,
     content: [row.completed_work, row.takeaway].filter((part) => part.trim()).join("\n\n"),
     reference: row.reference,
+    isOutcome: row.kind === "confirmed_outcome",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-function projectWriteStatement(project: Project): SqliteStatement {
+function projectWriteStatement(project: Project, seed = false): SqliteStatement {
   return {
     sql: `INSERT INTO projects(
       id, title, outcome, motivation, project_type, planning_mode, parent_project_id, supports_milestone_id,
-      status, category, sort_order, is_draft, source_note, target_date, target_date_kind, review_date, completed_at, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
+      status, category, sort_order, is_draft, source_note, target_date, target_date_kind, review_date, completed_at, created_at, updated_at, tags_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, '[]'))
+    ON CONFLICT(id) DO ${seed ? "NOTHING" : `UPDATE SET
       title = excluded.title, outcome = excluded.outcome, motivation = excluded.motivation,
       project_type = excluded.project_type, planning_mode = excluded.planning_mode, parent_project_id = excluded.parent_project_id,
       supports_milestone_id = excluded.supports_milestone_id,
       status = excluded.status, category = excluded.category, sort_order = excluded.sort_order,
       is_draft = excluded.is_draft, source_note = excluded.source_note,
       target_date = excluded.target_date, target_date_kind = excluded.target_date_kind, review_date = excluded.review_date, completed_at = excluded.completed_at,
-      updated_at = excluded.updated_at`,
+      updated_at = excluded.updated_at, tags_json = COALESCE(?20, projects.tags_json)`}`,
     bindValues: [project.id, project.title, project.outcome, project.motivation, project.projectType, project.planningMode,
       project.parentProjectId, project.supportsMilestoneId, project.status, project.category,
       project.sortOrder, project.isDraft ? 1 : 0, project.sourceNote, project.targetDate, projectDateKind(project.targetDate, project.targetDateKind), project.reviewDate, project.completedAt,
-      project.createdAt, project.updatedAt],
+      project.createdAt, project.updatedAt, project.tags === undefined ? null : JSON.stringify(normalizeProjectTags(project.tags))],
   };
 }
 

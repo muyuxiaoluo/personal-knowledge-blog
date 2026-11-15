@@ -137,6 +137,7 @@ export type MorningBriefSnapshot = {
 export type CalendarRecurrence = "once" | "yearlyGregorian" | "yearlyLunar";
 
 export type CalendarEvent = {
+  milestone?: { projectId: string; projectTitle: string; dateKind: "target" | "deadline" };
   id: string;
   title: string;
   date: string;

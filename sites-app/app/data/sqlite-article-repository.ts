@@ -430,7 +430,7 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
     await this.mutationQueue;
     const summaries = articleColumns.replace("body,", "'' AS body,");
     const rows = await this.database.select<ArticleRow>(
-      `SELECT ${summaries} FROM articles WHERE project_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC, id LIMIT 12`,
+      `SELECT ${summaries} FROM articles WHERE project_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC, id`,
       [projectId],
     );
     return rows.map(rowToArticle);

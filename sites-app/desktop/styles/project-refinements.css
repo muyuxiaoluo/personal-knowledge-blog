@@ -2715,3 +2715,76 @@
 .project-recent article, .project-recent .asaba-details { padding: 8px 0; border-top: 1px solid var(--ui-border); }
 .project-recent small { color: var(--ui-muted); }
 .project-recent pre { white-space: pre-wrap; max-height: 320px; overflow: auto; }
+
+.project-gallery .project-gallery-card {
+  grid-template-rows: auto minmax(60px, 1fr) auto auto;
+  gap: 12px;
+  min-height: 0;
+}
+
+.project-gallery .project-gallery-card > section { min-height: 0; }
+.project-gallery .project-gallery-card .project-tag-list { display: flex; }
+.project-tag-list { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.project-tag-list > span { color: var(--ui-muted); font-size: 12px; overflow-wrap: anywhere; }
+.project-tag-filter { position: relative; }
+.project-tag-filter > summary { cursor: pointer; white-space: nowrap; padding: 8px; }
+.project-tag-options {
+  display: grid;
+  gap: 8px;
+  position: absolute;
+  inset: 100% auto auto 0;
+  z-index: 3;
+  min-width: 150px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 10px;
+  background: var(--ui-surface);
+  box-shadow: 0 8px 24px #2020301f;
+}
+.project-tag-options label, .project-editor-paper .project-inline-check, .project-accumulation-form .project-inline-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.project-inline-check input[type="checkbox"] { width: auto; }
+.project-tag-editor { display: grid; gap: 8px; justify-items: start; }
+.project-editor-paper .project-tag-editor { padding-block: 12px; }
+
+.project-page-scroll .project-hero-compact { min-height: 0; padding: 14px 0 8px; margin-bottom: 12px; }
+.project-hero-compact h1 { margin: 0 0 6px; font-size: clamp(25px, 3vw, 38px); }
+.project-hero-compact > p { margin: 0; white-space: pre-line; }
+.project-hero-compact .project-hero-meta { margin-top: 6px; }
+.project-hero-compact .project-hero-meta:has(.project-tag-list:empty):not(:has(time)) { display: none; }
+.project-overview-route, .project-status-summary, .project-children { margin-block: 14px; padding: 14px 16px; }
+.project-status-summary > header, .project-overview-route > header, .project-route-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.project-overview-route h2, .project-status-summary h2, .project-children h2 { margin: 0; font-size: 16px; }
+.project-overview-route ol {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 142px), 1fr));
+  gap: 8px;
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+.project-overview-route li { min-width: 0; border-block-start: 3px solid var(--ui-border); }
+.project-overview-route li.completed { border-color: #539686; }
+.project-overview-route li.current { border-color: var(--ui-accent, #657fc3); }
+.project-overview-route summary { cursor: pointer; padding: 8px 4px; overflow-wrap: anywhere; }
+.project-overview-route summary small { color: var(--ui-muted); margin-inline: 3px 5px; }
+.project-node-preview { padding: 0 6px 8px; overflow-wrap: anywhere; }
+.project-node-preview p { margin: 5px 0; }
+.project-status-summary dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 10px 18px; margin: 10px 0 0; }
+.project-status-summary dl > div { min-width: 0; }
+.project-status-summary dt { margin-bottom: 4px; color: var(--ui-muted); font-size: 12px; }
+.project-status-summary dd { margin: 0; overflow-wrap: anywhere; }
+.project-status-summary dd small { display: block; color: var(--ui-muted); }
+.project-status-summary dd p { margin: 4px 0; white-space: pre-line; }
+.project-status-summary dd .ui-button { white-space: normal; text-align: start; }

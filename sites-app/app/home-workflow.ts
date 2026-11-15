@@ -1,9 +1,9 @@
 import { actionDeadline } from "./project-dates";
-import { isContinuablePlan } from "./action-planning";
+import { isConfirmedTodayPlan, isContinuablePlan } from "./action-planning";
 import { isSourceArticle, isThoughtInboxArticle } from "./article-helpers";
 import type { ArticleRepository } from "./data/article-repository";
 import { calendarDayDifference } from "./date-helpers";
-import type { ProjectStatus, ProjectTaskStatus } from "./project-types";
+import type { MilestoneStatus, ProjectStatus, ProjectTaskStatus } from "./project-types";
 import type { StoredArticle } from "./types";
 import type { TaskPlan } from "./work-types";
 
@@ -11,6 +11,8 @@ export type HomeTaskCandidate = {
   id: string;
   projectId: string | null;
   projectStatus: ProjectStatus | null;
+  projectDraft?: boolean;
+  milestoneStatus?: MilestoneStatus;
   status: ProjectTaskStatus;
   plan: TaskPlan | null;
   planCarriedFrom: string;
@@ -31,14 +33,15 @@ export function selectHomeTaskCandidates<Task extends HomeTaskCandidate>(
   limit = 3,
 ): Task[] {
   const available = tasks
-    .filter((task) => !task.weekBlocked && !["done", "cancelled", "waiting"].includes(task.status) && task.projectStatus !== "completed")
+    .filter((task) => !task.projectDraft && !task.weekBlocked && !["done", "cancelled", "waiting"].includes(task.status) && (task.projectStatus === null || task.projectStatus === "active"))
     .sort((left, right) => homeTaskRank(left, today) - homeTaskRank(right, today));
   const active = activeTaskId ? tasks.find((task) => task.id === activeTaskId) : undefined;
   const ordered = [
     active,
-    ...available.filter((task) => task.plan?.plannedDate === today),
+    ...available.filter((task) => isConfirmedTodayPlan(task.plan, today)),
     ...available.filter((task) => isContinuablePlan(task.plan, today)),
-    ...available.filter((task) => task.status === "next" && (!task.plan?.plannedDate || task.plan.plannedDate <= today) && (task.projectStatus === "active" || task.projectId === null)),
+    ...available.filter((task) => task.status === "next" && (task.milestoneStatus === undefined || task.milestoneStatus === "current") &&
+      (task.plan?.source === "auto" || !task.plan?.plannedDate || task.plan.plannedDate <= today)),
   ].filter((task): task is Task => Boolean(task));
   const seen = new Set<string>();
   return ordered.filter((task) => {

@@ -4,7 +4,8 @@ import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { StoredArticle } from "../app/types";
-import type { ProjectDetail } from "../app/project-types";
+import type { ProjectDetail, ProjectLog } from "../app/project-types";
+import { decodeContinuationLog, projectJobGroups, projectWorkStatus } from "../app/project-selectors";
 import type { AsabaJob } from "../app/companion-types";
 import { AsabaJobCard, AsabaShotPreview } from "./AsabaDetails";
 import { companionApi } from "./companionApi";
@@ -12,26 +13,32 @@ import { Button } from "./DesktopControls";
 import { decodeTaskProgressLog } from "../app/home-workflow";
 import { isSourceArticle } from "../app/article-helpers";
 
-export function ProjectRecent({ detail, loadArticles, articlesRevision, onOpenArticle, onPlan, onArchive }: {
+export function ProjectRecent({ detail, view, loadArticles, articlesRevision, onOpenArticle, onOpenTask, onPlan, onOpenRecords, onArchive }: {
   detail: ProjectDetail;
+  view: "summary" | "records" | null;
   loadArticles: (projectId: string) => Promise<StoredArticle[]>;
   articlesRevision: StoredArticle[];
   onOpenArticle: (article: StoredArticle) => Promise<void>;
-  onPlan: () => void;
+  onOpenTask: (taskId: string) => void;
+  onPlan: (milestoneId?: string | null) => void;
+  onOpenRecords: () => void;
   onArchive: (request: WorkerArchive) => Promise<void>;
 }) {
-  const { project, logs, tasks } = detail;
+  const { project, logs } = detail;
   const [jobs, setJobs] = useState<AsabaJob[]>([]);
   const [repository, setRepository] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [notes, setNotes] = useState<StoredArticle[]>([]);
+  const [visibleNotes, setVisibleNotes] = useState(12);
+  const [visibleLogs, setVisibleLogs] = useState(12);
   useEffect(() => {
+    if (view !== "records") return;
     let active = true;
     void loadArticles(project.id).then(articles => {
       if (active) setNotes(articles);
     }).catch(error => { if (active) setError(String(error)); });
     return () => { active = false; };
-  }, [project.id, loadArticles, articlesRevision]);
+  }, [project.id, loadArticles, articlesRevision, view]);
   useEffect(() => {
     if (!isTauri()) return;
     let active = true;
@@ -49,42 +56,90 @@ export function ProjectRecent({ detail, loadArticles, articlesRevision, onOpenAr
     } catch (e) { setError(String(e)); }
   }
 
-  const latestJobs = [...new Map(jobs.slice().reverse().map(job => [job.agent === "codex" ? job.noteId : job.id, job])).values()];
-  const waiting = tasks.filter(task => task.status === "waiting");
-  const next = tasks.filter(task => task.status === "next");
-  const recent = [
-    ...logs.map(value => ({ kind: "log" as const, at: value.createdAt, value })),
-    ...notes.map(value => ({ kind: "note" as const, at: value.updated, value })),
-    ...latestJobs.map(value => ({ kind: "job" as const, at: value.updatedAt, value })),
-  ].sort((a, b) => b.at.localeCompare(a.at));
+  const jobGroups = projectJobGroups(jobs);
+  const latestJobs = jobGroups.map(({ latest }) => latest);
+  const { next, waiting, recent } = projectWorkStatus(detail);
+  const review = latestJobs.filter((job) => job.state === "review");
+  const inFlight = latestJobs.filter((job) => ["queued", "running", "recovering"].includes(job.state));
   function reviewed(job: AsabaJob) { void companionApi.jobAction(job.id, "reviewed").catch(e => setError(String(e))); }
 
+  if (!view) return null;
+  if (view === "summary") return <section className="project-status-summary workspace-card">
+    <header><h2>当前状态</h2><Button variant="ghost" size="small" onClick={onOpenRecords}>查看记录</Button></header>
+    <dl>
+      <div><dt>最近进展</dt><dd>{recent ? <><p>{recent.text}</p><small>{recent.source} · {formatDate(recent.at)}</small></> : "暂无进展记录"}</dd></div>
+      <div><dt>下一步</dt><dd>{next ? <><Button variant="ghost" size="small" onClick={() => onOpenTask(next.id)}>{next.title}</Button>{next.currentFocus && next.currentFocus !== next.title && <p>{next.currentFocus}</p>}</> : "尚未安排"}</dd></div>
+      {waiting.length > 0 && <div><dt>等待中</dt><dd>{waiting.slice(0, 2).map((task) => <p key={task.id}>{task.title} · {task.waitingFor || "等待条件尚未注明"}{task.resumeAction && <small>恢复后 · {task.resumeAction}</small>}</p>)}{waiting.length > 2 && <Button size="small" variant="ghost" onClick={() => onPlan(waiting[2].milestoneId)}>还有 {waiting.length - 2} 项等待</Button>}</dd></div>}
+      {review.length > 0 && <div><dt>待复测</dt><dd><Button variant="ghost" size="small" onClick={onOpenRecords}>{review[0].title}{review.length > 1 ? " 等 " + review.length + " 项" : ""}</Button></dd></div>}
+      {inFlight.length > 0 && <div><dt>正在委托</dt><dd><Button variant="ghost" size="small" onClick={onOpenRecords}>{inFlight[0].title}{inFlight.length > 1 ? " 等 " + inFlight.length + " 项" : ""}</Button></dd></div>}
+    </dl>
+    {error && <p role="status">{error}</p>}
+  </section>;
+
   return <div className="project-recent">
-    <section>
-      <h2>等我处理</h2>
-      {latestJobs.filter(job => job.state === "review").map(job => <AsabaJobCard key={job.id} job={job} projects={[{ id: project.id, title: project.title }]} onArchive={onArchive} onReviewed={job.agent === "codex" ? () => reviewed(job) : undefined} />)}
-      {next.slice(0, 3).map(task => <p key={task.id}><Button variant="ghost" size="small" onClick={onPlan}>{task.title}</Button></p>)}
-      {!next.length && !latestJobs.some(job => job.state === "review") && <p>暂无需要你处理的事项。</p>}
-      {!!waiting.length && <details><summary>等外部条件 · {waiting.length} 项</summary>{waiting.map(task => <p key={task.id}>{task.title} · {task.waitingFor || "等待条件尚未注明"}</p>)}</details>}
-    </section>
-    <section>
-      <h2>最近发生</h2>
-      {!recent.length && <p>还没有项目动态。关联到这个项目的便签和委托会出现在这里。</p>}
-      {recent.slice(0, 12).map(entry => {
-        if (entry.kind === "job") return <AsabaJobCard key={entry.value.id} job={entry.value} />;
-        if (entry.kind === "log") return <article key={entry.value.id}><small>{new Date(entry.at).toLocaleDateString("zh-CN")} · 项目记录</small><p>{decodeTaskProgressLog(entry.value.body)?.result ?? entry.value.body.replace(/^<!--[\s\S]*?-->\s*/, "")}</p></article>;
-        const shotId = entry.value.source.find(source => source.startsWith("浅羽画面 · "))?.split(" · ")[1];
-        return <article key={entry.value.id}><small>{new Date(entry.at).toLocaleDateString("zh-CN")} · {isSourceArticle(entry.value) ? "关联收藏" : entry.value.source.includes("浅羽随手记") ? "浅羽随手记" : "关联笔记"}</small>
-          <p><Button variant="ghost" size="small" onClick={() => void onOpenArticle(entry.value)}>{entry.value.title}</Button></p>
+    <details open={notes.length > 0 || undefined}>
+      <summary>关联笔记（{notes.length}）</summary>
+      {notes.slice(0, visibleNotes).map((note) => {
+        const shotId = note.source.find(source => source.startsWith("浅羽画面 · "))?.split(" · ")[1];
+        return <article key={note.id}><small>{formatDate(note.updated)} · {isSourceArticle(note) ? "关联收藏" : "笔记"}</small>
+          <p><Button variant="ghost" size="small" onClick={() => void onOpenArticle(note)}>{note.title}</Button></p>
           {shotId && <AsabaShotPreview id={shotId} />}
         </article>;
       })}
-    </section>
+      {notes.length > visibleNotes && <Button size="small" variant="secondary" onClick={() => setVisibleNotes((count) => count + 12)}>加载更多笔记</Button>}
+      {!notes.length && <p>暂无关联笔记</p>}
+    </details>
+    <details open={latestJobs.length > 0 || undefined}>
+      <summary>委托（{latestJobs.length}）</summary>
+      {jobGroups.map(({ latest, previous }) => <div key={latest.id}>
+        <AsabaJobCard job={latest} projects={[{ id: project.id, title: project.title }]} onArchive={onArchive}
+          onReviewed={latest.agent === "codex" && latest.state === "review" ? () => reviewed(latest) : undefined} />
+        {previous.length > 0 && <details><summary>之前的尝试（{previous.length}）</summary>
+          {previous.map((job) => <AsabaJobCard key={job.id} job={job} />)}
+        </details>}
+      </div>)}
+      {!latestJobs.length && <p>暂无委托</p>}
+    </details>
+    <details>
+      <summary>历史记录（{logs.length}）</summary>
+      {logs.slice(0, visibleLogs).map((log) => <ProjectHistoryRow key={log.id} log={log} />)}
+      {logs.length > visibleLogs && <Button size="small" variant="secondary" onClick={() => setVisibleLogs((count) => count + 12)}>加载更多记录</Button>}
+      {!logs.length && <p>暂无历史记录</p>}
+    </details>
     {isTauri() && <details><summary>项目目录</summary>
-      <p>{repository || "绑定本机 Git 仓库，创建委托时自动填入目录。"}</p>
-      <Button size="small" onClick={() => void bind()}>{repository ? "更换仓库" : "选择仓库"}</Button>
+      {repository && <p>{repository}</p>}
+      <Button size="small" onClick={() => void bind()}>{repository ? "更换仓库" : "选择本地 Git 仓库"}</Button>
       {repository && <Button size="small" variant="ghost" onClick={() => void companionApi.bindRepository(project.id, "").then(setRepository).catch(e => setError(String(e)))}>解除绑定</Button>}
     </details>}
     {error && <p role="status">{error}</p>}
   </div>;
 }
+
+function ProjectHistoryRow({ log }: { log: ProjectLog }) {
+  const date = formatDate(log.createdAt);
+  if (log.kind === "goal_revision") {
+    try {
+      const { before, after } = JSON.parse(log.body) as { before: string; after: string };
+      return <article><small>{date} · 方向调整</small><p>原目标 · {before}</p><p>新目标 · {after}</p></article>;
+    } catch { /* Older or externally edited log contents remain readable below. */ }
+  }
+  if (log.kind === "plan_revision") {
+    const separator = log.body.indexOf("｜");
+    if (separator >= 0) {
+      try {
+        const revision = JSON.parse(log.body.slice(separator + 1)) as {
+          trigger?: string;
+          accepted?: { title?: string; summary?: string };
+        };
+        return <article><small>{date} · {log.body.slice(0, separator)}</small>
+          <p>{[revision.trigger, revision.accepted?.title || revision.accepted?.summary].filter(Boolean).join(" · ") || "项目路线已更新"}</p>
+          <details><summary>查看原始记录</summary><pre>{JSON.stringify(revision, null, 2)}</pre></details>
+        </article>;
+      } catch { /* Keep plain-text revisions readable. */ }
+    }
+  }
+  const text = decodeTaskProgressLog(log.body)?.result ?? decodeContinuationLog(log.body)?.text ?? log.body.replace(/^<!--[\s\S]*?-->\s*/, "");
+  return <article><small>{date} · 项目记录</small><p>{text}</p></article>;
+}
+
+function formatDate(value: string) { return new Date(value).toLocaleDateString("zh-CN"); }
