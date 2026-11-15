@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { FinanceRepository } from "../app/data/finance-repository";
 import { HealthRepository } from "../app/data/health-repository";
-import { PrivateRepository } from "../app/data/private-repository";
+import { PrivateRepository, type PrivateDocument } from "../app/data/private-repository";
 import { PrivateCrypto, createRecoveryCode } from "../app/data/private-crypto";
 import { captureCandidates, pendingCaptureTransactions, type FinanceCapture } from "../app/finance-capture";
 import type { SqliteDatabase, SqliteValue } from "../app/data/sqlite-article-repository";
@@ -76,10 +76,18 @@ test("pending evidence and completed ledger survive encrypted two-device roundtr
   const cipher = await PrivateCrypto.fromRecoveryCode(createRecoveryCode());
   const forward = async (from: typeof a, to: typeof b) => {
     const changes = await from.privateRepo.prepare(cipher);
+    const documents = await Promise.all(changes.map(async change => {
+      assert.deepEqual(Object.keys(change).sort(), ["baseVersion", "envelope", "id", "mutationId"]);
+      assert.deepEqual(Object.keys(change.envelope).sort(), ["algorithm", "ciphertext", "keyId", "nonce", "version"]);
+      return await cipher.decrypt(change.id, change.envelope) as PrivateDocument;
+    }));
+    const capture = documents.find(document => document.kind === "finance_capture_events");
+    assert.ok(capture?.row);
+    assert.equal(capture.row.amount_cents, 2180);
+    assert.deepEqual(Object.keys(capture.row).sort(), Object.keys(event).sort());
     const records = changes.map(c => ({ id: c.id, version: c.baseVersion + 1, envelope: c.envelope }));
     await from.privateRepo.receive({ version: 4, keyId: cipher.keyId, cursor: 0, hasMore: false, records: [], results: changes.map(c => ({ mutationId: c.mutationId, status: "accepted" as const, id: c.id, version: c.baseVersion + 1 })) }, cipher, changes, 0);
     await to.privateRepo.receive({ version: 4, keyId: cipher.keyId, cursor: 0, hasMore: false, records, results: [] }, cipher, [], 0);
-    assert.ok(!JSON.stringify(changes).includes("2180"));
   };
   await forward(a, b); assert.equal((await b.finance.captures.list())[0].id, event.id);
   await b.finance.captures.complete(event.id, "隐私用途测试", "food", "expense");
