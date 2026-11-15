@@ -1,10 +1,16 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
+import type { WorkerArchive } from "../app/asaba-worker";
+import type { AsabaAdjustmentRequest } from "../app/asaba-planning";
+import { ProjectDateField } from "./ProjectDateField";
+import { projectDateLabel, scheduledProjectDate } from "../app/project-dates";
+import { projectProgress } from "../app/project-selectors";
 import { ProjectRouteGraph } from "./ProjectRouteGraph";
 import { ProjectTargetDate, StageDeadlineControls } from "./ProjectDeadlineControls";
 import "./styles/project-refinements.css";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { decodeTaskProgressLog } from "../app/home-workflow";
 import type { ProjectRepository } from "../app/data/project-repository";
-import { classifyDeadlineUrgency, localDate } from "../app/date-helpers";
+import { localDate } from "../app/date-helpers";
 import { LIFE_DOMAIN_LABELS, LIFE_DOMAIN_OPTIONS, normalizeLifeDomain } from "../app/domain-taxonomy";
 import type {
   Milestone,
@@ -57,9 +63,14 @@ type ProjectWorkspaceProps = {
   today: string;
   repository: ProjectRepository;
   projects: ProjectSummary[];
-  articles: StoredArticle[];
+  loadArticles: (projectId: string) => Promise<StoredArticle[]>;
+  articlesRevision: StoredArticle[];
   onOpenArticle: (article: StoredArticle) => Promise<void>;
   initialProjectId?: string | null;
+  asabaAdjustment?: AsabaAdjustmentRequest | null;
+  onConsumeAsabaAdjustment: (id: string) => void;
+  onArchiveWorker: (request: WorkerArchive) => Promise<void>;
+  onAskAsaba: (id: string) => void;
   onProjectsChange: () => Promise<ProjectSummary[]>;
   /** 用户从项目详情返回项目大厅时通知父组件，用于清除外部传入的 initialProjectId。 */
   onBackToHall?: () => void;
@@ -131,10 +142,15 @@ export function ProjectWorkspace({
   today,
   repository,
   projects,
-  articles,
+  loadArticles,
+  articlesRevision,
   onOpenArticle,
   initialProjectId,
+  asabaAdjustment,
+  onConsumeAsabaAdjustment,
   onProjectsChange,
+  onArchiveWorker,
+  onAskAsaba,
   onBackToHall,
   onRemoveTask,
   onEditingStateChange,
@@ -196,6 +212,12 @@ export function ProjectWorkspace({
       setDetail(null);
       return;
     }
+    if (asabaAdjustment && projects.some(project => project.id === asabaAdjustment.projectId)) {
+      lastInitialProjectId.current = asabaAdjustment.projectId;
+      setSelectedId(asabaAdjustment.projectId);
+      setTab("planning");
+      return;
+    }
     const requested = initialProjectId
       && initialProjectId !== lastInitialProjectId.current
       && projects.some((project) => project.id === initialProjectId)
@@ -208,7 +230,7 @@ export function ProjectWorkspace({
       setSelectedId(null);
       setDetail(null);
     }
-  }, [initialProjectId, projects, selectedId]);
+  }, [asabaAdjustment, initialProjectId, projects, selectedId]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -319,10 +341,6 @@ export function ProjectWorkspace({
       showMessage("请补全支线名称和完成标准，或先移除这条新支线。");
       return;
     }
-    if (draft.project.planningMode !== "direct" && !draft.milestones.some((milestone) => milestone.status === "current" && milestone.title.trim())) {
-      showMessage(`请为${planningModeLabels[draft.project.planningMode]}填写一个${draft.project.planningMode === "adaptive" ? "当前检查点" : "当前阶段"}。`);
-      return;
-    }
     setSaving(true);
     try {
       const project = await repository.saveWorkspace(
@@ -365,6 +383,7 @@ export function ProjectWorkspace({
         details: action.details,
         benefit: "",
         dueDate: action.dueDate,
+        dueDateKind: "target",
         status: "next",
         waitingFor: "",
         resumeAction: "",
@@ -738,7 +757,10 @@ export function ProjectWorkspace({
           <div className="project-loading">正在恢复项目上下文…</div>
         ) : detail ? (
           <ProjectPage
+            key={detail.project.id}
             detail={detail}
+            asabaAdjustment={asabaAdjustment?.projectId === detail.project.id ? asabaAdjustment : null}
+            onConsumeAsabaAdjustment={onConsumeAsabaAdjustment}
             branches={projects.filter((project) => project.parentProjectId === detail.project.id)}
             parentProject={detail.project.parentProjectId ? projects.find((project) => project.id === detail.project.parentProjectId) ?? null : null}
             saving={saving}
@@ -749,8 +771,11 @@ export function ProjectWorkspace({
             onAddProgress={addProgress}
             onConfirm={() => void confirmProject()}
             onEdit={startEditing}
+            onArchiveWorker={onArchiveWorker}
+            onAskAsaba={() => onAskAsaba(detail.project.id)}
             onComplete={() => void changeProjectCompletion()}
-            articles={articles}
+            loadArticles={loadArticles}
+            articlesRevision={articlesRevision}
             onOpenArticle={onOpenArticle}
             onOpenProject={(projectId) => { setSelectedId(projectId); setEditing(false); setTab("overview"); }}
             onBack={() => {
@@ -775,6 +800,13 @@ export function ProjectWorkspace({
             onRemoveAccumulation={(accumulation) => void removeAccumulation(accumulation)}
             onRemoveTask={(task) => void removeCurrentTask(task)}
             onApplyAiAdjustment={applyAiAdjustment}
+            onRefreshForAdjustment={async () => {
+              await repository.list();
+              const refreshed = await repository.get(detail.project.id);
+              if (!refreshed || refreshed.project.isDraft || refreshed.project.status === "completed") throw new Error("项目已不可调整。");
+              setDetail(refreshed);
+              return refreshed;
+            }}
             onApplyAiRoute={applyAiRoute}
             onContinueWeek={() => onContinueWeek(detail.project.id)}
             onChangeWeek={onChangeWeek}
@@ -804,11 +836,11 @@ export function ProjectWorkspace({
                 const category = normalizeLifeDomain(project.category);
                 const branchCount = projects.filter((candidate) => candidate.parentProjectId === project.id).length;
                 const displayDate = project.currentMilestone?.dueDate || project.targetDate;
-                const deadline = displayDate ? classifyDeadlineUrgency(displayDate) : null;
+                const deadline = projectDateLabel(displayDate, project.currentMilestone?.dueDate ? project.currentMilestone.dueDateKind : project.targetDateKind);
                 return <button className={`project-gallery-card category-${category}`} key={project.id} onClick={() => { setSelectedId(project.id); setEditing(false); }}>
                   <header><span className="project-domain">{categoryLabels[category]}</span><span className="project-planning-mode-badge">{planningModeLabels[project.planningMode]}</span><span className={`project-status ${project.status}`}>{statusLabels[project.status]}</span></header>
-                  <div>{project.isDraft && <small>待确认</small>}<h2>{project.title}</h2><p>{project.outcome}</p></div>
-                  <section><span>{project.planningMode === "adaptive" ? "当前检查点" : total ? "当前阶段" : "当前推进"}</span><strong>{project.currentMilestone?.title || (total && project.completedMilestoneCount === total ? "阶段路线已完成，等待项目收尾" : project.nextTask?.title || "等待安排下一步")}</strong>{displayDate && <small className={deadline?.tone ?? ""}>{deadline?.label ?? `${project.currentMilestone?.dueDate ? project.planningMode === "adaptive" ? "检查点截止" : "阶段截止" : "项目目标"} · ${formatDueDate(displayDate)}`}</small>}</section>
+                  <div><small>{project.isDraft ? "待确认" : projectProgress(project)}</small><h2>{project.title}</h2><p>{project.outcome}</p></div>
+                  <section><span>{project.planningMode === "adaptive" ? "当前检查点" : total ? "当前阶段" : "当前推进"}</span><strong>{project.currentMilestone?.title || (total && project.completedMilestoneCount === total ? "阶段路线已完成，等待项目收尾" : project.nextTask?.title || projectProgress(project))}</strong>{displayDate && <small className={deadline?.tone ?? ""}>{deadline.text}</small>}</section>
                   <footer>{project.planningMode !== "adaptive" && <i className={!total ? "lightweight" : ""}><b style={{ width: `${total ? progress : project.nextTask ? 36 : 0}%` }} /></i>}<span>{project.planningMode === "adaptive" ? `滚动推进${project.reviewDate ? ` · ${formatDueDate(project.reviewDate)} 校准` : " · 等待校准"}` : total ? `${project.completedMilestoneCount}/${total} 个阶段完成` : "直接推进 · 无需阶段路线"}{branchCount ? ` · ${branchCount} 条支线` : ""}</span><em>进入项目 →</em></footer>
                 </button>;
               })}
@@ -823,7 +855,10 @@ export function ProjectWorkspace({
 
 function ProjectPage({
   detail,
-  articles,
+  asabaAdjustment,
+  onConsumeAsabaAdjustment,
+  loadArticles,
+  articlesRevision,
   onOpenArticle,
   branches,
   parentProject,
@@ -835,6 +870,8 @@ function ProjectPage({
   onAddProgress,
   onConfirm,
   onEdit,
+  onArchiveWorker,
+  onAskAsaba,
   onComplete,
   onOpenProject,
   onBack,
@@ -851,6 +888,7 @@ function ProjectPage({
   onRemoveAccumulation,
   onRemoveTask,
   onApplyAiAdjustment,
+  onRefreshForAdjustment,
   onApplyAiRoute,
   onContinueWeek,
   onChangeWeek,
@@ -858,7 +896,10 @@ function ProjectPage({
   today,
 }: {
   detail: ProjectDetail;
-  articles: StoredArticle[];
+  asabaAdjustment: AsabaAdjustmentRequest | null;
+  onConsumeAsabaAdjustment: (id: string) => void;
+  loadArticles: (projectId: string) => Promise<StoredArticle[]>;
+  articlesRevision: StoredArticle[];
   onOpenArticle: (article: StoredArticle) => Promise<void>;
   branches: ProjectSummary[];
   parentProject: ProjectSummary | null;
@@ -870,6 +911,8 @@ function ProjectPage({
   onAddProgress: (event: FormEvent, kind?: "continuation" | "general", target?: { id: string; title: string }) => void;
   onConfirm: () => void;
   onEdit: () => void;
+  onArchiveWorker: (request: WorkerArchive) => Promise<void>;
+  onAskAsaba: () => void;
   onComplete: () => void;
   onOpenProject: (projectId: string) => void;
   onBack: () => void;
@@ -886,6 +929,7 @@ function ProjectPage({
   onRemoveAccumulation: (accumulation: ProjectAccumulation) => void;
   onRemoveTask: (task: ProjectTask) => void;
   onApplyAiAdjustment: (adjustment: ProjectAdjustmentDraft) => Promise<boolean>;
+  onRefreshForAdjustment: () => Promise<ProjectDetail>;
   onApplyAiRoute: (draft: ProjectRouteDraft) => Promise<boolean>;
   onContinueWeek: () => void;
   onChangeWeek: () => void;
@@ -897,8 +941,8 @@ function ProjectPage({
   const currentMilestones = milestones.filter((item) => item.status === "current");
   const currentMilestone = currentMilestones.find((item) => item.id === selectedMilestoneId) ?? currentMilestones[0] ?? null;
   const activeMilestones = milestones.filter((item) => item.status !== "superseded");
-  const openTasks = tasks.filter((item) => item.status !== "done" && item.status !== "cancelled" && (currentMilestone ? item.milestoneId === currentMilestone.id : activeMilestones.length ? item.milestoneId === null : true)).sort((left, right) => left.sortOrder - right.sortOrder);
-  const nextTask = openTasks.find((item) => item.status === "next") ?? openTasks[0] ?? null;
+  const openTasks = tasks.filter((item) => item.status !== "done" && item.status !== "cancelled" && (item.milestoneId === null || item.milestoneId === currentMilestone?.id || !activeMilestones.length)).sort((left, right) => left.sortOrder - right.sortOrder);
+  const nextTask = openTasks.find((item) => item.status === "next") ?? openTasks.find((item) => item.status === "later") ?? openTasks[0] ?? null;
   const continuationTargetId = nextTask?.id || currentMilestone?.id || project.id;
   const latestContinuation = logs.map((log) => ({ log, continuation: decodeContinuationLog(log.body) }))
     .find((entry) => entry.continuation?.targetId === continuationTargetId) ?? null;
@@ -919,6 +963,7 @@ function ProjectPage({
           <span className="project-local-badge">仅本机</span>
         </div>
         <div>
+          {project.status !== "completed" && !project.isDraft && <Button variant="ghost" size="small" onClick={onAskAsaba}>请浅羽建议下一步</Button>}
           {project.isDraft && <Button variant="primary" size="small" type="button" disabled={saving} onClick={onConfirm}>确认项目</Button>}
           <Button variant="ghost" size="small" type="button" onClick={onEdit}>编辑信息</Button>
           {!project.isDraft && <Button variant="secondary" size="small" disabled={saving} onClick={onComplete}>{project.status === "completed" ? `重新开启${project.parentProjectId ? "支线" : "项目"}` : `✓ 完结${project.parentProjectId ? "支线" : "项目"}`}</Button>}
@@ -933,8 +978,8 @@ function ProjectPage({
           <p>{project.outcome}</p>
           {tab !== "overview" && <div className="project-hero-meta">
             <span>{project.planningMode === "adaptive" ? "滚动项目 · 多条任务线独立推进" : project.planningMode === "staged" ? `${milestones.filter((item) => item.status !== "superseded").length} 个阶段的确定路线` : "直接推进 · 按下一行动前进"}</span>
-            {project.targetDate && <time>目标日期 · {formatDueDate(project.targetDate)}</time>}
-            {project.planningMode === "adaptive" && project.reviewDate && <time>下次校准 · {formatDueDate(project.reviewDate)}</time>}
+            {project.targetDate && <time>{projectDateLabel(project.targetDate, project.targetDateKind).text}</time>}
+            {project.reviewDate && <time>下次校准 · {project.reviewDate}</time>}
           </div>}
           <ThemeSticker section="projects" placement="project-hero" />
         </header>
@@ -958,9 +1003,9 @@ function ProjectPage({
           {upcoming.length > 0 && tab === "planning" && <ul>{upcoming.map((task) => <li key={task.id}>{plannedDates[task.id]} · {task.title}</li>)}</ul>}
         </section>}
 
-        {project.planningMode === "adaptive" && (tab === "planning" || tab === "stages") && <div className={tab === "stages" ? "project-route-assist-tools" : "project-planning-tools"}><ProjectAiPlanningPanel detail={detail} saving={saving} onApplyAdjustment={onApplyAiAdjustment} />{tab === "stages" && <ProjectRoutePlanningAssistant detail={detail} saving={saving} onApply={onApplyAiRoute} />}</div>}
+        {(tab === "planning" || (tab === "stages" && project.planningMode === "adaptive")) && (project.planningMode === "adaptive" || (project.status !== "completed" && !project.isDraft)) && <div className={tab === "stages" ? "project-route-assist-tools" : "project-planning-tools"}>{project.status !== "completed" && !project.isDraft && <ProjectAiPlanningPanel detail={detail} saving={saving} onApplyAdjustment={onApplyAiAdjustment} onRefreshDetail={onRefreshForAdjustment} asabaAdjustment={asabaAdjustment} onConsumeAsabaAdjustment={onConsumeAsabaAdjustment} />}{tab === "stages" && <ProjectRoutePlanningAssistant detail={detail} saving={saving} onApply={onApplyAiRoute} />}</div>}
 
-        {tab === "overview" && <ProjectRecent key={project.id} detail={detail} articles={articles} onOpenArticle={onOpenArticle} onPlan={() => onTabChange("planning")} />}
+        {tab === "overview" && <ProjectRecent key={project.id} detail={detail} onArchive={onArchiveWorker} loadArticles={loadArticles} articlesRevision={articlesRevision} onOpenArticle={onOpenArticle} onPlan={() => onTabChange("planning")} />}
 
         {tab === "planning" && <>
           <Button size="small" onClick={() => onTabChange("stages")}>{project.planningMode === "direct" ? "查看历史节点" : "打开路线与阶段"}</Button>
@@ -1028,27 +1073,26 @@ function ProjectCurrentProgress({ detail, project, milestones, currentMilestone,
   const routeWaiting = orderedMilestones.length > 0 && !currentMilestone && !routeComplete;
   const adaptive = project.planningMode === "adaptive";
   const today = localDate();
-  const calibrationReasons = adaptive ? [
-    !nextTask || nextTask.status !== "next" ? "还没有明确的下一行动" : "",
-    currentMilestone?.dueDate && currentMilestone.dueDate < today ? "当前检查点已经逾期" : "",
-    project.targetDate && project.targetDate < today ? "项目硬截止日期已经逾期" : "",
+  const calibrationReasons = [
+    currentMilestone?.dueDateKind === "deadline" && currentMilestone.dueDate && currentMilestone.dueDate < today ? "当前检查点已经逾期" : "",
+    project.targetDateKind === "deadline" && project.targetDate && project.targetDate < today ? "项目硬截止日期已经逾期" : "",
     project.reviewDate && project.reviewDate <= today ? "已到下次校准日期" : "",
-    recentTaskCompleted ? "刚完成了一项当前行动" : "",
-  ].filter(Boolean) : [];
+    adaptive && recentTaskCompleted ? "刚完成了一项当前行动" : "",
+  ].filter(Boolean);
   return <section className="project-current-progress">
     {calibrationReasons.length > 0 && <aside className="adaptive-calibration-notice"><div><span>计划提醒</span><strong>{calibrationReasons.join("；")}</strong></div><Button variant="ghost" size="small" onClick={() => document.getElementById("project-ai-planning")?.scrollIntoView({ behavior: "smooth", block: "center" })}>报告变化 ↗</Button></aside>}
     <header className={`project-current-stage ${currentMilestone ? "has-stage" : routeComplete ? "route-complete" : routeWaiting ? "route-waiting" : "lightweight"}`}>
-      <div><span>{currentMilestone ? adaptive ? "当前检查点" : "当前阶段" : routeComplete ? "路线已完成" : routeWaiting ? "等待选择" : "当前推进"}</span><h2>{currentMilestone?.title || (routeComplete ? adaptive ? "当前路线已经校验完成" : "所有阶段已经验收" : routeWaiting ? adaptive ? "尚未指定当前检查点" : "尚未指定当前阶段" : "直接推进，不必拆分阶段")}</h2><p>{currentMilestone?.definitionOfDone || (routeComplete ? "现在检查项目整体结果：可以完结归档，也可以按新的情况建立下一检查点。" : routeWaiting ? `前往${adaptive ? "候选节点" : "阶段路线"}，选择此刻真正要推进的一站。` : "只保留一个明确结果和下一步；路径变复杂时再切换推进方式。")}</p></div>
+      <div><span>{currentMilestone ? adaptive ? "当前检查点" : "当前阶段" : routeComplete ? "路线已完成" : routeWaiting ? "等待选择" : "当前推进"}</span><h2>{currentMilestone?.title || (routeComplete ? adaptive ? "当前路线已经校验完成" : "所有阶段已经验收" : routeWaiting ? adaptive ? "尚未指定当前检查点" : "尚未指定当前阶段" : project.planningMode === "direct" ? "直接推进" : "路径待明确")}</h2><p>{currentMilestone?.definitionOfDone || (routeComplete ? "现在检查项目整体结果：可以完结归档，也可以按新的情况建立下一检查点。" : routeWaiting ? `前往${adaptive ? "候选节点" : "阶段路线"}，选择此刻真正要推进的一站。` : "可以先保留期望结果，确认方向后再补规划。")}</p></div>
       <nav className="project-stage-primary-actions" aria-label={adaptive ? "检查点操作" : "阶段操作"}>
         <Button variant="ghost" size="small" onClick={onOpenRoute}>{adaptive ? "查看任务分支 ↗" : currentIndex >= 0 ? `阶段路线 · ${currentIndex + 1}/${orderedMilestones.length} ↗` : routeComplete ? "查看已完成路线 ↗" : "添加阶段路线"}</Button>
         {currentMilestone && <Button variant="secondary" size="small" disabled={saving} onClick={() => onCompleteMilestone(currentMilestone)}>✓ 完成{adaptive ? "检查点" : "阶段"}</Button>}
       </nav>
-      {currentMilestone?.dueDate && <StageDeadlineControls key={currentMilestone.id} milestone={currentMilestone} adaptive={adaptive} hasCurrentAction={Boolean(nextTask)} saving={saving} onSave={onSaveMilestone} />}
-      {!currentMilestone && !milestones.length && project.targetDate && project.status !== "completed" && <ProjectTargetDate dueDate={project.targetDate} saving={saving} onAdjust={onEditProject} />}
+      {currentMilestone && <StageDeadlineControls key={currentMilestone.id} milestone={currentMilestone} adaptive={adaptive} hasCurrentAction={Boolean(nextTask)} saving={saving} onSave={onSaveMilestone} />}
+      {!currentMilestone && project.targetDate && project.status !== "completed" && <ProjectTargetDate dueDate={project.targetDate} kind={project.targetDateKind} saving={saving} onAdjust={onEditProject} />}
     </header>
     <div className="project-focus-grid">
       <article className={`project-current-action ${nextTask ? "has-action" : "empty"}`}>
-        <header><div><span>当前行动</span><small>现在最值得推进的一件事</small></div>{!nextTask && !editingAction && <Button variant="primary" size="small" disabled={saving} onClick={() => setEditingAction("new")}>＋ 安排行动</Button>}{nextTask && (nextTask.status !== "next" || nextTask.dueDate) && <em>{nextTask.status !== "next" ? taskStatusLabels[nextTask.status] : ""}{nextTask.status !== "next" && nextTask.dueDate ? " · " : ""}{nextTask.dueDate ? formatDueDate(nextTask.dueDate) : ""}</em>}</header>
+        <header><div><span>当前行动</span><small>{projectProgress({ ...project, nextTask })}</small></div>{!nextTask && !editingAction && <Button variant="primary" size="small" disabled={saving} onClick={() => setEditingAction("new")}>＋ 安排行动</Button>}{nextTask && (nextTask.status !== "next" || nextTask.dueDate) && <em>{nextTask.status !== "next" ? taskStatusLabels[nextTask.status] : ""}{nextTask.status !== "next" && nextTask.dueDate ? " · " : ""}{projectDateLabel(nextTask.dueDate, nextTask.dueDateKind).text}</em>}</header>
         {nextTask && editingAction !== nextTask ? <div className="project-current-action-row">
           <ProjectActionStructure task={nextTask} saving={saving} onSave={onSaveTask} />
           <div className="project-action-buttons"><Button variant="primary" size="small" disabled={saving} onClick={() => onTaskStatus(nextTask, "done")}>完成行动</Button><Button variant="secondary" size="small" disabled={saving} onClick={() => setEditingAction(nextTask)}>编辑行动</Button>{nextTask.status !== "next" && <Button variant="secondary" size="small" disabled={saving} onClick={() => onTaskStatus(nextTask, "next")}>设为当前</Button>}<details className="project-action-more"><summary>更多操作</summary><Button variant="danger" size="small" disabled={saving} onClick={() => onRemoveTask(nextTask)}>删除行动</Button></details></div>
@@ -1082,7 +1126,7 @@ function ProjectActionStructure({ task, saving, onSave }: {
     {task.currentFocus && <section className="project-action-focus"><span>本次推进</span><strong>{task.currentFocus}</strong></section>}
     {task.definitionOfDone && <section className="project-action-done"><span>完成标志</span><p>{task.definitionOfDone}</p></section>}
     <ActionChecklist steps={task.steps} onToggle={(stepId) => void toggleStep(stepId)} />
-    {(task.details || task.waitingFor) && <details className="project-action-details"><summary>补充说明</summary>{task.details && <p>{task.details}</p>}{task.waitingFor && <small>正在等待 · {task.waitingFor}</small>}</details>}
+    {(task.details || task.waitingFor || task.resumeAction) && <details className="project-action-details"><summary>补充说明</summary>{task.details && <p>{task.details}</p>}{task.waitingFor && <small>正在等待 · {task.waitingFor}</small>}{task.resumeAction && <small>恢复条件 · {task.resumeAction}</small>}</details>}
   </div>;
 }
 
@@ -1126,6 +1170,7 @@ function InlineActionComposer({ detail, projectId, milestone, initialTask, savin
         definitionOfDone: response.content.action.definitionOfDone,
         details: response.content.action.details,
         dueDate: response.content.action.dueDate,
+        dueDateKind: "target",
       }));
       setAiReason(response.content.reason);
     } catch (cause) {
@@ -1142,8 +1187,8 @@ function InlineActionComposer({ detail, projectId, milestone, initialTask, savin
     {aiOpen && <section className="inline-action-ai"><div><strong>只分析当前任务线</strong><p>读取本检查点、前置节点、共享成果和本分支记录；不会发送其他并行分支的未完成内容。</p></div><label><span>本次目标、投入上限或不想做的事 · 可选</span><textarea disabled={aiBusy} value={aiRequirements} onChange={(event) => setAiRequirements(event.target.value)} placeholder="例如：今天只有 40 分钟；先判断实验是否值得继续，不补完整综述。" /></label>{aiReason && <p className="inline-action-ai-reason">{aiReason}</p>}{aiError && <p className="project-ai-error" role="alert">{aiError}</p>}<Button variant="secondary" type="button" disabled={aiBusy} onClick={() => void generateWithAi()}>{aiBusy ? "正在梳理本分支…" : aiReason ? "重新生成" : "生成并填入行动"}</Button></section>}
     <div className="inline-action-fields">
       <label className="inline-action-title"><span>行动名称 <b>必填</b></span><input autoFocus value={task.title} onChange={(event) => update("title", event.target.value)} placeholder="例如：精读论文并形成一页方法笔记" /></label>
-      <DateField className="inline-action-date" label="截止日期" value={task.dueDate} onChange={(value) => setTask((current) => ({ ...current, dueDate: value, autoSchedulePaused: false }))} />
-      <ActionEstimateField dueDate={task.dueDate} estimatedDays={task.estimatedDays || 0} title={task.title} currentFocus={task.currentFocus} definitionOfDone={task.definitionOfDone} steps={task.steps} details={task.details} projectTitle={detail.project.title} stageTitle={milestone?.title || ""} paused={Boolean(task.autoSchedulePaused)} onChange={(days) => setTask((current) => ({ ...current, estimatedDays: days, autoSchedulePaused: false }))} onPauseChange={(paused) => update("autoSchedulePaused", paused)} />
+      <ProjectDateField className="inline-action-date" label="行动日期" value={task.dueDate} kind={task.dueDateKind} onChange={(dueDate, dueDateKind) => setTask((current) => ({ ...current, dueDate, dueDateKind, autoSchedulePaused: false }))} />
+      <ActionEstimateField dateKind={task.dueDateKind} dueDate={scheduledProjectDate(task.dueDate, task.dueDateKind)} estimatedDays={task.estimatedDays || 0} title={task.title} currentFocus={task.currentFocus} definitionOfDone={task.definitionOfDone} steps={task.steps} details={task.details} projectTitle={detail.project.title} stageTitle={milestone?.title || ""} paused={Boolean(task.autoSchedulePaused)} onChange={(days) => setTask((current) => ({ ...current, estimatedDays: days, autoSchedulePaused: false }))} onPauseChange={(paused) => update("autoSchedulePaused", paused)} />
       <ActionOptionalFields hasContent={Boolean(task.currentFocus || task.definitionOfDone || task.steps.length || task.details || aiReason)}>
       <label className="inline-action-focus"><span>本次推进 · 可选</span><textarea value={task.currentFocus} onChange={(event) => update("currentFocus", event.target.value)} placeholder="名称已说清要做什么时，可以留空" /></label>
       <label className="inline-action-done"><span>完成标志 · 可选</span><textarea value={task.definitionOfDone} onChange={(event) => update("definitionOfDone", event.target.value)} placeholder="需要额外约定停止条件时再填写" /></label>
@@ -1211,7 +1256,7 @@ function StageRouteEditor({ projectId, planningMode, milestones, tasks, saving, 
       const isEditing = editingId === milestone.id;
       const hasNextPlanned = orderedMilestones.slice(index + 1).some((item) => item.status === "planned");
       return <article className={`project-stage-node ${milestone.status} ${isEditing ? "editing" : ""}`} key={milestone.id}>
-        <button aria-expanded={isEditing} className="stage-node-button" onClick={() => edit(milestone)}><i>{milestone.status === "completed" ? "✓" : index + 1}</i><span><small>{milestone.status === "current" ? planningMode === "adaptive" ? "当前检查点" : "当前阶段" : milestone.status === "completed" ? "已完成" : planningMode === "adaptive" ? "候选节点" : "待开始"}</small><strong>{milestone.title}</strong><em>{stageTasks.filter((task) => task.status === "done").length}/{stageTasks.filter((task) => task.status !== "cancelled").length} 行动{milestone.dueDate ? ` · 截止 ${formatDueDate(milestone.dueDate)}` : ""}</em></span><b className="stage-node-toggle">{isEditing ? "收起" : "编辑"}</b></button>
+        <button aria-expanded={isEditing} className="stage-node-button" onClick={() => edit(milestone)}><i>{milestone.status === "completed" ? "✓" : index + 1}</i><span><small>{milestone.status === "current" ? planningMode === "adaptive" ? "当前检查点" : "当前阶段" : milestone.status === "completed" ? "已完成" : planningMode === "adaptive" ? "候选节点" : "待开始"}</small><strong>{milestone.title}</strong><em>{stageTasks.filter((task) => task.status === "done").length}/{stageTasks.filter((task) => task.status !== "cancelled").length} 行动{milestone.dueDate ? ` · ${projectDateLabel(milestone.dueDate, milestone.dueDateKind).text}` : ""}</em></span><b className="stage-node-toggle">{isEditing ? "收起" : "编辑"}</b></button>
         {milestone.status === "current" && !isEditing && <Button variant="secondary" className="stage-node-complete" disabled={saving} onClick={() => onComplete(milestone)}>✓ {hasNextPlanned ? planningMode === "adaptive" ? "完成此检查点" : "完成并进入下一阶段" : planningMode === "adaptive" ? "完成检查点" : "完成阶段"}</Button>}
         {isEditing && editorPanel(index)}
       </article>;
@@ -1232,7 +1277,7 @@ function StageInlineForm({ draft, saving, onChange, onCancel, onRemove, canMoveU
       <label className="stage-form-field stage-form-field-wide"><span>阶段名称<small>用一句短语描述这一站要抵达的结果</small></span><input autoFocus value={draft.title} onChange={(event) => onChange({ ...draft, title: event.target.value })} placeholder="例如：完成第一轮真实使用验证" /></label>
       <label className="stage-form-field stage-form-field-wide"><span>完成标准<small>写清楚什么证据出现后，可以把阶段标记为完成</small></span><textarea value={draft.definitionOfDone} onChange={(event) => onChange({ ...draft, definitionOfDone: event.target.value })} placeholder="例如：连续使用两周，完成主要问题清单并确定下一轮调整范围" /></label>
       <fieldset className="stage-status-field"><legend>阶段状态</legend><p>状态会决定它在路线中的强调方式。</p><div>{statusOptions.map((option) => <button className={draft.status === option.value ? "active" : ""} key={option.value} type="button" onClick={() => onChange({ ...draft, status: option.value })}><strong>{option.label}</strong><small>{option.description}</small></button>)}</div></fieldset>
-      <DateField className="stage-form-field stage-date-field" label="计划截止" value={draft.dueDate} onChange={(value) => onChange({ ...draft, dueDate: value })} />
+      <ProjectDateField className="stage-form-field stage-date-field" label="节点日期" value={draft.dueDate} kind={draft.dueDateKind} onChange={(dueDate, dueDateKind) => onChange({ ...draft, dueDate, dueDateKind })} />
     </div>
     <footer><div className="stage-editor-structural-actions">{onMove && <><Button variant="secondary" type="button" disabled={!canMoveUp || saving} onClick={() => onMove(-1)}>↑ 上移</Button><Button variant="secondary" type="button" disabled={!canMoveDown || saving} onClick={() => onMove(1)}>↓ 下移</Button></>}{onRemove && <Button variant="danger" type="button" onClick={onRemove}>删除阶段</Button>}</div><span /><Button variant="secondary" type="button" onClick={onCancel}>收起</Button><Button variant="primary" type="submit" disabled={saving || !draft.title.trim()}>保存阶段</Button></footer>
   </form>;
@@ -1267,9 +1312,17 @@ function ProjectAccumulationBoard({ projectId, milestones, accumulations, saving
     </form>}
     <div className="project-accumulation-list">{accumulations.length ? accumulations.map((item) => {
       const milestone = milestones.find((candidate) => candidate.id === item.milestoneId);
-      return <article key={item.id}><i className="project-accumulation-pin" aria-hidden="true" /><header><em>{milestone ? `任务线 · ${milestone.title}` : "项目共享"}</em><time>{formatProjectDate(item.updatedAt)}</time></header>{item.title && <h3>{item.title}</h3>}{item.content && <p>{item.content}</p>}{item.reference && <small className="project-accumulation-reference">参考 · {item.reference}</small>}<footer><span /><div><Button variant="secondary" size="small" type="button" onClick={() => setDraft({ ...item })}>编辑</Button><Button variant="danger" size="small" type="button" disabled={saving} onClick={() => onRemove(item)}>删除</Button></div></footer></article>;
+      return <article key={item.id}><i className="project-accumulation-pin" aria-hidden="true" /><header><em>{milestone ? `任务线 · ${milestone.title}` : "项目共享"}</em><time>{formatProjectDate(item.updatedAt)}</time></header>{item.title && <h3>{item.title}</h3>}{item.content && <p>{item.content}</p>}{item.reference && (item.id.startsWith("asaba-worker-") ? <WorkerSourceLinks value={item.reference} /> : <small className="project-accumulation-reference">参考 · {item.reference}</small>)}<footer><span /><div><Button variant="secondary" size="small" type="button" onClick={() => setDraft({ ...item })}>编辑</Button><Button variant="danger" size="small" type="button" disabled={saving} onClick={() => onRemove(item)}>删除</Button></div></footer></article>;
     }) : <p className="project-empty-copy">这里还没有便签。读到一点、试出一点、想到一点，都可以先贴下来。</p>}</div>
   </section>;
+}
+
+function WorkerSourceLinks({ value }: { value: string }) {
+  const [error, setError] = useState("");
+  const urls = value.split("\n").filter(url => /^https?:\/\//i.test(url));
+  return <details><summary>来源 · {urls.length} 条</summary><ol>{urls.map(url => <li key={url}>
+    <Button variant="ghost" size="small" wrap onClick={() => void openUrl(url).catch(reason => setError(String(reason)))}>{url}</Button>
+  </li>)}</ol>{error && <p role="status">{error}</p>}</details>;
 }
 
 function ProjectRoutePlanningAssistant({ detail, saving, onApply }: {
@@ -1399,7 +1452,8 @@ function ProjectCreationAiAssistant({ draft, saving, onApply, onCreateStandalone
           details: draft.task.details,
           dueDate: draft.task.dueDate,
         },
-        userEnteredNodes: draft.milestones.map((milestone) => ({ title: milestone.title, definitionOfDone: milestone.definitionOfDone, dueDate: milestone.dueDate, status: milestone.status })),
+        userEnteredNodes: draft.milestones.map((milestone) => ({ title: milestone.title, definitionOfDone: milestone.definitionOfDone, dueDate: milestone.dueDate,
+              dueDateKind: "target", status: milestone.status })),
       });
       const result = await desktopApi.deepseek.createProjectPlan({ model, input });
       if (effortAndOutcome.trim()) {
@@ -1443,7 +1497,10 @@ function ProjectCreationAiAssistant({ draft, saving, onApply, onCreateStandalone
   </details>;
 }
 
-function ProjectAiPlanningPanel({ detail, saving, onApplyAdjustment }: {
+function ProjectAiPlanningPanel({ detail, saving, onApplyAdjustment, onRefreshDetail, asabaAdjustment, onConsumeAsabaAdjustment }: {
+  onRefreshDetail: () => Promise<ProjectDetail>;
+  asabaAdjustment: AsabaAdjustmentRequest | null;
+  onConsumeAsabaAdjustment: (id: string) => void;
   detail: ProjectDetail;
   saving: boolean;
   onApplyAdjustment: (adjustment: ProjectAdjustmentDraft) => Promise<boolean>;
@@ -1454,37 +1511,60 @@ function ProjectAiPlanningPanel({ detail, saving, onApplyAdjustment }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [replan, setReplan] = useState<DeepSeekStructuredResponse<ProjectReplanProposal> | null>(null);
+  const [basedOn, setBasedOn] = useState("");
+  const [asabaSuggestion, setAsabaSuggestion] = useState("");
+  const [fromAsaba, setFromAsaba] = useState(false);
   const [patchSelection, setPatchSelection] = useState({ outcome: true, targetDate: true, reviewDate: true });
   const currentMilestones = detail.milestones.filter((milestone) => milestone.status !== "superseded");
   const openTasks = detail.tasks.filter((task) => task.status !== "done" && task.status !== "cancelled");
+
+  useEffect(() => {
+    if (!asabaAdjustment || busy || saving) return;
+    setTrigger(asabaAdjustment.request);
+    setEffortAndOutcome("");
+    setAsabaSuggestion(asabaAdjustment.suggestion);
+    setFromAsaba(true);
+    setReplan(null);
+    setError("");
+    setOpen(true);
+    onConsumeAsabaAdjustment(asabaAdjustment.id);
+  }, [asabaAdjustment, busy, saving, onConsumeAsabaAdjustment]);
 
   async function generateReplan() {
     if (!trigger.trim()) return;
     setBusy(true); setError("");
     try {
+      const fresh = await onRefreshDetail();
+      const milestones = fresh.milestones.filter((item) => item.status !== "superseded");
+      const tasks = fresh.tasks.filter((item) => item.status !== "done" && item.status !== "cancelled");
       const model = await resolveAvailableDeepSeekModel("projectReplan", desktopApi.deepseek.apiModels);
-      const input = buildRouteAiContext(detail, { reportedChange: trigger.trim(), effortAndOutcome: effortAndOutcome.trim() });
-      input.tasks = openTasks.map((task) => ({ id: task.id, milestoneId: task.milestoneId, title: task.title, currentFocus: task.currentFocus, definitionOfDone: task.definitionOfDone, status: task.status, dueDate: task.dueDate }));
-      input.completedTaskHistory = detail.tasks.filter((task) => task.status === "done").map((task) => ({ milestoneId: task.milestoneId, title: task.title, completedAt: task.completedAt }));
+      const input = buildRouteAiContext(fresh, { reportedChange: trigger.trim(), effortAndOutcome: effortAndOutcome.trim(), ...(asabaSuggestion ? { unverifiedSuggestion: asabaSuggestion } : {}) });
+      input.tasks = tasks.map((task) => ({ id: task.id, milestoneId: task.milestoneId, title: task.title, currentFocus: task.currentFocus, definitionOfDone: task.definitionOfDone, status: task.status, dueDate: task.dueDate }));
+      input.completedTaskHistory = fresh.tasks.filter((task) => task.status === "done").map((task) => ({ milestoneId: task.milestoneId, title: task.title, completedAt: task.completedAt }));
       const result = await desktopApi.deepseek.replanProject({
         model,
         input,
-        allowedMilestoneIds: currentMilestones.map((item) => item.id),
-        allowedTaskIds: openTasks.map((item) => item.id),
+        allowedMilestoneIds: milestones.map((item) => item.id),
+        allowedTaskIds: tasks.map((item) => item.id),
       });
+      setBasedOn(fresh.project.updatedAt);
+      setPatchSelection({ outcome: !fromAsaba, targetDate: !fromAsaba, reviewDate: !fromAsaba });
       setReplan({ ...result, content: {
         ...result.content,
-        milestoneChanges: result.content.milestoneChanges.map((item) => ({ ...item, selected: true })),
+        milestoneChanges: result.content.milestoneChanges.map((item) => ({ ...item, selected: !fromAsaba })),
         newMilestones: result.content.newMilestones.map((item) => ({ ...item, selected: false })),
-        taskChanges: result.content.taskChanges.map((item) => ({ ...item, selected: true })),
+        taskChanges: result.content.taskChanges.map((item) => ({ ...item, selected: !fromAsaba })),
         newTasks: result.content.newTasks.map((item) => ({ ...item, selected: false })),
       } });
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
   }
 
+  const hasSelection = replan && (Object.entries(replan.content.projectPatch).some(([key, value]) => value !== null && patchSelection[key as keyof typeof patchSelection]) ||
+    [replan.content.milestoneChanges, replan.content.newMilestones, replan.content.taskChanges, replan.content.newTasks].some(items => items.some(item => item.selected)));
+
   async function applyReplan() {
-    if (!replan) return;
+    if (!replan || !hasSelection) return;
     const proposal: ProjectReplanProposal = {
       ...replan.content,
       projectPatch: {
@@ -1493,7 +1573,7 @@ function ProjectAiPlanningPanel({ detail, saving, onApplyAdjustment }: {
         reviewDate: patchSelection.reviewDate ? replan.content.projectPatch.reviewDate : null,
       },
     };
-    if (await onApplyAdjustment({ projectId: detail.project.id, trigger: trigger.trim(), proposal, model: replan.model, tokenUsage: replan.tokenUsage })) setOpen(false);
+    if (await onApplyAdjustment({ projectId: detail.project.id, trigger: trigger.trim(), expectedUpdatedAt: basedOn, proposal, model: replan.model, tokenUsage: replan.tokenUsage })) setOpen(false);
   }
 
   function updateReplanList<Key extends "milestoneChanges" | "newMilestones" | "taskChanges" | "newTasks">(key: Key, index: number, patch: Partial<ProjectReplanProposal[Key][number]>) {
@@ -1502,29 +1582,30 @@ function ProjectAiPlanningPanel({ detail, saving, onApplyAdjustment }: {
   }
 
   return <section className="project-ai-planning-bar" id="project-ai-planning">
-    <div><span>滚动校准</span><strong>出现新事实时，再调整范围、节点或已有行动。</strong><p>下一行动建议已移到当前任务线的行动填写处，避免并行分支互相干扰。</p></div>
-    <div><Button variant="primary" onClick={() => { setOpen(true); setError(""); setReplan(null); }}>报告变化</Button></div>
-    {open && <div className="project-ai-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target && !busy && !saving) setOpen(false); }}><section className="project-ai-modal" role="dialog" aria-modal="true"><header><div><span>DeepSeek API</span><h2>报告变化并重排</h2></div><IconButton aria-label="关闭规划窗口" size="small" variant="ghost" disabled={busy || saving} onClick={() => setOpen(false)}>×</IconButton></header>
+    <div><span>计划调整</span><strong>出现新事实时，再调整范围、节点或已有行动。</strong><p>下一行动建议已移到当前任务线的行动填写处，避免并行分支互相干扰。</p></div>
+    <div><Button variant="primary" onClick={() => { setAsabaSuggestion(""); setFromAsaba(false); setOpen(true); setError(""); setReplan(null); }}>报告变化</Button></div>
+    {open && <div className="project-ai-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target && !busy && !saving) setOpen(false); }}><section className="project-ai-modal" role="dialog" aria-modal="true" aria-label="报告变化并重排"><header><div><span>DeepSeek API</span><h2>报告变化并重排</h2></div><IconButton aria-label="关闭规划窗口" size="small" variant="ghost" disabled={busy || saving} onClick={() => setOpen(false)}>×</IconButton></header>
       <aside className="project-ai-scope"><strong>本次将发送</strong><p>当前项目、路线、行动、全部“已积累”、最近 20 条记录、本次投入约束和你输入的新事实。超过上限时先移除最旧过程记录，不会静默省略积累。</p></aside>
+      {!replan && asabaSuggestion && <p><strong>浅羽建议 · 待核对</strong> {asabaSuggestion}</p>}
       {!replan && <label><span>这次的目标与投入约束 · 可选</span><textarea disabled={busy} value={effortAndOutcome} onChange={(event) => setEffortAndOutcome(event.target.value)} placeholder="例如：现在只有半小时；只求够用，先沿用已有资料，不加新阶段。" /></label>}
-      {!replan && <><label><span>发生了什么变化？</span><textarea autoFocus value={trigger} onChange={(event) => setTrigger(event.target.value)} placeholder="例如：导师通知开题答辩提前到九月中下旬；这是已经确认的新截止。" /></label><Button variant="primary" disabled={busy || !trigger.trim()} onClick={() => void generateReplan()}>{busy ? "正在生成重排草案…" : "生成可编辑草案"}</Button></>}
+      {!replan && <><label><span>发生了什么变化？</span><textarea autoFocus disabled={busy} value={trigger} onChange={(event) => setTrigger(event.target.value)} placeholder="例如：导师通知开题答辩提前到九月中下旬；这是已经确认的新截止。" /></label><Button variant="primary" disabled={busy || !trigger.trim()} onClick={() => void generateReplan()}>{busy ? "正在生成重排草案…" : "生成可编辑草案"}</Button></>}
       {error && <p className="project-ai-error">{error}<Button size="small" variant="danger" onClick={() => void generateReplan()}>重试</Button></p>}
       {replan && <div className="project-ai-replan-preview"><header><div><strong>{replan.content.summary}</strong><small>{replan.model} · {replan.tokenUsage.totalTokens} tokens</small></div></header>
-        <section><h3>项目字段</h3>{(["outcome", "targetDate", "reviewDate"] as const).map((key) => replan.content.projectPatch[key] !== null && <label className="project-ai-check-row" key={key}><input type="checkbox" checked={patchSelection[key]} onChange={(event) => setPatchSelection({ ...patchSelection, [key]: event.target.checked })} /><span><strong>{key === "outcome" ? "核心结果" : key === "targetDate" ? "项目截止" : "下次校准"}</strong><input value={replan.content.projectPatch[key] || ""} onChange={(event) => setReplan({ ...replan, content: { ...replan.content, projectPatch: { ...replan.content.projectPatch, [key]: event.target.value } } })} /></span></label>)}</section>
-        <ReplanList title="节点调整" items={replan.content.milestoneChanges} onChange={(index, patch) => updateReplanList("milestoneChanges", index, patch)} />
+        <section><h3>项目字段</h3>{(["outcome", "targetDate", "reviewDate"] as const).map((key) => replan.content.projectPatch[key] !== null && <label className="project-ai-check-row" key={key}><input type="checkbox" checked={patchSelection[key]} onChange={(event) => setPatchSelection({ ...patchSelection, [key]: event.target.checked })} /><span><strong>{key === "outcome" ? "核心结果" : key === "targetDate" ? "项目目标日期" : "下次校准"}</strong><input value={replan.content.projectPatch[key] || ""} onChange={(event) => setReplan({ ...replan, content: { ...replan.content, projectPatch: { ...replan.content.projectPatch, [key]: event.target.value } } })} /></span></label>)}</section>
+        <ReplanList title="节点调整" items={replan.content.milestoneChanges} existingTitle={(item) => currentMilestones.find(node => node.id === item.id)?.title} onChange={(index, patch) => updateReplanList("milestoneChanges", index, patch)} />
         <ReplanList title="新增节点" items={replan.content.newMilestones} onChange={(index, patch) => updateReplanList("newMilestones", index, patch)} />
-        <ReplanList title="行动调整" items={replan.content.taskChanges} onChange={(index, patch) => updateReplanList("taskChanges", index, patch)} />
+        <ReplanList title="行动调整" items={replan.content.taskChanges} existingTitle={(item) => openTasks.find(task => task.id === item.id)?.title} onChange={(index, patch) => updateReplanList("taskChanges", index, patch)} />
         <ReplanList title="新增行动" items={replan.content.newTasks} onChange={(index, patch) => updateReplanList("newTasks", index, patch)} />
         {(replan.content.assumptions.length > 0 || replan.content.risks.length > 0) && <aside><strong>假设与风险</strong><ul>{[...replan.content.assumptions, ...replan.content.risks].map((item, index) => <li key={index}>{item}</li>)}</ul></aside>}
-        <footer><Button variant="secondary" onClick={() => setReplan(null)}>放弃草案</Button><Button variant="primary" disabled={saving} onClick={() => void applyReplan()}>{saving ? "正在应用…" : "应用已勾选调整"}</Button></footer>
+        <footer><Button variant="secondary" onClick={() => setReplan(null)}>放弃草案</Button><Button variant="primary" disabled={saving || !hasSelection} onClick={() => void applyReplan()}>{saving ? "正在应用…" : "应用已勾选调整"}</Button></footer>
       </div>}
     </section></div>}
   </section>;
 }
 
-function ReplanList<Item extends { selected: boolean; title?: string | null; action?: string; dueDate?: string | null }>({ title, items, onChange }: { title: string; items: Item[]; onChange: (index: number, patch: Partial<Item>) => void }) {
+function ReplanList<Item extends { selected: boolean; title?: string | null; action?: string; dueDate?: string | null }>({ title, items, existingTitle, onChange }: { title: string; items: Item[]; existingTitle?: (item: Item) => string | undefined; onChange: (index: number, patch: Partial<Item>) => void }) {
   if (!items.length) return null;
-  return <section className="project-ai-replan-list"><h3>{title}</h3>{items.map((item, index) => <label className="project-ai-check-row" key={index}><input type="checkbox" checked={item.selected} onChange={(event) => onChange(index, { selected: event.target.checked } as Partial<Item>)} /><span><strong>{item.action ? aiChangeActionLabel(item.action) : "新增"}</strong>{"title" in item && <input value={item.title || ""} onChange={(event) => onChange(index, { title: event.target.value } as Partial<Item>)} />}{"dueDate" in item && <input type="date" value={item.dueDate || ""} onChange={(event) => onChange(index, { dueDate: event.target.value } as Partial<Item>)} />}</span></label>)}</section>;
+  return <section className="project-ai-replan-list"><h3>{title}</h3>{items.map((item, index) => <label className="project-ai-check-row" key={index}><input type="checkbox" checked={item.selected} onChange={(event) => onChange(index, { selected: event.target.checked } as Partial<Item>)} /><span><strong>{item.action ? aiChangeActionLabel(item.action) : "新增"}{existingTitle?.(item) ? " · " + existingTitle(item) : ""}</strong>{"title" in item && <input value={item.title || ""} onChange={(event) => onChange(index, { title: event.target.value } as Partial<Item>)} />}{"dueDate" in item && <input type="date" value={item.dueDate || ""} onChange={(event) => onChange(index, { dueDate: event.target.value } as Partial<Item>)} />}</span></label>)}</section>;
 }
 
 function aiChangeActionLabel(action: string) {
@@ -1635,6 +1716,7 @@ function ProjectEditor({
               definitionOfDone: milestone.definitionOfDone,
               status: milestone.status,
               dueDate: milestone.dueDate,
+              dueDateKind: "target",
               sortOrder: (index + 1) * 10,
               createdAt: now,
               updatedAt: now,
@@ -1648,6 +1730,7 @@ function ProjectEditor({
                 motivation: proposal.project.motivation,
                 category: proposal.project.category,
                 targetDate: proposal.project.targetDate,
+                targetDateKind: "target",
                 reviewDate: proposal.project.reviewDate,
                 planningMode: proposal.planningMode,
               },
@@ -1660,6 +1743,7 @@ function ProjectEditor({
                 definitionOfDone: proposal.firstAction.definitionOfDone,
                 details: proposal.firstAction.details,
                 dueDate: proposal.firstAction.dueDate,
+                dueDateKind: "target",
               },
             });
           }} onCreateStandalone={onCreateStandalone} />}
@@ -1685,8 +1769,8 @@ function ProjectEditor({
               <span>当前状态</span>
               <SelectMenu label="项目状态" value={draft.project.status} onChange={(value) => updateProject("status", value as ProjectStatus)} options={Object.entries(statusLabels).map(([value, label]) => ({ value, label }))} />
             </label>
-            <DateField label="项目目标日期 · 可选" value={draft.project.targetDate} onChange={(value) => updateProject("targetDate", value)} />
-            {draft.project.planningMode === "adaptive" && <DateField label="下次校准日期 · 留空自动计算" value={draft.project.reviewDate} onChange={(value) => updateProject("reviewDate", value)} />}
+            <ProjectDateField label="项目日期" value={draft.project.targetDate} kind={draft.project.targetDateKind} onChange={(targetDate, targetDateKind) => onChange({ ...draft, project: { ...draft.project, targetDate, targetDateKind } })} />
+            <DateField label="下次校准日期 · 可选" value={draft.project.reviewDate} onChange={(value) => updateProject("reviewDate", value)} />
           </div>
 
           {draft.project.id && <section className="project-editor-scope-note"><span>这里保存项目的基本信息</span><p>可以在「规划」里安排当前行动、路线和阶段。</p></section>}
@@ -1702,7 +1786,7 @@ function ProjectEditor({
               <header><strong>开始后的第一步</strong><span>新项目保存后会直接成为当前行动</span></header>
               <div className="project-editor-grid">
                 <label><span>当前状态</span><SelectMenu label="行动状态" value={draft.task.status} onChange={(value) => updateTask("status", value as ProjectTaskStatus)} options={[{ value: "next", label: "当前要做" }, { value: "waiting", label: "等待中" }, { value: "done", label: "已完成" }]} /></label>
-                <DateField label="截止时间" value={draft.task.dueDate} onChange={(value) => updateTask("dueDate", value)} />
+                <ProjectDateField label="行动日期" value={draft.task.dueDate} kind={draft.task.dueDateKind} onChange={(dueDate, dueDateKind) => onChange({ ...draft, task: { ...draft.task, dueDate, dueDateKind } })} />
               </div>
               <label><span>行动名称</span><input value={draft.task.title} onChange={(event) => updateTask("title", event.target.value)} placeholder="例如：精读论文并形成一页方法笔记" /></label>
               <ActionOptionalFields hasContent={Boolean(draft.task.currentFocus || draft.task.definitionOfDone || draft.task.steps.length || draft.task.details)}>
@@ -1711,7 +1795,7 @@ function ProjectEditor({
               <ActionStepEditor steps={draft.task.steps} onChange={(steps) => updateTask("steps", steps)} />
               <label><span>补充说明 · 可选</span><textarea value={draft.task.details} onChange={(event) => updateTask("details", event.target.value)} placeholder="记录资料位置、注意事项，或其他上下文。" /></label>
               </ActionOptionalFields>
-              <ActionEstimateField dueDate={draft.task.dueDate} estimatedDays={draft.task.estimatedDays || 0} title={draft.task.title} currentFocus={draft.task.currentFocus} definitionOfDone={draft.task.definitionOfDone} steps={draft.task.steps} details={draft.task.details} projectTitle={draft.project.title} onChange={(days) => updateTask("estimatedDays", days)} />
+              <ActionEstimateField dateKind={draft.task.dueDateKind} dueDate={scheduledProjectDate(draft.task.dueDate, draft.task.dueDateKind)} estimatedDays={draft.task.estimatedDays || 0} title={draft.task.title} currentFocus={draft.task.currentFocus} definitionOfDone={draft.task.definitionOfDone} steps={draft.task.steps} details={draft.task.details} projectTitle={draft.project.title} onChange={(days) => updateTask("estimatedDays", days)} />
             </section>
 
           </>}
@@ -1724,7 +1808,7 @@ function ProjectEditor({
                   return <article key={milestone.id || `new-stage-${index}`}>
                   <header><span>{draft.project.planningMode === "adaptive" ? milestone.status === "current" ? "当前检查点" : "候选节点" : `阶段 ${index + 1}`}</span><div className="stage-editor-actions"><Button variant="secondary" size="small" iconOnly type="button" disabled={index === 0} onClick={() => moveMilestone(index, -1)} aria-label={`上移节点 ${index + 1}`}>↑</Button><Button variant="secondary" size="small" iconOnly type="button" disabled={index === draft.milestones.length - 1} onClick={() => moveMilestone(index, 1)} aria-label={`下移节点 ${index + 1}`}>↓</Button><Button variant="danger" type="button" onClick={() => void removeMilestoneAt(index)}>删除</Button><SelectMenu label={`节点 ${index + 1} 状态`} value={milestone.status} onChange={(value) => updateMilestone(index, "status", value as Milestone["status"])} options={[{ value: "current", label: draft.project.planningMode === "adaptive" ? "当前检查点" : "当前阶段" }, { value: "planned", label: draft.project.planningMode === "adaptive" ? "候选节点" : "待开始" }, ...(milestone.status === "completed" ? [{ value: "completed", label: "已完成" }] : [])]} /></div></header>
                   <label><span>{draft.project.planningMode === "adaptive" ? "节点名称" : "阶段名称"}</span><input value={milestone.title} onChange={(event) => updateMilestone(index, "title", event.target.value)} placeholder="这一节点要解决什么问题？" /></label>
-                  <DateField label="截止时间" value={milestone.dueDate} onChange={(value) => updateMilestone(index, "dueDate", value)} />
+                  <ProjectDateField label="节点日期" value={milestone.dueDate} kind={milestone.dueDateKind} onChange={(dueDate, dueDateKind) => onChange({ ...draft, milestones: draft.milestones.map((item, slot) => slot === index ? { ...item, dueDate, dueDateKind } : item) })} />
                   <label><span>完成标准</span><textarea value={milestone.definitionOfDone} onChange={(event) => updateMilestone(index, "definitionOfDone", event.target.value)} /></label>
                 </article>;})}
               </div>

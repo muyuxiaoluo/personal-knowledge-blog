@@ -7,6 +7,7 @@ export type ProjectCategory = LifeDomain;
 export type ProjectType = "main" | "side" | "experiment";
 
 export type ProjectPlanningMode = "direct" | "staged" | "adaptive";
+export type ProjectDateKind = "deadline" | "target";
 
 export type MilestoneStatus = "current" | "planned" | "completed" | "superseded";
 
@@ -51,6 +52,7 @@ export type Project = {
   isDraft: boolean;
   sourceNote: string;
   targetDate: string;
+  targetDateKind?: ProjectDateKind | null;
   reviewDate: string;
   completedAt: string | null;
   createdAt: string;
@@ -65,6 +67,7 @@ export type Milestone = {
   definitionOfDone: string;
   status: MilestoneStatus;
   dueDate: string;
+  dueDateKind?: ProjectDateKind | null;
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
@@ -83,6 +86,7 @@ export type ProjectTask = {
   details: string;
   benefit: string;
   dueDate: string;
+  dueDateKind?: ProjectDateKind | null;
   estimatedDays?: number;
   autoSchedulePaused?: boolean;
   status: ProjectTaskStatus;

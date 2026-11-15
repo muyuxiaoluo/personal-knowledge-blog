@@ -1,3 +1,6 @@
+import { workerArchiveContent, type WorkerArchive } from "../app/asaba-worker";
+import { writeAsabaPlan } from "../app/save-asaba-plan";
+import { buildAsabaPlanningInput, buildAsabaProgressInput, previewAsabaPlan, type AsabaAdjustmentRequest, type AsabaPlanningResult, type AsabaPlanSave } from "../app/asaba-planning";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { companionApi } from "./companionApi";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -22,7 +25,8 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import type { ArticleRepository } from "../app/data/article-repository";
+import type { SqliteArticleRepository } from "../app/data/sqlite-article-repository";
+import { useAsabaAttentionBridge } from "./useAsabaAttentionBridge";
 import {
   attachmentUri,
   type AttachmentRepository,
@@ -44,6 +48,7 @@ import {
   cacheDeepSeekModels,
   loadCachedDeepSeekModels,
   loadDeepSeekModelSettings,
+  resolveAvailableDeepSeekModel,
   saveDeepSeekModelSettings,
 } from "../app/ai-model-settings";
 import { rootProjectStatusCounts } from "../app/project-selectors";
@@ -129,7 +134,7 @@ type ArticleEditorSelection = {
 type ArticleEditorHistoryEntry = { article: Article; selection: ArticleEditorSelection | null };
 
 type DesktopWorkbenchProps = {
-  repository: ArticleRepository;
+  repository: SqliteArticleRepository;
   attachmentRepository: AttachmentRepository;
   projectRepository: ProjectRepository;
   workRepository: WorkRepository;
@@ -280,6 +285,7 @@ export function DesktopWorkbench({
   const [organizeId, setOrganizeId] = useState<string | null>(null);
   const [batchMode, setBatchMode] = useState(false);
   const [batchIds, setBatchIds] = useState<Set<string>>(new Set());
+  const [asabaAdjustment, setAsabaAdjustment] = useState<AsabaAdjustmentRequest | null>(null);
   const [requestedProjectId, setRequestedProjectId] = useState<string | null>(null);
   const [requestedTaskId, setRequestedTaskId] = useState<string | null>(null);
   const [selectedArticle, setSelectedArticle] = useState<StoredArticle | null>(null);
@@ -415,6 +421,7 @@ export function DesktopWorkbench({
     setArticles(next);
     return next;
   }, [repository]);
+  const loadProjectArticles = useCallback((id: string) => repository.listProjectArticleSummaries(id), [repository]);
 
   const refreshProjects = useCallback(async () => {
     const next = await projectRepository.list();
@@ -427,6 +434,30 @@ export function DesktopWorkbench({
     setStandaloneTasks(standalone);
     return next;
   }, [projectRepository]);
+
+  useAsabaAttentionBridge({
+    ready: !loading, projects: projectDetails, articles, repository, projectRepository, preferences: preferencesRepository,
+    onLink: async () => { await refreshArticles(); onRepositoryChange?.(); },
+    onOpen: async (kind, id) => {
+      if (kind === "project") {
+        if (!await projectRepository.get(id)) throw new Error("项目已发生变化，请刷新后核对。");
+        await invoke("show_main_window");
+        if (!await switchSection("projects")) throw new Error("请先完成当前编辑，再打开项目。");
+        setRequestedProjectId(id);
+      } else if (kind === "task") {
+        if (!workspaceTasks.some(task => task.id === id)) throw new Error("行动已发生变化，请刷新后核对。");
+        await invoke("show_main_window");
+        if (!await switchSection("tasks")) throw new Error("请先完成当前编辑，再打开行动。");
+        setRequestedTaskId(id);
+      } else {
+        const source = await repository.get(id);
+        if (!source) throw new Error("这条收藏已不存在。");
+        await invoke("show_main_window");
+        if (!await switchSection("explore")) throw new Error("请先完成当前编辑，再打开收藏。");
+        await openArticle(source);
+      }
+    },
+  });
 
   const refreshWork = useCallback(async () => {
     const weekStart = startOfLocalWeekDate();
@@ -582,6 +613,9 @@ export function DesktopWorkbench({
         projectStatus: detail.project.status,
         stageTitle: milestone?.title ?? "",
         stageDueDate: milestone?.dueDate ?? "",
+        stageDueDateKind: milestone?.dueDateKind,
+        projectTargetDate: detail.project.targetDate,
+        projectTargetDateKind: detail.project.targetDateKind,
         stageIndex,
         stageCount: activeMilestones.length,
         stageCompletedTasks: stageTasks.filter((item) => item.status === "done").length,
@@ -920,6 +954,75 @@ export function DesktopWorkbench({
     });
   }
 
+  const planningSaves = useRef(new Map<string, Promise<{ projectId?: string }>>());
+
+  async function planWithAsaba(rawRequest: string, projectId: string | null): Promise<AsabaPlanningResult> {
+    const request = rawRequest.trim();
+    if (!request || request.length > 4000) throw new Error("请填写想实现的目标，最多 4000 字。");
+    await projectRepository.list();
+    const details = await projectRepository.listIndexDetails();
+    const eligible = details.filter(({ project }) => !project.isDraft);
+    const model = await resolveAvailableDeepSeekModel("projectCreate", desktopApi.deepseek.apiModels);
+    if (!projectId) {
+      const input = buildAsabaPlanningInput(request, null, eligible);
+      const { content } = await desktopApi.deepseek.planWithAsaba({ model, input });
+      if (content.kind !== "project_progress") return { kind: "plan", draft: previewAsabaPlan(content, eligible) };
+      projectId = content.projectId;
+      if (!projectId) return { kind: "choose_project", projects: eligible.map(({ project: { id, title, outcome } }) => ({ id, title, outcome })) };
+    }
+    const detail = await projectRepository.get(projectId);
+    if (!detail || detail.project.isDraft) throw new Error("当前项目已不可用，请清除关联后重试。");
+    const input = buildAsabaProgressInput(request, detail);
+    const { content: answer } = await desktopApi.deepseek.asabaProgress({ model, input });
+    const canAdjust = detail.project.status !== "completed";
+    const actionDraft = canAdjust && answer.nextAction.trim() ? previewAsabaPlan({ kind: "existing_project", projectId, title: "", outcome: "", reason: answer.summary, questions: answer.unknowns, action: answer.nextAction }, [detail]) : null;
+    return { kind: "progress", projectId, projectTitle: detail.project.title, answer, evidence: input.evidence, actionDraft, canAdjust };
+  }
+
+  function saveAsabaPlan(command: AsabaPlanSave) {
+    const pending = planningSaves.current.get(command.id);
+    if (pending) return pending;
+    const save = commitAsabaPlan(command).finally(() => planningSaves.current.delete(command.id));
+    planningSaves.current.set(command.id, save);
+    return save;
+  }
+
+  async function commitAsabaPlan(command: AsabaPlanSave): Promise<{ projectId?: string }> {
+    const saved = await writeAsabaPlan(projectRepository, (id, text) => saveAsabaNote({ id, text, url: "", projectId: "" }), command);
+    await Promise.all([refreshProjects(), refreshWork()]);
+    setProjectWeekRevision((value) => value + 1);
+    return saved;
+  }
+
+  async function archiveAsabaWorker({ jobId, projectId, action }: WorkerArchive) {
+    if (action.trim().length > 200) throw new Error("行动名称最多 200 字。");
+    const job = (await companionApi.jobs()).find(item => item.id === jobId);
+    if (!job || !job.report || job.agent === "codex" || !["review", "reviewed"].includes(job.state)) throw new Error("没有找到可保存的委托成果。");
+    if (job.state === "reviewed" && job.projectId !== projectId) throw new Error("这份成果已经归档到其他项目。");
+    const report = workerArchiveContent(job);
+    await projectRepository.archiveWorkerReport(projectId, job.id, report.title, report.body, report.urls, action);
+    await companionApi.markArchived(jobId, projectId);
+    await Promise.all([refreshProjects(), refreshWork()]);
+    setProjectWeekRevision(value => value + 1);
+  }
+
+  async function openAsabaAdjustment(command: AsabaAdjustmentRequest) {
+    if (!command.request.trim() || command.request.length > 4000 || command.suggestion.length > 200) throw new Error("调整原因无效，请重新生成建议。");
+    await projectRepository.list();
+    const target = await projectRepository.get(command.projectId);
+    if (!target || target.project.status === "completed" || target.project.isDraft) throw new Error("该项目已不可调整，请重新选择。");
+    await invoke("show_main_window");
+    if (projectEditing) throw new Error("请先保存或关闭正在编辑的项目，再打开计划调整。");
+    if (!await switchSection("projects")) throw new Error("请先结束当前操作，再打开计划调整。");
+    setRequestedProjectId(command.projectId);
+    setAsabaAdjustment(command);
+  }
+
+  async function openAsabaProjectPlanning(projectId: string) {
+    await companionApi.window(true);
+    await emitTo("companion", "asaba-plan-project", { projectId });
+  }
+
   async function saveAsabaNote(note: AsabaNote) {
     if (!/^[0-9a-f-]{36}$/i.test(note.id)) throw new Error("便签编号无效。");
     const text = note.text.trim();
@@ -1218,6 +1321,7 @@ export function DesktopWorkbench({
       details: input.details,
       benefit: "",
       dueDate: input.dueDate,
+      dueDateKind: input.dueDateKind,
       estimatedDays: input.estimatedDays || 0,
       status: input.status || "later",
       waitingFor: "",
@@ -1402,6 +1506,7 @@ export function DesktopWorkbench({
           details: `${input.details}${sourceAppendix}`,
           benefit: "",
           dueDate: input.dueDate,
+          dueDateKind: input.dueDateKind,
           status: "later",
           waitingFor: "",
           resumeAction: "",
@@ -1493,7 +1598,7 @@ export function DesktopWorkbench({
       {activeSession && <GlobalFocusBar session={activeSession} task={workspaceTasks.find((task) => task.id === activeSession.taskId) ?? null} onShow={() => activeSession.taskId ? openTask(activeSession.taskId) : switchSection("tasks")} onPause={() => void stopFocus()} onCorrect={() => setFocusEditorSession(activeSession)} />}
       <Suspense fallback={null}><FocusTools activeSession={activeSession} repository={workRepository} preferencesRepository={preferencesRepository} editorSession={focusEditorSession} onEdit={setFocusEditorSession} historyOpen={focusHistoryOpen} onCloseHistory={() => setFocusHistoryOpen(false)} onChanged={refreshWork} onMessage={showMessage} /></Suspense>
       <ObserverIndicator onOpen={() => void switchSection("observer")} />
-      <Suspense fallback={null}><CompanionBridge projects={projects} tasks={workspaceTasks} articles={articles} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} activeSession={activeSession} onFocus={companionFocus} onError={showMessage} onSaveNote={saveAsabaNote} onAction={async (action: CompanionAction) => {
+      <Suspense fallback={null}><CompanionBridge projects={projects} tasks={workspaceTasks} articles={articles} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} activeSession={activeSession} onFocus={companionFocus} onError={showMessage} onSaveNote={saveAsabaNote} onPlan={planWithAsaba} onOpenAdjustment={openAsabaAdjustment} onArchiveWorker={archiveAsabaWorker} onSavePlan={saveAsabaPlan} onAction={async (action: CompanionAction) => {
         if (action.kind === "prepare_note") {
           const note = await repository.get(action.id);
           if (!note) throw new Error("这篇笔记已不存在。");
@@ -1503,7 +1608,9 @@ export function DesktopWorkbench({
           if (!note) throw new Error("这篇笔记已不存在。");
           await openArticle(note);
         } else if (action.kind === "open_project") {
-          if (!projects.some(project => project.id === action.id)) throw new Error("项目已发生变化，请刷新后再试。");
+          const target = await projectRepository.get(action.id);
+          if (!target) throw new Error("项目已发生变化，请刷新后再试。");
+          await invoke("show_main_window");
           await openProject(action.id);
         } else if (action.kind === "start_task") {
           const task = workspaceTasks.find(task => task.id === action.id && !["done", "cancelled", "waiting"].includes(task.status));
@@ -1557,10 +1664,15 @@ export function DesktopWorkbench({
           today={today}
           repository={projectRepository}
           projects={projects}
-          articles={articles}
+          loadArticles={loadProjectArticles}
+          articlesRevision={articles}
           onOpenArticle={openArticle}
           initialProjectId={requestedProjectId}
+          asabaAdjustment={asabaAdjustment}
+          onConsumeAsabaAdjustment={(id) => setAsabaAdjustment(current => current?.id === id ? null : current)}
           onProjectsChange={refreshProjects}
+          onArchiveWorker={archiveAsabaWorker}
+          onAskAsaba={(id) => void openAsabaProjectPlanning(id).catch(error => showMessage(String(error)))}
           onBackToHall={() => setRequestedProjectId(null)}
           onRemoveTask={removeTask}
           onEditingStateChange={setProjectEditing}
@@ -2355,6 +2467,7 @@ function AiModelSettingsSection() {
     ...models.map((model) => ({ value: model.id, label: model.id })),
   ];
   const featureRows: Array<{ key: keyof DeepSeekModelSettings["overrides"]; label: string; detail: string }> = [
+    { key: "research", label: "研究整理", detail: "根据已取得的公开来源整理调研报告。" },
     { key: "projectCreate", label: "项目创建判断", detail: "默认使用更强模型判断行动/项目与推进方式" },
     { key: "projectReplan", label: "重大计划重排", detail: "处理截止提前、实验失败和导师反馈" },
     { key: "nextAction", label: "下一行动建议", detail: "留空时跟随全局默认" },

@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { companionReadout, companionTodayRecords, type CompanionStatus } from "../app/companion-types";
 import { asabaSpeechSegments } from "../desktop/useAsabaSpeech";
+import { researchIntent, researchQueries } from "../app/asaba-worker";
+
+test("routes explicit public research without treating project progress as a web search", () => {
+  assert.equal(researchIntent("帮我查一下科研项目进度"), null);
+  assert.deepEqual(researchIntent("浅羽，帮我查查定位和 ROS2 岗位"), { topic: "定位和 ROS2 岗位", requiresReview: false });
+  assert.deepEqual(researchIntent("帮我调研结合我的学历的岗位"), { topic: "", requiresReview: true });
+  assert.equal(researchQueries("定位 SLAM 和机器人 ROS2 岗位").length, 4);
+  assert.ok(researchQueries("岗位".repeat(200)).every(query => Array.from(query).length <= 128));
+});
 
 test("work records use the local calendar day and reject invalid timestamps", () => {
   const records = ["2026-11-09T10:00:00+08:00", "2026-11-08T10:00:00+08:00", "bad"].map((occurredAt, index) => ({id:String(index),threadId:"t",title:"a",projectPath:"D:/p",occurredAt,updatedAt:occurredAt,status:"completed",text:"x",limited:false}));

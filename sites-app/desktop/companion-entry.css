@@ -110,7 +110,7 @@ body { color: var(--ui-ink); font: 13px/1.55 "Segoe UI", "Microsoft YaHei UI", s
 .asaba-body { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 9px; padding: 2px; scrollbar-width: thin; scrollbar-color: #bcb1dd transparent; }
 .asaba-body p, .asaba-footer p { margin: 0; overflow-wrap: anywhere; }
 .asaba-actions { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
-.asaba-home-actions { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 7px; padding: 3px 0 4px; }
+.asaba-home-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; padding: 3px 0 4px; }
 .asaba-home-actions .ui-button { position: relative; min-width: 0; min-height: 66px; flex-direction: column; gap: 7px; padding: 9px 3px; border-radius: 16px; font-size: 12px; }
 .asaba-home-actions .ui-button svg { flex-shrink: 0; width: 20px; height: 20px; }
 .asaba-home-actions .asaba-primary { background: linear-gradient(145deg, #8270b3, #65558e); border-color: #75609f; box-shadow: 0 3px 7px #63508720; }
@@ -167,6 +167,15 @@ body { color: var(--ui-ink); font: 13px/1.55 "Segoe UI", "Microsoft YaHei UI", s
 .asaba-focus-start p { font-size: 12px; }
 .asaba-focus-dot { position: absolute; bottom: 9px; right: 23px; width: 8px; height: 8px; background: #779785; border: 2px solid #faf9ff; border-radius: 50%; }
 .asaba-focus-dot.suggestion { background: #cda765; }
+.asaba-attention-dot {
+  position: absolute; right: 21px; top: 30px; width: 10px; height: 10px;
+  background: #9a454b; border: 2px solid #faf9ff; border-radius: 50%; pointer-events: none;
+}
+.asaba-attention-list { display: grid; gap: 10px; }
+.asaba-attention-card { padding: 11px; border: 1px solid var(--ui-border); border-radius: 12px; background: var(--ui-surface); overflow-wrap: anywhere; }
+.asaba-attention-card header { display: grid; gap: 2px; }
+.asaba-attention-card ul { margin: 7px 0; padding-left: 17px; }
+.asaba-attention-card li > .asaba-actions { margin-top: 5px; }
 .asaba-field { display: grid; gap: 4px; }
 .asaba-settings { display: grid; gap: 12px; font-size: 12px; }
 .asaba-settings-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; padding: 3px; background: #ece7f1; border-radius: 13px; }
@@ -222,3 +231,15 @@ body { color: var(--ui-ink); font: 13px/1.55 "Segoe UI", "Microsoft YaHei UI", s
   .asaba-sparkles { display: none; }
   .asaba-smalltalk { animation: none; }
 }
+
+.asaba-planning, .asaba-planning-preview { display: grid; gap: 9px; }
+.asaba-planning label { display: grid; gap: 4px; }
+.asaba-planning .asaba-planning-option { display: flex; align-items: baseline; gap: 6px; }
+.asaba-planning input:not([type="checkbox"]), .asaba-planning textarea { width: 100%; }
+.asaba-planning-preview { border-top: 1px solid var(--ui-border); padding-top: 10px; overflow-wrap: anywhere; }
+.asaba-planning-preview p, .asaba-planning-preview ul { margin: 0; }
+
+.asaba-worker-report, .asaba-worker-save { display: grid; gap: 8px; }
+.asaba-worker-report ul { padding-inline-start: 19px; }
+.asaba-worker-report li { margin-block: 5px; overflow-wrap: anywhere; }
+.asaba-worker-save label { display: flex; gap: 6px; align-items: baseline; }

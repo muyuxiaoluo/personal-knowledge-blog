@@ -69,6 +69,7 @@ export function prepareProjectRoute(
       definitionOfDone: node.definitionOfDone.trim(),
       status: node.status,
       dueDate: node.dueDate.trim(),
+      dueDateKind: node.dueDate === previous?.dueDate ? previous.dueDateKind : "target",
       predecessorIds,
       sortOrder: (completed.length + index + 1) * 10,
       createdAt: previous?.createdAt || now,

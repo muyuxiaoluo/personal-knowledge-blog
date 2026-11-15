@@ -36,7 +36,7 @@ test("completed work and progress records reset inactivity; current branches wit
   const data = input();
   const action = task(); action.status = "done"; action.completedAt = "2026-10-20T04:00:00Z";
   data.projects[0].tasks.push(action);
-  data.projects[0].milestones.push({ id: "m", projectId: "p", title: "验证结论", status: "current", definitionOfDone: "", dueDate: "2026-10-21", sortOrder: 0, createdAt: "", updatedAt: "" });
+  data.projects[0].milestones.push({ id: "m", projectId: "p", title: "验证结论", status: "current", definitionOfDone: "", dueDate: "2026-10-21", dueDateKind: "deadline", sortOrder: 0, createdAt: "", updatedAt: "" });
   data.projects[0].project.reviewDate = "2026-10-22";
   const attention = projectAttention(data)[0];
   assert.equal(attention.idleDays, 2);

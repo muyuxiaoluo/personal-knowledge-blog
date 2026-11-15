@@ -3,6 +3,7 @@ import type {
   ArticleSyncStatus,
   StoredArticle,
 } from "../types";
+import type { AttentionSource } from "../asaba-attention";
 import {
   ArticleRepositoryError,
   sortArticles,
@@ -409,6 +410,47 @@ export class SqliteArticleRepository implements SyncCapableArticleRepository {
     } catch (error) {
       throw new ArticleRepositoryError("读取笔记正文失败", "read_failed", error);
     }
+  }
+
+  async listAttentionSources(): Promise<AttentionSource[]> {
+    await this.initialize();
+    await this.mutationQueue;
+    const rows = await this.database.select<Pick<ArticleRow, "id" | "title" | "tags_json" | "project_id" | "project" | "collection" | "type" | "branch" | "deleted_at" | "version">>(
+      `SELECT id, title, tags_json, project_id, project, collection, type, branch, deleted_at, version
+       FROM articles WHERE collection = 'sources' OR type = '外部资料' ORDER BY updated_at DESC, id`,
+    );
+    return rows.map(row => ({
+      id: row.id, title: row.title, tags: parseStringList(row.tags_json), projectId: row.project_id, project: row.project,
+      collection: row.collection, type: row.type, branch: row.branch, deleted: row.deleted_at !== null, version: row.version,
+    }));
+  }
+
+  async listProjectArticleSummaries(projectId: string): Promise<StoredArticle[]> {
+    await this.initialize();
+    await this.mutationQueue;
+    const summaries = articleColumns.replace("body,", "'' AS body,");
+    const rows = await this.database.select<ArticleRow>(
+      `SELECT ${summaries} FROM articles WHERE project_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC, id LIMIT 12`,
+      [projectId],
+    );
+    return rows.map(rowToArticle);
+  }
+
+  async linkAttentionSource(id: string, version: number, projectId: string, projectTitle: string): Promise<boolean> {
+    await this.initialize();
+    return this.runMutation(async () => {
+      const result = await this.database.execute(
+        `UPDATE articles
+         SET project_id = ?, project = ?, updated_at = ?, version = version + 1, device_id = ?, sync_status = 'pending'
+         WHERE id = ? AND version = ? AND deleted_at IS NULL AND branch != '已归档' AND project_id = '' AND project = ''
+           AND (collection = 'sources' OR type = '外部资料')
+           AND EXISTS (SELECT 1 FROM projects WHERE id = ? AND title = ? AND status = 'active' AND is_draft = 0)`,
+        [projectId, projectTitle, isoDate(this.now()), this.resolvedDeviceId, id, version, projectId, projectTitle],
+      );
+      if (result.rowsAffected !== undefined) return result.rowsAffected > 0;
+      const [row] = await this.database.select<{ project_id: string }>("SELECT project_id FROM articles WHERE id = ? AND deleted_at IS NULL", [id]);
+      return row?.project_id === projectId;
+    });
   }
 
   async save(article: Article): Promise<StoredArticle> {

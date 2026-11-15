@@ -1,3 +1,4 @@
+import type { AsabaPlanRoute, AsabaProgressAnswer } from "../app/asaba-planning";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { DeepSeekModeOptions, DeepSeekSnapshot } from "../app/ai-types";
@@ -67,6 +68,8 @@ export const desktopApi = {
   deepseek: {
     planGlobally: (request: { model: string; input: unknown }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<GlobalPlanningProposal>>("deepseek_api_global_planning", { request }); },
     apiModels: () => { requireTauri(); return invoke<DeepSeekModel[]>("deepseek_api_list_models"); },
+    asabaProgress: (request: { model: string; input: unknown }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<AsabaProgressAnswer>>("deepseek_api_asaba_progress", { request }); },
+    planWithAsaba: (request: { model: string; input: unknown }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<AsabaPlanRoute>>("deepseek_api_asaba_plan", { request }); },
     createProjectPlan: (request: { model: string; input: unknown; allowedMilestoneIds?: string[]; allowedTaskIds?: string[] }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<ProjectCreationProposal>>("deepseek_api_project_create", { request }); },
     projectWeek: (request: { model: string; input: unknown }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<WeekAiDraft>>("deepseek_api_project_week", { request }); },
     weekChange: (request: { model: string; input: unknown }) => { requireTauri(); return invoke<DeepSeekStructuredResponse<{ days: WeekDayChange[]; question: string }>>("deepseek_api_week_change", { request }); },

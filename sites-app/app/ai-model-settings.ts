@@ -8,6 +8,7 @@ export const DEFAULT_DEEPSEEK_MODEL_SETTINGS: DeepSeekModelSettings = {
   defaultModel: "deepseek-flash",
   overrides: {
     projectCreate: "",
+    research: "",
     projectReplan: "",
     nextAction: "",
     globalPlanning: "",
@@ -24,6 +25,7 @@ export function loadDeepSeekModelSettings(): DeepSeekModelSettings {
       defaultModel: normalizedModel(parsed.defaultModel) || DEFAULT_DEEPSEEK_MODEL_SETTINGS.defaultModel,
       overrides: {
         projectCreate: normalizedModel(overrides.projectCreate),
+        research: normalizedModel(overrides.research),
         projectReplan: normalizedModel(overrides.projectReplan),
         nextAction: normalizedModel(overrides.nextAction),
         globalPlanning: normalizedModel(overrides.globalPlanning),
@@ -41,6 +43,7 @@ export function saveDeepSeekModelSettings(settings: DeepSeekModelSettings) {
     defaultModel: normalizedModel(settings.defaultModel) || DEFAULT_DEEPSEEK_MODEL_SETTINGS.defaultModel,
     overrides: {
       projectCreate: normalizedModel(settings.overrides.projectCreate),
+      research: normalizedModel(settings.overrides.research),
       projectReplan: normalizedModel(settings.overrides.projectReplan),
       nextAction: normalizedModel(settings.overrides.nextAction),
       globalPlanning: normalizedModel(settings.overrides.globalPlanning),

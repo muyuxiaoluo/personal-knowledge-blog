@@ -3,10 +3,9 @@ use super::{
     companion_codex::clip,
 };
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
 use serde_json::json;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Mutex,
     time::Duration,
@@ -17,12 +16,18 @@ use uuid::Uuid;
 
 #[path = "companion_worker_codex.rs"]
 mod codex;
+#[path = "companion_worker_research.rs"]
+mod research;
+#[path = "companion_worker_document.rs"]
+mod document;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum Agent {
     #[default]
     Codex,
+    Research,
+    Document,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,16 +63,27 @@ pub(crate) struct Job {
     #[serde(alias = "turnId")]
     run_id: Option<String>,
     pub updated_at: String,
+    #[serde(default)]
+    attempt: u32,
     state: String,
     pub summary: Option<String>,
     commands: Vec<String>,
     diff: Option<String>,
     error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    progress: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    report: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    research: Option<research::Research>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    document: Option<document::Document>,
 }
 impl Job {
     pub(super) fn codex_session(&self) -> Option<&str> {
         match self.agent {
             Agent::Codex => self.session_id.as_deref(),
+            _ => None,
         }
     }
 
@@ -75,6 +91,12 @@ impl Job {
         matches!(self.state.as_str(), "queued" | "running" | "recovering")
     }
     pub(super) fn label(&self) -> &str {
+        if self.agent != Agent::Codex {
+            return match self.state.as_str() {
+                "queued" => "等候执行", "running" => "处理中", "review" => "成果待确认",
+                "reviewed" => "已归档", "cancelled" => "已取消", "interrupted" => "已中断", _ => "处理失败",
+            };
+        }
         match self.state.as_str() {
             "queued" => "准备副本",
             "running" => "排查中",
@@ -99,6 +121,7 @@ struct Store {
 struct Inner {
     store: Option<Store>,
     cancellation: HashMap<String, watch::Sender<bool>>,
+    active_at_startup: HashSet<String>,
 }
 #[derive(Default)]
 pub(crate) struct AsabaWorkers(Mutex<Inner>);
@@ -111,7 +134,9 @@ fn with_state<T>(
     let state = app.state::<AsabaWorkers>();
     let mut state = state.0.lock().map_err(|_| "委托记录暂不可用")?;
     if state.store.is_none() {
-        state.store = Some(read_json(&path)?);
+        let store: Store = read_json(&path)?;
+        state.active_at_startup = store.jobs.iter().filter(|job| job.active()).map(|job| job.id.clone()).collect();
+        state.store = Some(store);
     }
     action(&mut state, &path)
 }
@@ -144,6 +169,7 @@ pub(super) fn jobs(app: &tauri::AppHandle, project: Option<&str>) -> Result<Vec<
             .filter(|job| project.is_none_or(|project| job.project_id == project))
             .rev()
             .cloned()
+            .map(|mut job| { job.research = None; job.document = None; job })
             .collect())
     })
 }
@@ -163,6 +189,23 @@ pub(crate) fn asaba_jobs(
 ) -> Result<Vec<Job>, String> {
     access(&window)?;
     jobs(&app, project_id.as_deref())
+}
+
+#[tauri::command]
+pub(crate) fn asaba_attention_jobs(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<Vec<serde_json::Value>, String> {
+    if window.label() != "main" {
+        return Err("请从工作台检查委托变化。".into());
+    }
+    with_state(&app, |inner, _| {
+        Ok(inner.store.as_ref().unwrap().jobs.iter().rev().map(|job| json!({
+            "id": job.id, "title": job.title, "agent": job.agent, "state": job.state,
+            "updatedAt": job.updated_at, "attempt": job.attempt,
+            "activeAtStartup": inner.active_at_startup.contains(&job.id),
+        })).collect())
+    })
 }
 
 #[tauri::command]
@@ -362,6 +405,7 @@ pub(crate) async fn asaba_delegate(
     request: Request,
 ) -> Result<Job, String> {
     pet_window(&window)?;
+    if request.agent != Agent::Codex { return Err("请使用对应的委托入口。".into()); }
     Uuid::parse_str(&request.request_id).map_err(|_| "委托编号无效")?;
     if let Some(existing) = with_state(&app, |inner, _| {
         Ok(inner
@@ -422,11 +466,13 @@ pub(crate) async fn asaba_delegate(
                 .map(|job| job.workspace_id.clone().unwrap_or_else(|| job.id.clone())),
             run_id: None,
             updated_at: chrono::Utc::now().to_rfc3339(),
+            attempt: 0,
             state: "queued".into(),
             summary: None,
             commands: vec![],
             diff: None,
             error: None,
+            progress: None, report: None, research: None, document: None,
         };
         next.jobs.push(job.clone());
         write_json(path, &next)?;
@@ -460,6 +506,138 @@ pub(crate) async fn asaba_delegate(
     Ok(job)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReadonlyRequest<T> {
+    request_id: String,
+    project_id: Option<String>,
+    input: T,
+}
+
+#[tauri::command]
+pub(crate) fn asaba_research(
+    app: tauri::AppHandle, window: tauri::WebviewWindow, mut request: ReadonlyRequest<research::Research>,
+) -> Result<String, String> {
+    access(&window)?;
+    research::validate(&request.input)?;
+    request.input.clear_checkpoint();
+    let title = clip(&request.input.topic, 100);
+    start_readonly(&app, request.request_id, request.project_id, title, Some(request.input), None)
+}
+
+#[tauri::command]
+pub(crate) async fn asaba_check_document(
+    app: tauri::AppHandle, window: tauri::WebviewWindow, request: ReadonlyRequest<document::Document>,
+) -> Result<String, String> {
+    access(&window)?;
+    document::validate(&request.input)?;
+    start_readonly(&app, request.request_id, request.project_id, request.input.title(), None, Some(request.input))
+}
+
+fn start_readonly(
+    app: &tauri::AppHandle, id: String, project_id: Option<String>, title: String,
+    research: Option<research::Research>, document: Option<document::Document>,
+) -> Result<String, String> {
+    Uuid::parse_str(&id).map_err(|_| "委托编号无效")?;
+    let project_id = project_id.unwrap_or_default();
+    if project_id.len() > 300 { return Err("项目编号无效".into()); }
+    let agent = if research.is_some() { Agent::Research } else { Agent::Document };
+    let scheduled = with_state(app, |inner, path| {
+        let current = inner.store.as_ref().unwrap();
+        if let Some(job) = current.jobs.iter().find(|job| job.id == id) {
+            if job.agent != agent { return Err("委托编号已使用。".into()); }
+            return Ok(None);
+        }
+        let job = Job {
+            id: id.clone(), note_id: String::new(), project_id, title,
+            description: research.as_ref().map(|input| input.topic.clone()).unwrap_or_default(),
+            repository: String::new(), agent, workspace_mode: WorkspaceMode::Copy,
+            had_local_changes: false, previous_job_id: None, base: None, session_id: None,
+            workspace_id: None, run_id: None, updated_at: chrono::Utc::now().to_rfc3339(),
+            attempt: 0, state: "queued".into(), summary: None, commands: vec![], diff: None, error: None,
+            progress: None, report: None, research, document,
+        };
+        let mut next = current.clone();
+        next.jobs.push(job.clone());
+        write_json(path, &next)?;
+        inner.store = Some(next);
+        let (tx, rx) = watch::channel(false);
+        inner.cancellation.insert(id.clone(), tx);
+        Ok(Some((job, rx)))
+    })?;
+    if let Some((job, rx)) = scheduled { spawn_readonly(app, job, rx); }
+    Ok(id)
+}
+
+fn retry_readonly(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
+    let scheduled = with_state(app, |inner, path| {
+        if inner.cancellation.contains_key(id) { return Ok(None); }
+        let mut next = inner.store.as_ref().unwrap().clone();
+        let job = next.jobs.iter_mut().find(|job| job.id == id).ok_or("委托不存在")?;
+        if job.agent == Agent::Codex || !matches!(job.state.as_str(), "failed" | "interrupted" | "cancelled") {
+            return Err("该委托当前无法续做。".into());
+        }
+        job.state = "queued".into();
+        job.attempt += 1;
+        job.error = None;
+        job.progress = None;
+        job.updated_at = chrono::Utc::now().to_rfc3339();
+        let job = job.clone();
+        write_json(path, &next)?;
+        inner.store = Some(next);
+        let (tx, rx) = watch::channel(false);
+        inner.cancellation.insert(id.to_owned(), tx);
+        Ok(Some((job, rx)))
+    })?;
+    if let Some((job, rx)) = scheduled { spawn_readonly(app, job, rx); }
+    Ok(())
+}
+
+fn spawn_readonly(app: &tauri::AppHandle, job: Job, mut rx: watch::Receiver<bool>) {
+    let app = app.clone();
+    let _ = app.emit("asaba-jobs-changed", ());
+    tauri::async_runtime::spawn(async move {
+        let execute = async {
+            update(&app, &job.id, |job| job.state = "running".into())?;
+            match job.agent {
+                Agent::Research => research::run(&app, &job).await,
+                Agent::Document => document::run(&app, &job).await,
+                Agent::Codex => unreachable!(),
+            }
+        };
+        let cancel = rx.wait_for(|cancel| *cancel);
+        let result = match futures_util::future::select(std::pin::pin!(cancel), std::pin::pin!(execute)).await {
+            futures_util::future::Either::Left(_) => None,
+            futures_util::future::Either::Right((result, _)) => Some(result),
+        };
+        let _ = update(&app, &job.id, |job| {
+            job.progress = None;
+            match result {
+                None => job.state = "cancelled".into(),
+                Some(Ok(report)) => { job.report = Some(report); job.state = "review".into(); },
+                Some(Err(error)) => { job.state = "failed".into(); job.error = Some(clip(&error, 600)); },
+            }
+        });
+        let _ = with_state(&app, |inner, _| { inner.cancellation.remove(&job.id); Ok(()) });
+        let _ = app.emit("asaba-jobs-changed", ());
+    });
+}
+
+#[tauri::command]
+pub(crate) fn asaba_mark_archived(
+    app: tauri::AppHandle, window: tauri::WebviewWindow, id: String, project_id: String,
+) -> Result<(), String> {
+    if window.label() != "main" || project_id.is_empty() || project_id.len() > 300 {
+        return Err("无效的归档操作。".into());
+    }
+    update(&app, &id, |job| {
+        if job.agent != Agent::Codex && job.state == "review" && job.report.is_some() {
+            job.project_id = project_id;
+            job.state = "reviewed".into();
+        }
+    })
+}
+
 fn workspace(app: &tauri::AppHandle, job: &Job) -> Result<PathBuf, String> {
     if job.workspace_mode == WorkspaceMode::Original {
         return Ok(PathBuf::from(&job.repository));
@@ -490,6 +668,7 @@ async fn run(
     update(app, &job.id, |job| job.base = Some(base.clone()))?;
     let result = match job.agent {
         Agent::Codex => codex::run(app, job, cancel, &directory).await?,
+        _ => return Err("委托类型与代码入口不匹配。".into()),
     };
     finalize(app, job, &base, &result).await
 }
@@ -584,11 +763,27 @@ pub(crate) fn recover(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let pending = jobs(&app, None).unwrap_or_default();
         for job in pending.iter().filter(|job| job.active()) {
+            if job.agent != Agent::Codex {
+                let _ = with_state(&app, |inner, path| {
+                    if inner.cancellation.contains_key(&job.id) { return Ok(()); }
+                    let mut next = inner.store.as_ref().unwrap().clone();
+                    if let Some(saved) = next.jobs.iter_mut().find(|saved| saved.id == job.id && saved.active()) {
+                        saved.state = "interrupted".into();
+                        saved.progress = None;
+                        write_json(path, &next)?;
+                        inner.store = Some(next);
+                    }
+                    Ok(())
+                });
+                let _ = app.emit("asaba-jobs-changed", ());
+                continue;
+            }
             let _ = update(&app, &job.id, |job| job.state = "recovering".into());
             let result = async {
                 let base = job.base.as_ref().ok_or("缺少仓库基准提交。")?;
                 let state = match job.agent {
                     Agent::Codex => codex::recover(&app, job).await?,
+                    _ => unreachable!(),
                 };
                 finalize(&app, job, base, &state).await
             }
@@ -620,8 +815,9 @@ pub(crate) fn asaba_job_action(
                 .send(true)
                 .map_err(|_| "这笔委托已经结束。".into())
         }),
+        "retry" => retry_readonly(&app, &id),
         "reviewed" => update(&app, &id, |job| {
-            if job.state == "review" {
+            if job.agent == Agent::Codex && job.state == "review" {
                 job.state = "reviewed".into();
             }
         }),
@@ -633,6 +829,7 @@ pub(crate) fn asaba_job_action(
             let session = job.session_id.as_deref().ok_or("委托尚未创建会话")?;
             match job.agent {
                 Agent::Codex => codex::open_session(&app, session),
+                _ => Err("这笔委托没有 Codex 会话。".into()),
             }
         }
         _ => Err("未知的委托操作。".into()),

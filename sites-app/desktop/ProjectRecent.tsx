@@ -1,3 +1,4 @@
+import type { WorkerArchive } from "../app/asaba-worker";
 import { useEffect, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -9,17 +10,28 @@ import { AsabaJobCard, AsabaShotPreview } from "./AsabaDetails";
 import { companionApi } from "./companionApi";
 import { Button } from "./DesktopControls";
 import { decodeTaskProgressLog } from "../app/home-workflow";
+import { isSourceArticle } from "../app/article-helpers";
 
-export function ProjectRecent({ detail, articles, onOpenArticle, onPlan }: {
+export function ProjectRecent({ detail, loadArticles, articlesRevision, onOpenArticle, onPlan, onArchive }: {
   detail: ProjectDetail;
-  articles: StoredArticle[];
+  loadArticles: (projectId: string) => Promise<StoredArticle[]>;
+  articlesRevision: StoredArticle[];
   onOpenArticle: (article: StoredArticle) => Promise<void>;
   onPlan: () => void;
+  onArchive: (request: WorkerArchive) => Promise<void>;
 }) {
   const { project, logs, tasks } = detail;
   const [jobs, setJobs] = useState<AsabaJob[]>([]);
   const [repository, setRepository] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [notes, setNotes] = useState<StoredArticle[]>([]);
+  useEffect(() => {
+    let active = true;
+    void loadArticles(project.id).then(articles => {
+      if (active) setNotes(articles);
+    }).catch(error => { if (active) setError(String(error)); });
+    return () => { active = false; };
+  }, [project.id, loadArticles, articlesRevision]);
   useEffect(() => {
     if (!isTauri()) return;
     let active = true;
@@ -37,8 +49,7 @@ export function ProjectRecent({ detail, articles, onOpenArticle, onPlan }: {
     } catch (e) { setError(String(e)); }
   }
 
-  const notes = articles.filter(article => article.projectId === project.id && !article.storage.deletedAt);
-  const latestJobs = [...new Map(jobs.slice().reverse().map(job => [job.noteId, job])).values()];
+  const latestJobs = [...new Map(jobs.slice().reverse().map(job => [job.agent === "codex" ? job.noteId : job.id, job])).values()];
   const waiting = tasks.filter(task => task.status === "waiting");
   const next = tasks.filter(task => task.status === "next");
   const recent = [
@@ -51,7 +62,7 @@ export function ProjectRecent({ detail, articles, onOpenArticle, onPlan }: {
   return <div className="project-recent">
     <section>
       <h2>等我处理</h2>
-      {latestJobs.filter(job => job.state === "review").map(job => <AsabaJobCard key={job.id} job={job} onReviewed={() => reviewed(job)} />)}
+      {latestJobs.filter(job => job.state === "review").map(job => <AsabaJobCard key={job.id} job={job} projects={[{ id: project.id, title: project.title }]} onArchive={onArchive} onReviewed={job.agent === "codex" ? () => reviewed(job) : undefined} />)}
       {next.slice(0, 3).map(task => <p key={task.id}><Button variant="ghost" size="small" onClick={onPlan}>{task.title}</Button></p>)}
       {!next.length && !latestJobs.some(job => job.state === "review") && <p>暂无需要你处理的事项。</p>}
       {!!waiting.length && <details><summary>等外部条件 · {waiting.length} 项</summary>{waiting.map(task => <p key={task.id}>{task.title} · {task.waitingFor || "等待条件尚未注明"}</p>)}</details>}
@@ -63,7 +74,7 @@ export function ProjectRecent({ detail, articles, onOpenArticle, onPlan }: {
         if (entry.kind === "job") return <AsabaJobCard key={entry.value.id} job={entry.value} />;
         if (entry.kind === "log") return <article key={entry.value.id}><small>{new Date(entry.at).toLocaleDateString("zh-CN")} · 项目记录</small><p>{decodeTaskProgressLog(entry.value.body)?.result ?? entry.value.body.replace(/^<!--[\s\S]*?-->\s*/, "")}</p></article>;
         const shotId = entry.value.source.find(source => source.startsWith("浅羽画面 · "))?.split(" · ")[1];
-        return <article key={entry.value.id}><small>{new Date(entry.at).toLocaleDateString("zh-CN")} · {entry.value.source.includes("浅羽随手记") ? "浅羽随手记" : "关联笔记"}</small>
+        return <article key={entry.value.id}><small>{new Date(entry.at).toLocaleDateString("zh-CN")} · {isSourceArticle(entry.value) ? "关联收藏" : entry.value.source.includes("浅羽随手记") ? "浅羽随手记" : "关联笔记"}</small>
           <p><Button variant="ghost" size="small" onClick={() => void onOpenArticle(entry.value)}>{entry.value.title}</Button></p>
           {shotId && <AsabaShotPreview id={shotId} />}
         </article>;

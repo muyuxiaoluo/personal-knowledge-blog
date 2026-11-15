@@ -5,7 +5,9 @@ import { initialProjectSeeds } from "../app/data/project-seeds";
 import { SqliteProjectRepository } from "../app/data/sqlite-project-repository";
 import { SqliteWorkRepository } from "../app/data/sqlite-work-repository";
 import { DashboardRepository } from "../app/data/dashboard-repository";
-import { rootProjectStatusCounts } from "../app/project-selectors";
+import { projectProgress, rootProjectStatusCounts } from "../app/project-selectors";
+import { buildAsabaProgressInput, previewAsabaPlan, type AsabaPlanSave } from "../app/asaba-planning";
+import { writeAsabaPlan } from "../app/save-asaba-plan";
 import type {
   SqliteDatabase,
   SqliteExecuteResult,
@@ -35,6 +37,86 @@ class NodeSqliteAdapter implements SqliteDatabase {
     return this.database.prepare(sql).all(...bindValues) as T[];
   }
 }
+
+test("archives a worker report and optional action exactly once without replacing the current action", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), { seedProjects: initialProjectSeeds });
+  const project = (await repository.list()).find(item => item.title === "机器人岗位投递与面试迭代")!;
+  assert.ok(project.nextTask);
+  const id = crypto.randomUUID();
+  const link = "https://example.org/jobs/ros";
+  await repository.archiveWorkerReport(project.id, id, "ROS2 调研", "岗位 A 要求熟悉 ROS2 [s1]", [link], "核对岗位");
+  await repository.archiveWorkerReport(project.id, id, "重复归档", "第二次请求", [], "重复行动");
+  const detail = (await repository.get(project.id))!;
+  const saved = detail.accumulations.filter(item => item.id === "asaba-worker-" + id);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].reference, link);
+  assert.equal(saved[0].title, "ROS2 调研");
+  const input = buildAsabaProgressInput("ROS2 调研里写了什么？", detail);
+  assert.ok(input.evidence.some(item => item.id === "accumulation:" + saved[0].id && item.text.includes("岗位 A")));
+  assert.equal(detail.tasks.find(task => task.id === project.nextTask?.id)?.status, "next");
+  assert.equal(detail.tasks.filter(task => task.title === "核对岗位" && task.status === "later").length, 1);
+  await repository.updateProjectStatus(project.id, "completed", "验收");
+  await assert.rejects(repository.archiveWorkerReport(project.id, crypto.randomUUID(), "新成果", "内容", [], ""), /归档或删除/);
+  database.close();
+});
+
+test("浅羽 confirms all four destinations without overwriting existing commitments on retry", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), { seedProjects: [] });
+  const notes = new Map<string, string>();
+  const saveNote = async (id: string, text: string) => notes.set(id, text);
+  const command: AsabaPlanSave = {
+    id: crypto.randomUUID(), request: "我想为明年求职做准备", attachMilestone: false,
+    draft: { kind: "new_project", title: "求职准备", outcome: "整理出可投递的求职材料", reason: "需要持续推进",
+      questions: ["目标岗位？"], action: "整理已有经历", projectId: null, projectTitle: "", milestone: null },
+  };
+  const { projectId } = await writeAsabaPlan(repository, saveNote, command);
+  assert.ok(projectId);
+  await writeAsabaPlan(repository, saveNote, command);
+  const project = (await repository.get(projectId))!;
+  assert.equal(project.project.targetDate, "");
+  assert.equal(project.tasks.length, 1);
+  assert.equal(project.tasks[0].status, "next");
+  const addition: AsabaPlanSave = {
+    ...command, id: crypto.randomUUID(),
+    draft: previewAsabaPlan({ ...command.draft, kind: "existing_project", projectId, action: "列出意向岗位" }, [project]),
+  };
+  await writeAsabaPlan(repository, saveNote, addition);
+  await writeAsabaPlan(repository, saveNote, addition);
+  assert.deepEqual((await repository.get(projectId))?.tasks.map(task => [task.title, task.status]),
+    [["整理已有经历", "next"], ["列出意向岗位", "later"]]);
+  assert.throws(() => previewAsabaPlan({ ...addition.draft, projectId: "unknown" }, [project]), /已不可用/);
+  await repository.updateProjectStatus(projectId, "completed", "完成");
+  await assert.rejects(writeAsabaPlan(repository, saveNote, { ...addition, id: crypto.randomUUID() }), /已不可用/);
+  await repository.removeProject(projectId);
+  await assert.rejects(writeAsabaPlan(repository, saveNote, { ...addition, id: crypto.randomUUID() }), /已不可用/);
+  await writeAsabaPlan(repository, saveNote, { ...command, id: crypto.randomUUID(), draft: { ...command.draft, kind: "action" } });
+  assert.equal((await repository.listStandaloneTasks())[0].title, "整理已有经历");
+  await writeAsabaPlan(repository, saveNote, { ...command, draft: { ...command.draft, kind: "note" } });
+  assert.equal(notes.get(command.id), command.request);
+  database.close();
+});
+
+test("staged and adaptive goals can wait for a route or feedback without inventing a date", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), { seedProjects: [] });
+  const request = "建立一个可长期探索的方向";
+  const { projectId } = await writeAsabaPlan(repository, async () => {}, {
+    id: crypto.randomUUID(), request, attachMilestone: false,
+    draft: { kind: "new_project", title: "探索主题", outcome: request, reason: "目标明确",
+      questions: [], action: "", projectId: null, projectTitle: "", milestone: null },
+  });
+  const { project } = (await repository.get(projectId!))!;
+  for (const planningMode of ["staged", "adaptive"] as const) {
+    await repository.saveWorkspace({ ...project, planningMode }, [], null);
+    const [summary] = await repository.list();
+    assert.equal(projectProgress(summary), "路径待明确");
+    assert.equal(summary.reviewDate, "");
+  }
+  assert.equal(projectProgress({ status: "paused", nextTask: null }), "已暂停");
+  database.close();
+});
 
 test("a week draft is atomic and a stale confirmation cannot overwrite a newer arrangement", async () => {
   const database = new DatabaseSync(":memory:");
@@ -337,7 +419,7 @@ test("creates and continues a standalone action, then moves it into and out of a
   assert.equal((await repository.listStandaloneTasks()).some((item) => item.id === task.id), true);
 });
 
-test("switches staged work to direct without deleting history and recalculates an adaptive checkpoint", async () => {
+test("switches staged work to direct without deleting history and allows adaptive work without a review date", async () => {
   const repository = new SqliteProjectRepository(new NodeSqliteAdapter(new DatabaseSync(":memory:")), {
     seedProjects: initialProjectSeeds,
     clock: () => new Date("2026-08-13T10:00:00.000Z"),
@@ -360,7 +442,7 @@ test("switches staged work to direct without deleting history and recalculates a
   await repository.saveWorkspace({ ...direct.project, planningMode: "adaptive", targetDate: "2026-08-30", reviewDate: "" }, [...direct.milestones, current, future], null);
   const adaptive = await repository.get(direct.project.id);
   assert.equal(adaptive?.project.planningMode, "adaptive");
-  assert.equal(adaptive?.project.reviewDate, "2026-08-18");
+  assert.equal(adaptive?.project.reviewDate, "");
   assert.equal(adaptive?.milestones.find((milestone) => milestone.status === "planned")?.title, "完成论文主体");
 });
 
@@ -370,6 +452,7 @@ test("applies only selected AI adjustments atomically and records the complete r
     seedProjects: initialProjectSeeds,
     clock: () => new Date("2026-08-13T10:00:00.000Z"),
   });
+  await repository.confirmProject("project-research-direction");
   const detail = await repository.get("project-research-direction");
   assert.ok(detail);
   const oldTask = detail.tasks[0];
@@ -377,6 +460,7 @@ test("applies only selected AI adjustments atomically and records the complete r
   assert.ok(oldTask && current);
   await repository.applyProjectAdjustment({
     projectId: detail.project.id,
+    expectedUpdatedAt: detail.project.updatedAt,
     trigger: "开题提前到九月中下旬",
     model: "deepseek-v4-pro",
     tokenUsage: { inputTokens: 120, outputTokens: 80, totalTokens: 200 },
@@ -398,6 +482,43 @@ test("applies only selected AI adjustments atomically and records the complete r
   const revision = saved?.logs.find((log) => log.kind === "plan_revision");
   assert.ok(revision?.body.includes("deepseek-v4-pro"));
   assert.ok(revision?.body.includes("开题提前到九月中下旬"));
+  database.close();
+});
+
+test("浅羽 reads dated progress and waiting conditions from the selected project only", async () => {
+  const database = new DatabaseSync(":memory:");
+  const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), { seedProjects: initialProjectSeeds });
+  const detail = (await repository.get("project-research-direction"))!;
+  const task = detail.tasks[0];
+  await repository.recordTaskProgress(task.id, "完成基线核对", "整理两页说明");
+  await repository.saveTask({ ...task, status: "waiting", waitingFor: "导师反馈", resumeAction: "收到意见后核对实验范围" });
+  await repository.saveAccumulation({ id: "", projectId: detail.project.id, title: "对照实验", content: "已有三组对照结果", reference: "", milestoneId: null, createdAt: "", updatedAt: "" });
+  const input = buildAsabaProgressInput("现在做到哪了？", (await repository.get(detail.project.id))!);
+  assert.ok(input.evidence.some(item => item.kind === "progress" && item.text === "完成基线核对" && item.date));
+  assert.ok(input.evidence.some(item => item.kind === "waiting" && item.text === "导师反馈 · 收到意见后核对实验范围"));
+  assert.ok(input.evidence.some(item => item.kind === "accumulation" && item.text === "已有三组对照结果"));
+  assert.equal(input.project.deadline, "");
+  assert.ok(input.evidence.every(item => item.title !== "采集 20 个目标岗位并建立技能矩阵"));
+  database.close();
+});
+
+test("plan confirmation refuses a project changed while applying the proposal", async () => {
+  const database = new DatabaseSync(":memory:");
+  const adapter = new NodeSqliteAdapter(database);
+  const repository = new SqliteProjectRepository(adapter, { seedProjects: initialProjectSeeds });
+  await repository.confirmProject("project-research-direction");
+  const { project } = (await repository.get("project-research-direction"))!;
+  adapter.beforeTransaction = () => {
+    database.prepare("UPDATE projects SET updated_at = ?, outcome = ? WHERE id = ?")
+      .run("2099-01-01T00:00:00.000Z", "用户的新目标", project.id);
+  };
+  await assert.rejects(repository.applyProjectAdjustment({
+    projectId: project.id, expectedUpdatedAt: project.updatedAt, trigger: "导师反馈",
+    model: "deepseek-flash", tokenUsage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+    proposal: { summary: "调整", projectPatch: { outcome: "草案旧目标", targetDate: null, reviewDate: null },
+      milestoneChanges: [], newMilestones: [], taskChanges: [], newTasks: [], assumptions: [], risks: [] },
+  }), /项目已发生变化/);
+  assert.equal((await repository.get(project.id))?.project.outcome, "用户的新目标");
   database.close();
 });
 

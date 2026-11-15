@@ -1,3 +1,4 @@
+import type { DocumentReport, ResearchReport } from "./asaba-worker";
 export type CompanionAction = { kind: "open_project" | "open_note" | "prepare_note" | "start_task" | "capture" | "open_observer" | "open_settings"; id: string; label: string; text?: string };
 export type CompanionAskScope = "chat" | "work" | "news";
 export type CompanionEvidence = { id: string; threadId: string; title: string; projectPath: string; occurredAt: string; updatedAt: string; status: string; text: string; limited: boolean };
@@ -5,7 +6,7 @@ export type CompanionMessage = { id: string; role: "user" | "assistant"; text: s
 export type CompanionContext = {
   updatedAt?: string;
   model?: string;
-  projects?: Array<{ id: string; title: string; outcome: string; status: string }>;
+  projects?: Array<{ id: string; title: string; outcome: string; status: string; isDraft?: boolean }>;
   tasks?: Array<{ id: string; title: string; projectId: string | null; projectTitle: string }>;
   notes?: Array<{ id: string; title: string; summary: string; project: string; at?: string }>;
   news?: Array<{ title: string; summary: string; url: string; matched?: boolean }>;
@@ -25,13 +26,14 @@ export type AsabaObservation = { enabled: boolean; sourceApplication: string | n
 export type AsabaRecap = { text: string; local_model: boolean; day: string; generated_at: string; items: Array<{ at: string; end: string | null; kind: string; text: string; source: string | null }> };
 export type AsabaJob = {
   id: string; noteId: string; projectId: string; title: string; description: string; repository: string;
-  agent: "codex"; workspaceMode: "copy" | "original"; hadLocalChanges: boolean; previousJobId: string | null;
+  agent: "codex" | "research" | "document"; workspaceMode: "copy" | "original"; hadLocalChanges: boolean; previousJobId: string | null;
   base: string | null; sessionId: string | null; updatedAt: string; summary: string | null; commands: string[];
   diff: string | null; error: string | null;
+  progress?: string; report?: ResearchReport | DocumentReport; attempt?: number;
   state: "queued" | "running" | "recovering" | "review" | "reviewed" | "completed" | "interrupted" | "cancelled" | "failed";
 };
 export type AsabaDelegation = Pick<AsabaJob, "noteId" | "projectId" | "title" | "description" | "repository"> & {
-  requestId: string; agent: AsabaJob["agent"]; workspaceMode: AsabaJob["workspaceMode"]; previousJobId?: string; allowLocalChanges?: boolean;
+  requestId: string; agent: "codex"; workspaceMode: AsabaJob["workspaceMode"]; previousJobId?: string; allowLocalChanges?: boolean;
 };
 export const asabaJobLabels: Record<AsabaJob["state"], string> = {
   queued: "准备副本", running: "排查中", recovering: "核对上次会话", review: "待复测", reviewed: "已查看",

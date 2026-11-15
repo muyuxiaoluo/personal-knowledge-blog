@@ -673,11 +673,17 @@ export class UniversalSyncRepository {
         .filter((column) => Object.hasOwn(remote.payload, column));
       if (values.includes(mapping.idColumn)) {
         const updateColumns = values.filter((column) => column !== mapping.idColumn);
+        const dateColumn = mapping.table === "projects" ? "target_date" : "due_date";
+        const kindColumn = dateColumn + "_kind";
+        const assignments = updateColumns.map((column) => `${quoteIdentifier(column)} = excluded.${quoteIdentifier(column)}`);
+        if (mapping.columns.includes(kindColumn) && values.includes(dateColumn) && !values.includes(kindColumn)) {
+          assignments.push(`${kindColumn} = CASE WHEN ${dateColumn} IS NOT excluded.${dateColumn} THEN NULL ELSE ${kindColumn} END`);
+        }
         statements.push({
           sql: `INSERT INTO ${quoteIdentifier(mapping.table)}(${values.map(quoteIdentifier).join(", ")})
                 VALUES(${values.map(() => "?").join(", ")})
                 ON CONFLICT(${quoteIdentifier(mapping.idColumn)}) DO UPDATE SET
-                ${updateColumns.map((column) => `${quoteIdentifier(column)} = excluded.${quoteIdentifier(column)}`).join(", ")}`,
+                ${assignments.join(", ")}`,
           bindValues: values.map((column) => this.sqliteValue(remote.payload[column])),
         });
       }

@@ -1,7 +1,9 @@
+import { ProjectDateField } from "./ProjectDateField";
+import { projectDateLabel } from "../app/project-dates";
 import { useEffect, useRef, useState } from "react";
 import type { Milestone, ProjectTask } from "../app/project-types";
 import { routeDescendants, routeLayers, routeParents } from "../app/project-route";
-import { Button, DateField } from "./DesktopControls";
+import { Button } from "./DesktopControls";
 
 const colors = ["#7182c4", "#509a86", "#b083b8", "#bd9358"];
 function colorFor(id: string) { return colors[[...id].reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % colors.length]; }
@@ -134,7 +136,7 @@ export function ProjectRouteGraph({ projectId, milestones, tasks, saving, onSave
           return <article key={node.id} data-route-node={node.id} className={`route-task-card ${node.status}${!draft && selected?.id === node.id ? " is-selected" : ""}${connectionSelected ? " connection-selected" : ""}${connectionInvalid ? " connection-invalid" : ""}${draft?.id === node.id ? " connection-self" : ""}`} style={{ borderTopColor: colorFor(node.id) }}>
             <header><span>{statusLabel(node)}</span>{(parents.get(node.id)?.length ?? 0) > 1 && <small>汇合</small>}</header>
             <h3>{node.title}</h3>
-            <div className="route-task-meta"><span>{nodeTasks.filter((task) => task.status === "done").length}/{nodeTasks.length} 行动完成</span>{node.dueDate && <time>{node.dueDate}</time>}</div>
+            <div className="route-task-meta"><span>{nodeTasks.filter((task) => task.status === "done").length}/{nodeTasks.length} 行动完成</span>{node.dueDate && <time>{projectDateLabel(node.dueDate, node.dueDateKind).text}</time>}</div>
             {!draft && <button type="button" className="route-node-select" aria-label={`查看任务：${node.title}`} aria-pressed={selected?.id === node.id} onClick={() => setSelectedId(node.id)} />}
             {draft && node.id !== draft.id && <button type="button" className="route-connect-target" aria-label={`前置任务：${node.title}`} aria-pressed={connectionSelected} disabled={connectionInvalid} onClick={() => togglePredecessor(node)}><span>{connectionInvalid ? "会形成循环" : connectionSelected ? "✓ 已连接，点击取消" : "＋ 设为前置任务"}</span></button>}
             {draft?.id === node.id && <span className="route-connect-current">正在编辑</span>}
@@ -148,13 +150,13 @@ export function ProjectRouteGraph({ projectId, milestones, tasks, saving, onSave
       <header><h3>{draft.id ? "调整任务与连接" : (draft.predecessorIds?.length ?? 0) > 1 ? "汇合到新的任务" : "新建任务"}</h3><Button variant="ghost" type="button" onClick={() => setDraft(null)}>关闭</Button></header>
       <label>任务名称<input autoFocus required value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="例如：完成开题报告" /></label>
       <label>完成标准<textarea value={draft.definitionOfDone} onChange={(event) => setDraft({ ...draft, definitionOfDone: event.target.value })} placeholder="这条任务线需要交付什么结果？" /></label>
-      <DateField label="截止日期" value={draft.dueDate} onChange={(dueDate) => setDraft({ ...draft, dueDate })} />
+      <ProjectDateField label="节点日期" value={draft.dueDate} kind={draft.dueDateKind} onChange={(dueDate, dueDateKind) => setDraft({ ...draft, dueDate, dueDateKind })} />
       <section className="route-link-picker" aria-label="前置任务连接"><header><div><strong>在图中选择前置任务</strong><p>不选是独立起点，选一个是接续，选多个会形成汇合。</p></div><span>{selectedParents.length ? `${selectedParents.length} 条连线` : "独立起点"}</span></header>{selectedParents.length > 0 && <div className="route-selected-links">{selectedParents.map((id) => { const node = nodes.find((item) => item.id === id); return node ? <button type="button" key={id} onClick={() => togglePredecessor(node)}>{node.title}<span aria-hidden="true">×</span></button> : null; })}</div>}</section>
       {draft.status !== "completed" && <button type="button" className={`route-start-toggle${draft.status === "current" ? " active" : ""}`} aria-pressed={draft.status === "current"} onClick={() => setDraft({ ...draft, status: draft.status === "current" ? "planned" : "current" })}><span>{draft.status === "current" ? "●" : "○"}</span><div><strong>{draft.status === "current" ? "保存后立即开展" : "先保存为待开展"}</strong><small>点击切换；不会暂停其他正在推进的任务</small></div></button>}
       {error && <p role="alert">{error}</p>}
       <footer><span>{draft.predecessorIds?.length ? `已连接 ${draft.predecessorIds.length} 个前置节点` : "独立起点"}</span><Button variant="primary" type="submit" disabled={saving || !draft.title.trim()}>保存任务与连接</Button></footer>
     </form> : selected ? <>
-      <div className="route-detail-scroll" key={selected.id}><header><span className={selected.status}>{statusLabel(selected)}</span><h3>{selected.title}</h3></header><div className="route-detail-meta"><span>{selectedTasks.filter((task) => task.status === "done").length}/{selectedTasks.length} 行动完成</span>{selected.dueDate && <time>{selected.dueDate} 截止</time>}</div><h4>完成标准</h4><p>{selected.definitionOfDone || "尚未填写完成标准"}</p>
+      <div className="route-detail-scroll" key={selected.id}><header><span className={selected.status}>{statusLabel(selected)}</span><h3>{selected.title}</h3></header><div className="route-detail-meta"><span>{selectedTasks.filter((task) => task.status === "done").length}/{selectedTasks.length} 行动完成</span>{selected.dueDate && <time>{projectDateLabel(selected.dueDate, selected.dueDateKind).text}</time>}</div><h4>完成标准</h4><p>{selected.definitionOfDone || "尚未填写完成标准"}</p>
       {(parents.get(selected.id)?.length ?? 0) > 0 && <div className="route-detail-links"><h4>前置任务</h4>{(parents.get(selected.id) ?? []).map((id) => { const node = nodes.find((item) => item.id === id); return node && <Button key={id} size="small" variant="ghost" onClick={() => setSelectedId(id)}>{node.status === "completed" ? "✓" : "○"} {node.title}</Button>; })}</div>}
       </div>
       <div className="route-detail-actions"><div>{selected.status === "current" && <><Button size="small" variant="primary" onClick={() => onFocus(selected)}>进入任务</Button><Button size="small" variant="secondary" disabled={saving} onClick={() => onComplete(selected)}>完成</Button></>}{selected.status === "planned" && <Button size="small" variant="primary" disabled={saving || selectedBlockers.length > 0} onClick={() => void onSave({ ...selected, predecessorIds: parents.get(selected.id) ?? [], status: "current" })}>{selectedBlockers.length ? `等待 ${selectedBlockers.length} 项完成` : "开展任务"}</Button>}<Button size="small" variant="secondary" onClick={() => edit(selected)}>编辑连接</Button></div><div><Button size="small" variant="ghost" onClick={() => create([selected.id])}>＋ 添加后续</Button><Button size="small" variant="ghost" onClick={() => create(parents.get(selected.id) ?? [])}>⑂ 新建并行任务</Button><Button size="small" variant="danger" disabled={saving} onClick={() => onRemove(selected)}>删除</Button></div></div>

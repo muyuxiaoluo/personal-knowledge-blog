@@ -38,7 +38,7 @@ export function ActionPlanningAssistant({ onClose, onAddTask }: {
       const saved = await onAddTask({ projectId: null, milestoneId: null, direction: "uncategorized", title: proposal.action.title,
         currentFocus: proposal.action.currentFocus, definitionOfDone: proposal.action.definitionOfDone, steps: [],
         details: [`想做的事：${request.trim()}`, constraints.trim() ? `目标与投入约束：${constraints.trim()}` : "", proposal.reason, proposal.action.details].filter(Boolean).join("\n\n"),
-        dueDate: proposal.action.dueDate, plannedToday: today, keepAvailable: !today });
+        dueDate: proposal.action.dueDate, dueDateKind: "target", plannedToday: today, keepAvailable: !today });
       if (saved) onClose(); else setError("行动未保存，请重试。");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "保存失败，请重试。"); }
     finally { setBusy(false); }

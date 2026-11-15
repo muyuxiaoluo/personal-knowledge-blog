@@ -1,3 +1,5 @@
+import { AsabaWorkerReport } from "./AsabaWorkerReport";
+import { jobStatusLabel, type WorkerArchive } from "../app/asaba-worker";
 import { useState } from "react";
 import { asabaJobLabels, type AsabaJob } from "../app/companion-types";
 import { companionApi } from "./companionApi";
@@ -13,13 +15,17 @@ export function AsabaShotPreview({ id }: { id: string }) {
   </div>;
 }
 
-export function AsabaJobCard({ job, onCancel, onContinue, onReviewed }: {
+export function AsabaJobCard({ job, projects = [], onArchive, onCancel, onContinue, onReviewed }: {
+  projects?: { id: string; title: string }[]; onArchive?: (request: WorkerArchive) => Promise<void>;
   job: AsabaJob; onCancel?: () => void; onContinue?: () => void; onReviewed?: () => void;
 }) {
   const [openError, setOpenError] = useState("");
   return <details className="asaba-details">
-    <summary>{job.title || "Bug 排查"} · {asabaJobLabels[job.state]}</summary>
-    <small>{job.agent === "codex" ? "Codex" : job.agent} · {job.workspaceMode === "original" ? "项目原目录" : "独立副本"}</small>
+    <summary>{job.title || "Bug 排查"} · {jobStatusLabel(job) ?? asabaJobLabels[job.state]}</summary>
+    {job.agent === "codex" ? <small>Codex · {job.workspaceMode === "original" ? "项目原目录" : "独立副本"}</small> : <small>{job.agent === "research" ? "公开资料调研" : "本机 Word 格式检查"}</small>}
+    {job.progress && <p role="status">{job.progress}</p>}
+    {job.agent !== "codex" && job.report && <AsabaWorkerReport job={job} projects={projects} onArchive={onArchive} />}
+    {job.agent !== "codex" && ["failed", "interrupted", "cancelled"].includes(job.state) && <Button size="small" onClick={() => void companionApi.jobAction(job.id, "retry").catch(error => setOpenError(String(error)))}>继续委托</Button>}
     {job.summary && <p>{job.summary}</p>}
     {job.error && <p>{job.error}</p>}
     {job.commands.length > 0 && <details><summary>实际执行的命令 · {job.commands.length}</summary><ul>{job.commands.map(command => <li key={command}>{command}</li>)}</ul></details>}

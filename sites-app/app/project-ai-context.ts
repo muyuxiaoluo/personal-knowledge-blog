@@ -64,6 +64,7 @@ function baseProjectContext(detail: ProjectDetail, fields: Record<string, unknow
       planningMode: detail.project.planningMode,
       status: detail.project.status,
       targetDate: detail.project.targetDate,
+      targetDateKind: detail.project.targetDateKind ?? null,
       reviewDate: detail.project.reviewDate,
       category: detail.project.category,
     },
@@ -91,6 +92,7 @@ function compactMilestone(item: Milestone) {
     definitionOfDone: item.definitionOfDone,
     status: item.status,
     dueDate: item.dueDate,
+    dueDateKind: item.dueDateKind ?? null,
   };
 }
 
@@ -104,6 +106,7 @@ function compactTask(item: ProjectDetail["tasks"][number]) {
     details: item.details,
     status: item.status,
     dueDate: item.dueDate,
+    dueDateKind: item.dueDateKind ?? null,
     completedAt: item.completedAt,
   };
 }

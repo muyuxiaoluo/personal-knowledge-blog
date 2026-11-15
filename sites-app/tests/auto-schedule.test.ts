@@ -23,7 +23,7 @@ function project(id: string, status: Project["status"] = "active"): Project {
   return { id, title: id, outcome: "完成", motivation: "", projectType: "main", planningMode: "direct", parentProjectId: null, supportsMilestoneId: null, status, category: "learning", sortOrder: 0, isDraft: false, sourceNote: "", targetDate: "", reviewDate: "", completedAt: null, createdAt: now, updatedAt: now };
 }
 function action(id: string, projectId: string | null, patch: Partial<ProjectTask> = {}): ProjectTask {
-  return { id, projectId, milestoneId: null, direction: "learning", title: id, actionType: "organize", definitionOfDone: "完成", steps: [], currentFocus: "开始", details: "", benefit: "", dueDate: "2026-10-04", estimatedDays: 3, status: "next", waitingFor: "", resumeAction: "", context: "anywhere", sortOrder: 0, createdAt: now, updatedAt: now, completedAt: null, ...patch };
+  return { id, projectId, milestoneId: null, direction: "learning", title: id, actionType: "organize", definitionOfDone: "完成", steps: [], currentFocus: "开始", details: "", benefit: "", dueDate: "2026-10-04", dueDateKind: "deadline", estimatedDays: 3, status: "next", waitingFor: "", resumeAction: "", context: "anywhere", sortOrder: 0, createdAt: now, updatedAt: now, completedAt: null, ...patch };
 }
 
 test("calendar start dates cross month and year boundaries", () => {
@@ -32,6 +32,20 @@ test("calendar start dates cross month and year boundaries", () => {
   assert.equal(autoScheduleStartDate("2028-03-01", 3), "2028-02-27");
   assert.equal(autoScheduleStartDate("2026-02-30", 3), null);
   assert.equal(autoScheduleStartDate("2026-10-04", 0), null);
+});
+
+test("legacy dates require confirmation and clearing it invalidates automatic plans only", async () => {
+  const adapter = new Adapter();
+  const projects = new SqliteProjectRepository(adapter, { seedProjects: [] });
+  const work = new SqliteWorkRepository(adapter);
+  const saved = await projects.saveTask(action("legacy", null, { dueDateKind: null }));
+  assert.equal(await work.autoScheduleDueTasks("2026-10-01"), 0);
+  await projects.saveTask({ ...saved, dueDateKind: "target" });
+  assert.equal(await work.autoScheduleDueTasks("2026-10-01"), 1);
+  await projects.saveTask({ ...saved, dueDateKind: null });
+  assert.equal(await work.autoScheduleDueTasks("2026-10-01"), 1);
+  assert.equal((await work.listPlans()).length, 0);
+  adapter.db.close();
 });
 
 test("upgrades existing daily plans without changing their manual meaning", async () => {

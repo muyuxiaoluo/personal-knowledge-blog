@@ -1,3 +1,6 @@
+import type { DocumentInput, ResearchInput, WorkerArchive, WorkerRequest } from "../app/asaba-worker";
+import type { AttentionCommand, AttentionJob, AttentionView } from "../app/asaba-attention";
+import type { AsabaPlanSave, AsabaPlanningResult, AsabaAdjustmentRequest } from "../app/asaba-planning";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import type { AsabaActivity, AsabaDelegation, AsabaFocusCommand, AsabaJob, AsabaNote, AsabaObservation, AsabaRecap, CompanionAction, CompanionAskScope, CompanionContext, CompanionStatus } from "../app/companion-types";
@@ -5,7 +8,28 @@ export type AsabaStage = {
   expanded: boolean; speech?: boolean; walking: boolean; direction: number; mood: string;
   layout: { petX: number; petY: number; bubbleX: number; bubbleY: number; tailY: number; bubbleLeft: boolean };
 };
+async function askWorkbench<T>(event: string, command: { id: string } & Record<string, unknown>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+  let finish!: (value: T & { id: string; error?: string }) => void;
+  const result = new Promise<T & { id: string; error?: string }>(resolve => { finish = resolve; });
+  const stop = await listen<T & { id: string; error?: string }>(event + "-result", ({ payload }) => {
+    if (payload.id === command.id) finish(payload);
+  });
+  let timeout: number | undefined;
+  try {
+    await emitTo("main", event, command);
+    const value = await Promise.race([result, new Promise<never>((_, reject) => { timeout = window.setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs); })]);
+    if (value.error) throw new Error(value.error);
+    return value;
+  } finally { window.clearTimeout(timeout); stop(); }
+}
+
 export const companionApi = {
+  async attention(command: AttentionCommand) {
+    return (await askWorkbench<{ view: AttentionView }>("asaba-attention", { id: crypto.randomUUID(), ...command }, 12_000, "工作台尚未响应，可以重试。")).view;
+  },
+  async openAttentionItem(kind: "project" | "task" | "source", targetId: string) {
+    await askWorkbench<object>("asaba-open-attention-item", { id: crypto.randomUUID(), kind, targetId }, 12_000, "工作台尚未打开该事项，请重试。");
+  },
   status: () => invoke<CompanionStatus>("companion_status"),
   context: (context: CompanionContext) => invoke<void>("companion_update_context", { context }),
   refresh: () => invoke<CompanionStatus>("companion_refresh"),
@@ -51,12 +75,35 @@ export const companionApi = {
   shot: (id: string) => invoke<string>("asaba_shot", { id }),
   restoreSource: () => invoke<void>("asaba_restore_source"),
   jobs: (projectId?: string) => invoke<AsabaJob[]>("asaba_jobs", { projectId }),
+  attentionJobs: () => invoke<AttentionJob[]>("asaba_attention_jobs"),
   repository: (projectId: string) => invoke<string | null>("asaba_repository", { projectId }),
   bindRepository: (projectId: string, repository: string) => invoke<string | null>("asaba_bind_repository", { projectId, repository }),
   repositoryStatus: (repository: string) => invoke<{ directory: string; dirty: boolean }>("asaba_repository_status", { repository }),
   polishDelegation: (text: string) => invoke<string>("asaba_polish_delegation", { text }),
   delegate: (request: AsabaDelegation) => invoke<AsabaJob>("asaba_delegate", { request }),
-  jobAction: (id: string, operation: "cancel" | "reviewed" | "openSession") => invoke<void>("asaba_job_action", { id, operation }),
+  jobAction: (id: string, operation: "cancel" | "reviewed" | "openSession" | "retry") => invoke<void>("asaba_job_action", { id, operation }),
+  researchDefaults(topic: string, projectId: string | null) {
+    return askWorkbench<{ model: string; projectId: string | null }>("asaba-research-model", { id: crypto.randomUUID(), topic, projectId }, 15_000, "无法读取研究设置。");
+  },
+  research: (request: WorkerRequest<ResearchInput>) => invoke<string>("asaba_research", { request }),
+  checkDocument: (request: WorkerRequest<DocumentInput>) => invoke<string>("asaba_check_document", { request }),
+  markArchived: (id: string, projectId: string) => invoke<void>("asaba_mark_archived", { id, projectId }),
+  async archiveWorker(command: WorkerArchive) {
+    await askWorkbench<object>("asaba-save-worker", { id: crypto.randomUUID(), ...command }, 15_000, "归档尚未确认，可重试。");
+  },
+  async plan(request: string, projectId: string | null) {
+    const command = { id: crypto.randomUUID(), request, projectId };
+    return (await askWorkbench<{ result: AsabaPlanningResult }>("asaba-plan", command, 180_000, "规划尚未返回，请稍后再试。")).result;
+  },
+  async openAdjustment(command: Omit<AsabaAdjustmentRequest, "id">) {
+    await askWorkbench<object>("asaba-open-adjustment", { id: crypto.randomUUID(), ...command }, 15_000, "计划调整窗口未响应，请重试。");
+  },
+  async openPlanProject(projectId: string) {
+    await askWorkbench<object>("asaba-open-plan-project", { id: crypto.randomUUID(), projectId }, 15_000, "项目窗口未响应，请重试。");
+  },
+  async savePlan(command: AsabaPlanSave) {
+    return (await askWorkbench<{ saved: { projectId?: string } }>("asaba-save-plan", command, 15_000, "工作台尚未确认保存，可以重试。")).saved;
+  },
   async saveNote(note: AsabaNote) {
     let finish!: (result: { noteId?: string; error?: string }) => void;
     const result = new Promise<{ noteId?: string; error?: string }>(resolve => { finish = resolve; });

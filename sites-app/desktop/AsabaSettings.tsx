@@ -9,10 +9,12 @@ type Props = {
   idleMotion: boolean;
   smalltalk: boolean;
   focusSuggestions: boolean;
+  attentionDot: boolean;
   busy: boolean;
   onIdleMotion: (value: boolean) => void;
   onSmalltalk: (value: boolean) => void;
   onFocusSuggestions: (value: boolean) => void;
+  onAttentionDot: (value: boolean) => void;
   onObservation: (operation: string, executable?: string) => void;
   onCodex: (enabled: boolean) => void;
   onReadCodex: () => void;
@@ -55,6 +57,7 @@ export function AsabaSettings(props: Props) {
         <SettingSwitch title="自然待机" description="偶尔思考、伸懒腰、跳一小段舞" checked={props.idleMotion} onChange={props.onIdleMotion} />
         <SettingSwitch title="心情小气泡" description="偶尔说句俏皮话，投入和朗读时安静陪伴" checked={props.smalltalk} onChange={props.onSmalltalk} />
         <SettingSwitch title="投入提醒" description="持续工作后，提醒你记下这次投入" checked={props.focusSuggestions} onChange={props.onFocusSuggestions} />
+        <SettingSwitch title="待关注未读点" description="收起气泡时提示新事项，记录投入时隐藏" checked={props.attentionDot} disabled={busy} onChange={props.onAttentionDot} />
         <details className="asaba-setting-help"><summary>什么时候会提醒？</summary><p>需要开启「桌面活动记录」。在编辑器或文档应用持续使用 10 分钟后，浅羽会提示开始投入。计时从你确认时开始，空闲 5 分钟再提醒你是否结束。</p></details>
       </section>
       <section className="asaba-setting-group">

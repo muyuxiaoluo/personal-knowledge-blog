@@ -123,7 +123,7 @@ export function ProjectWeekDialog({ repository, target, today, onClose, onManual
       id: `project-week-${crypto.randomUUID()}`, title: draft.title.trim(), outcome: draft.outcome.trim(), motivation: request.trim(),
       projectType: "main", planningMode: draft.stages.length ? "staged" : "direct", parentProjectId: null,
       supportsMilestoneId: null, status: "active", category: "uncategorized", sortOrder: 0, isDraft: false,
-      sourceNote: "", targetDate, reviewDate: "", completedAt: null, createdAt: now, updatedAt: now,
+      sourceNote: "", targetDate, targetDateKind: "target", reviewDate: "", completedAt: null, createdAt: now, updatedAt: now,
     } satisfies Project : undefined;
     const milestones: Milestone[] = project && draft ? draft.stages.map((stage, index) => ({
       id: `milestone-${crypto.randomUUID()}`, projectId: project.id, title: stage.title, definitionOfDone: stage.done,
@@ -139,9 +139,11 @@ export function ProjectWeekDialog({ repository, target, today, onClose, onManual
       context: "anywhere", sortOrder: 100 + index, createdAt: now, updatedAt: now, completedAt: null,
       steps: action.starter.trim() ? [{ id: `step-${crypto.randomUUID()}`, title: action.starter.trim(), completed: false }] : [],
     })) : [];
-    const due = [owner?.targetDate, stage?.dueDate].filter(Boolean).sort()[0] ?? "";
+    const dates = [{ date: owner?.targetDate, kind: owner?.targetDateKind }, { date: stage?.dueDate, kind: stage?.dueDateKind }];
+    const due = dates.filter(item => item.kind === "deadline").map(item => item.date).filter(Boolean).sort()[0] ?? "";
+    const goal = dates.filter(item => item.kind === "target").map(item => item.date).filter(Boolean).sort()[0] ?? "";
     const generated: WeekAction[] = tasks.map((task, index) => ({
-      id: task.id, projectId: task.projectId, title: task.title, date: "", due, minutes: draft!.actions[index].minutes,
+      id: task.id, projectId: task.projectId, title: task.title, date: "", due, target: goal, minutes: draft!.actions[index].minutes,
       status: task.status, fixed: false, newlyGenerated: true, after: draft!.actions[index].after.map((id) => ids.get(id) ?? id),
     }));
     const actions = [...state.actions, ...generated];

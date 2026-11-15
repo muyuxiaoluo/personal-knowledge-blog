@@ -3,6 +3,7 @@ import { addDefaultAiLinks, addDefaultEntertainmentLinks, normalizeAvatarDataUrl
 import { normalizeHealthReminderPreferences, parseHealthReminderPreferences, type HealthReminderPreferences } from "../reminder-preferences";
 import type { SqliteDatabase } from "./sqlite-article-repository";
 import { FOCUS_REMINDER_KEY, normalizeFocusReminderMinutes } from "../focus-reminder";
+import type { AttentionState } from "../asaba-attention";
 
 const displayNameKey = "workspace_display_name";
 const avatarDataUrlKey = "workspace_avatar_data_url";
@@ -12,6 +13,7 @@ const legacyQuickLinksKeyV3 = "workspace_quick_links_v3";
 const legacyQuickLinksKeyV4 = "workspace_quick_links_v4";
 const quickLinksKey = "workspace_quick_links_v5";
 const healthReminderKey = "workspace_health_reminder_v1";
+const asabaAttentionKey = "workspace_asaba_attention_v1";
 
 export class WorkspacePreferencesRepository {
   private initialization: Promise<void> | null = null;
@@ -102,6 +104,16 @@ export class WorkspacePreferencesRepository {
     const normalized = normalizeFocusReminderMinutes(minutes);
     await this.write(FOCUS_REMINDER_KEY, String(normalized));
     return normalized;
+  }
+
+  async getAsabaAttention(): Promise<AttentionState | null> {
+    await this.initialize();
+    const [row] = await this.database.select<{ value: string }>("SELECT value FROM app_meta WHERE key = ?", [asabaAttentionKey]);
+    return row ? JSON.parse(row.value) as AttentionState : null;
+  }
+
+  async saveAsabaAttention(state: AttentionState) {
+    await this.write(asabaAttentionKey, JSON.stringify(state));
   }
 }
 

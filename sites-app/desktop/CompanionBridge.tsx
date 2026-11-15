@@ -1,3 +1,5 @@
+import { researchProject, type WorkerArchive } from "../app/asaba-worker";
+import type { AsabaAdjustmentRequest, AsabaPlanningResult, AsabaPlanSave } from "../app/asaba-planning";
 import { useEffect, useRef } from "react";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { isTauri } from "@tauri-apps/api/core";
@@ -8,20 +10,24 @@ import type { AiBriefSnapshot, DashboardPreferences, MorningBriefSnapshot } from
 import type { FocusSession } from "../app/work-types";
 import { matchingAiKeywords } from "../app/dashboard-helpers";
 import type { DashboardRepository } from "../app/data/dashboard-repository";
-import { loadDeepSeekModelSettings } from "../app/ai-model-settings";
+import { loadDeepSeekModelSettings, resolveDeepSeekModel } from "../app/ai-model-settings";
 import type { WorkspaceTask } from "./WorkPages";
 import { companionApi } from "./companionApi";
 import { Button } from "./DesktopControls";
 
-export function CompanionBridge({ projects, tasks, articles, dashboardRepository, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onError }: {
+export function CompanionBridge({ projects, tasks, articles, dashboardRepository, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onArchiveWorker, onSavePlan, onError }: {
   projects: ProjectSummary[]; tasks: WorkspaceTask[]; articles: StoredArticle[]; dashboardRepository: DashboardRepository;
   onAction: (action: CompanionAction) => Promise<void>; onError: (message: string) => void;
   onSaveNote: (note: AsabaNote) => Promise<string>;
+  onPlan: (request: string, projectId: string | null) => Promise<AsabaPlanningResult>;
+  onArchiveWorker: (request: WorkerArchive) => Promise<void>;
+  onOpenAdjustment: (request: AsabaAdjustmentRequest) => Promise<void>;
+  onSavePlan: (request: AsabaPlanSave) => Promise<{ projectId?: string }>;
   dashboardPreferences: DashboardPreferences; activeSession: FocusSession | null;
   onFocus: (command: AsabaFocusCommand) => Promise<void>;
 }) {
-  const latest = useRef({ projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onError });
-  latest.current = { projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onError };
+  const latest = useRef({ projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onArchiveWorker, onSavePlan, onError });
+  latest.current = { projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onArchiveWorker, onSavePlan, onError };
   const opened = useRef(false);
   const publish = useRef<(() => Promise<void>) | null>(null);
   useEffect(() => {
@@ -37,7 +43,7 @@ export function CompanionBridge({ projects, tasks, articles, dashboardRepository
       const { projects, tasks, articles, dashboardPreferences, activeSession } = latest.current;
       await companionApi.context({
         updatedAt: new Date().toISOString(), model: loadDeepSeekModelSettings().defaultModel,
-        projects: projects.filter(project => project.status !== "completed").slice(0, 40).map(({ id, title, outcome, status }) => ({ id, title, outcome: outcome.slice(0, 500), status })),
+        projects: projects.filter(project => project.status !== "completed").slice(0, 40).map(({ id, title, outcome, status, isDraft }) => ({ id, title, outcome: outcome.slice(0, 500), status, isDraft })),
         tasks: tasks.filter(task => !["done", "cancelled", "waiting"].includes(task.status)).slice(0, 80).map(({ id, title, projectId, projectTitle }) => ({ id, title, projectId, projectTitle })),
         notes: articles.filter(article => article.source.includes("浅羽随手记")).slice(0, 60).map(({ id, title, summary, project, updated }) => ({ id, title, summary: summary.slice(0, 400), project, at: updated })),
         news: (ai?.value.items ?? []).filter(item => matchingAiKeywords(item, dashboardPreferences.aiHighlightKeywords).length > 0).map(item => ({ title: item.title, summary: item.summary.slice(0, 500), url: item.originalUrl || item.aihotUrl, matched: true })),
@@ -53,6 +59,13 @@ export function CompanionBridge({ projects, tasks, articles, dashboardRepository
       try { await latest.current.onAction(payload); await emitTo("companion", "companion-action-result", payload.kind === "prepare_note" ? "已从笔记带入委托说明，请确认内容。" : payload.kind === "capture" ? "已打开收集箱，确认保存后写入。" : payload.kind === "start_task" ? "已经开始记录这项行动的投入。" : "已打开工作台，请查看操作结果。"); }
       catch (error) { await emitTo("companion", "companion-action-result", `操作未完成：${String(error)}`); }
     });
+    const openPlan = listen<{ id: string; projectId: string }>("asaba-open-plan-project", async ({ payload }) => {
+      if (!active) return;
+      try {
+        await latest.current.onAction({ kind: "open_project", id: payload.projectId, label: "打开项目" });
+        await emitTo("companion", "asaba-open-plan-project-result", { id: payload.id });
+      } catch (error) { await emitTo("companion", "asaba-open-plan-project-result", { id: payload.id, error: String(error) }); }
+    });
     const capture = listen<AsabaNote>("asaba-save-note", async ({ payload }) => {
       if (!active) return;
       try {
@@ -62,6 +75,38 @@ export function CompanionBridge({ projects, tasks, articles, dashboardRepository
       } catch (error) {
         await emitTo("companion", "asaba-note-result", { id: payload.id, error: String(error) });
       }
+    });
+    const plan = listen<{ id: string; request: string; projectId: string | null }>("asaba-plan", async ({ payload }) => {
+      if (!active) return;
+      try {
+        const result = await latest.current.onPlan(payload.request, payload.projectId);
+        await emitTo("companion", "asaba-plan-result", { id: payload.id, result });
+      } catch (error) { await emitTo("companion", "asaba-plan-result", { id: payload.id, error: String(error) }); }
+    });
+    const adjustment = listen<AsabaAdjustmentRequest>("asaba-open-adjustment", async ({ payload }) => {
+      if (!active) return;
+      try {
+        await latest.current.onOpenAdjustment(payload);
+        await emitTo("companion", "asaba-open-adjustment-result", { id: payload.id });
+      } catch (error) { await emitTo("companion", "asaba-open-adjustment-result", { id: payload.id, error: String(error) }); }
+    });
+    const researchModel = listen<{ id: string; topic: string; projectId: string | null }>("asaba-research-model", async ({ payload }) => {
+      if (active) await emitTo("companion", "asaba-research-model-result", { id: payload.id, model: resolveDeepSeekModel("research"), projectId: researchProject(payload.topic, payload.projectId, latest.current.projects) });
+    });
+    const archive = listen<WorkerArchive & { id: string }>("asaba-save-worker", async ({ payload }) => {
+      if (!active) return;
+      try {
+        await latest.current.onArchiveWorker(payload);
+        await emitTo("companion", "asaba-save-worker-result", { id: payload.id });
+      } catch (error) { await emitTo("companion", "asaba-save-worker-result", { id: payload.id, error: String(error) }); }
+    });
+    const savePlan = listen<AsabaPlanSave>("asaba-save-plan", async ({ payload }) => {
+      if (!active) return;
+      try {
+        const saved = await latest.current.onSavePlan(payload);
+        await send().catch(error => latest.current.onError(String(error)));
+        await emitTo("companion", "asaba-save-plan-result", { id: payload.id, saved });
+      } catch (error) { await emitTo("companion", "asaba-save-plan-result", { id: payload.id, error: String(error) }); }
     });
     let changingFocus = false;
     const focus = listen<AsabaFocusCommand>("asaba-focus-command", async ({ payload }) => {
@@ -89,7 +134,7 @@ export function CompanionBridge({ projects, tasks, articles, dashboardRepository
       }
     });
     if (!opened.current) { opened.current = true; void companionApi.window(false).catch(error => latest.current.onError(String(error))); }
-    return () => { active = false; publish.current = null; window.clearInterval(timer); for (const subscription of [focus, capture, refreshRequested]) void subscription.then(stop => stop()); void subscription.then(stop => stop()); };
+    return () => { active = false; publish.current = null; window.clearInterval(timer); for (const subscription of [focus, capture, refreshRequested, plan, savePlan, openPlan, adjustment, archive, researchModel]) void subscription.then(stop => stop()); void subscription.then(stop => stop()); };
   }, [dashboardRepository]);
   useEffect(() => {
     if (!isTauri()) return;

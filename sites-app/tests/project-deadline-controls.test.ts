@@ -12,7 +12,7 @@ test("deadline editing preserves failed changes, cancels cleanly and saves only 
   const { StageDeadlineControls } = await import("../desktop/ProjectDeadlineControls");
   const root = createRoot(dom.window.document.getElementById("root")!);
   const document = dom.window.document;
-  const milestone: Milestone = { id: "checkpoint", projectId: "project", title: "验证插件", definitionOfDone: "主要功能可用", status: "current", dueDate: "2099-10-18", sortOrder: 0, createdAt: "", updatedAt: "" };
+  const milestone: Milestone = { id: "checkpoint", projectId: "project", title: "验证插件", definitionOfDone: "主要功能可用", status: "current", dueDate: "2099-10-18", dueDateKind: "deadline", sortOrder: 0, createdAt: "", updatedAt: "" };
   const saved: Milestone[] = [];
   let succeeds = false;
   const props = { milestone, adaptive: true, hasCurrentAction: false, saving: false, onSave: async (value: Milestone) => { saved.push(value); return succeeds; } };
@@ -31,9 +31,9 @@ test("deadline editing preserves failed changes, cancels cleanly and saves only 
   };
   try {
     await render();
-    assert.match(document.querySelector("time")!.textContent!, /检查点截止 · 10\/18/);
+    assert.match(document.querySelector("time")!.textContent!, /真实截止 · 2099-10-18/);
     await click("调整日期");
-    assert.match(document.querySelector<HTMLInputElement>("input")!.labels?.[0].textContent || "", /新的检查点截止日期/);
+    assert.match(document.querySelector<HTMLInputElement>("input")!.labels?.[0].textContent || "", /检查点日期/);
     assert.equal(document.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled, true);
     await changeDate("2099-10-25");
     await click("保存日期");
@@ -47,14 +47,14 @@ test("deadline editing preserves failed changes, cancels cleanly and saves only 
     await click("调整日期");
     assert.equal(document.querySelector<HTMLInputElement>("input")!.value, milestone.dueDate);
     await changeDate("");
-    assert.equal(document.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled, true);
-    await changeDate("2099-10-26");
+    assert.equal(document.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled, false);
     succeeds = true;
     await click("保存日期");
     assert.equal(document.querySelector("form"), null);
-    assert.equal(saved[1].dueDate, "2099-10-26");
+    assert.equal(saved[1].dueDate, "");
+    assert.equal(saved[1].dueDateKind, null);
     await render({ adaptive: false });
-    assert.match(document.querySelector("time")!.textContent!, /阶段截止/);
+    assert.match(document.querySelector("time")!.textContent!, /真实截止/);
   } finally {
     await act(() => root.unmount());
     dom.window.close();

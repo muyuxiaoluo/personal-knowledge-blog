@@ -50,6 +50,7 @@ export interface ProjectRepository {
   saveProposal(proposal: ProjectProposal): Promise<ProjectProposal>;
   updateProposalStatus(id: string, status: ProposalStatus, reviewNote: string): Promise<void>;
   removeProposal(id: string): Promise<void>;
+  archiveWorkerReport(projectId: string, jobId: string, title: string, body: string, links: string[], action: string): Promise<void>;
   saveAccumulation(accumulation: ProjectAccumulation): Promise<ProjectAccumulation>;
   removeAccumulation(id: string): Promise<void>;
   addLog(projectId: string | null, body: string, taskId?: string | null, kind?: ProjectLog["kind"]): Promise<ProjectLog>;

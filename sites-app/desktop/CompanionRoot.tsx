@@ -1,3 +1,6 @@
+import { AsabaDocumentForm, AsabaResearchForm } from "./AsabaWorkerForms";
+import { jobStatusLabel, researchIntent, researchQueries, type DocumentInput } from "../app/asaba-worker";
+import { formatAsabaEvidenceDate, type AsabaPlanPreview, type AsabaPlanningResult } from "../app/asaba-planning";
 import "./companion-entry.css";
 import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -14,9 +17,11 @@ import { useAsabaInteraction } from "./useAsabaInteraction";
 import { useAsabaPersonality } from "./useAsabaPersonality";
 import { AsabaCharacter } from "./AsabaCharacter";
 import { AsabaPetActivation } from "./asaba-pet-activation";
+import { AsabaAttention } from "./AsabaAttention";
+import type { AttentionCommand, AttentionView } from "../app/asaba-attention";
 const AiMarkdown = lazy(async () => ({ default: (await import("./AiMarkdown")).AiMarkdown }));
 
-type Page = "home" | "note" | "saved" | "recap" | "settings" | "delegate" | "jobs" | "news" | "focus";
+type Page = "home" | "note" | "saved" | "recap" | "settings" | "delegate" | "jobs" | "news" | "focus" | "plan" | "research" | "document" | "attention";
 type Draft = { id: string; text: string; url: string; projectId: string };
 
 const blank = (): Draft => ({ id: crypto.randomUUID(), text: "", url: "", projectId: "" });
@@ -42,12 +47,22 @@ export default function CompanionRoot() {
   const [status, setStatus] = useState<CompanionStatus | null>(null);
   const [observation, setObservation] = useState<AsabaObservation | null>(null);
   const [jobs, setJobs] = useState<AsabaJob[]>([]);
+  const [attention, setAttention] = useState<AttentionView | null>(null);
+  const [attentionJob, setAttentionJob] = useState<string | null>(null);
   const [recap, setRecap] = useState<AsabaRecap | null>(null);
   const [recapBusy, setRecapBusy] = useState(false);
   const [draft, setDraft] = useState<Draft>(blank);
   const [includeApp, setIncludeApp] = useState(false);
   const [includeShot, setIncludeShot] = useState(false);
   const [delegation, setDelegation] = useState<AsabaDelegation | null>(null);
+  const [researchTopic, setResearchTopic] = useState("");
+  const lastResearch = useRef<{ key: string; id: string } | null>(null);
+  const [planText, setPlanText] = useState("");
+  const [projectAnswer, setProjectAnswer] = useState<{ request: string; result: Exclude<AsabaPlanningResult, { kind: "plan" }> } | null>(null);
+  const [planProject, setPlanProject] = useState<string | null>(null);
+  const [plan, setPlan] = useState<{ id: string; request: string; draft: AsabaPlanPreview } | null>(null);
+  const [withMilestone, setWithMilestone] = useState(false);
+  const [planSaved, setPlanSaved] = useState<{ projectId?: string } | null>(null);
   const [notice, setNotice] = useState("");
   const [ttsPhase, setTtsPhase] = useState("");
   const [busy, setBusy] = useState(false);
@@ -111,10 +126,17 @@ export default function CompanionRoot() {
       listen("companion-changed", refresh),
       listen("asaba-observation-changed", refreshObservation),
       listen("asaba-jobs-changed", refreshJobs),
+      listen<AttentionView>("asaba-attention-changed", ({ payload }) => setAttention(payload)),
       listen<AsabaStage>("asaba-stage", ({ payload }) => setStage(payload)),
       listen("asaba-voice-shortcut", () => voiceAction.current()),
       listen<string>("asaba-tts-phase", ({ payload }) => setTtsPhase(payload)),
       listen<string>("companion-action-result", ({ payload }) => setNotice(payload)),
+      listen<{ projectId: string }>("asaba-plan-project", ({ payload }) => {
+        if (operation.current || hearing.current) { setNotice("浅羽正在处理，请稍后再次打开项目规划。"); return; }
+        setPlanProject(payload.projectId);
+        setPlanText("请根据这个项目的当前进展，建议一个下一步。");
+        setProjectAnswer(null); setPlan(null); setPlanSaved(null); setNotice(""); setPage("plan");
+      }),
       listen<DelegationSource>("asaba-prepare-note", ({payload}) => { void prepare(payload).catch(error); }),
       listen<{id: string; text?: string; ready?: boolean; warning?: string}>("asaba-dictation-text", ({payload}) => {
         if (payload.id !== dictationId.current) return;
@@ -123,7 +145,10 @@ export default function CompanionRoot() {
         if (payload.warning) setNotice(payload.warning);
       }),
     ];
-    void Promise.all(subscriptions).then(() => companionApi.stage()).catch(error);
+    void Promise.all(subscriptions).then(() => {
+      void companionApi.attention({ kind: "get" }).then(setAttention).catch(() => {});
+      return companionApi.stage();
+    }).catch(error);
     return () => { for (const subscription of subscriptions) void subscription.then(stop => stop()); };
   }, []);
   useEffect(() => { if (expanded) refreshObservation(); }, [expanded]);
@@ -165,6 +190,64 @@ export default function CompanionRoot() {
     try { await action(); } catch (err) { error(err); }
     finally { operation.current = false; setBusy(false); }
   }
+  async function openAttention() {
+    setPage("attention");
+    setNotice("");
+    setAttention(await companionApi.attention({ kind: "get" }));
+  }
+
+  async function changeAttention(command: AttentionCommand) {
+    setAttention(await companionApi.attention(command));
+    if (command.kind === "link") setNotice("已关联收藏，可在项目里打开原条目。");
+  }
+
+  async function openAttentionItem(kind: "project" | "task" | "source" | "job", id: string, keys: string[]) {
+    if (kind === "job") {
+      const current = await companionApi.jobs();
+      if (!current.some(job => job.id === id)) throw new Error("委托已发生变化，请刷新后核对。");
+      setJobs(current);
+      setAttentionJob(id);
+      setPage("jobs");
+    } else {
+      await companionApi.openAttentionItem(kind, id);
+    }
+    await changeAttention({ kind: "read", keys });
+  }
+  async function startResearch(topic: string, background = "") {
+    const key = JSON.stringify([topic, background, planProject]);
+    if (lastResearch.current?.key !== key) lastResearch.current = { key, id: crypto.randomUUID() };
+    const defaults = await companionApi.researchDefaults(topic, planProject);
+    await companionApi.research({ requestId: lastResearch.current.id, projectId: defaults.projectId,
+      input: { topic, queries: researchQueries(topic), model: defaults.model, ...(background ? { background } : {}) } });
+    refreshJobs();
+    setAttentionJob(null);
+    setPage("jobs");
+    setNotice("调研已交给浅羽，可收起气泡。");
+  }
+
+  function startDocument(requestId: string, input: DocumentInput, projectId: string | null) {
+    void run(async () => {
+      await companionApi.checkDocument({ requestId, input, projectId });
+      refreshJobs(); setAttentionJob(null); setPage("jobs"); setNotice("论文格式检查已开始。");
+    });
+  }
+
+  async function askForPlan(request: string, projectId: string | null) {
+    const research = researchIntent(request);
+    if (research) {
+      if (research.requiresReview) { setResearchTopic(""); setPage("research"); return; }
+      await startResearch(research.topic);
+      return;
+    }
+    const result = await companionApi.plan(request, projectId);
+    const draft = result.kind === "plan" ? result.draft : result.kind === "progress" ? result.actionDraft : null;
+    setProjectAnswer(result.kind === "plan" ? null : { request, result });
+    setPlan(draft ? { id: crypto.randomUUID(), request, draft } : null);
+    setPlanSaved(null);
+    setWithMilestone(Boolean(draft?.milestone));
+    if (result.kind === "progress") setPlanProject(result.projectId);
+  }
+
   async function openRecap(force = false, readAloud = false) {
     setPage("recap");
     setNotice("");
@@ -207,11 +290,11 @@ export default function CompanionRoot() {
     setDelegation({ ...value, repository, requestId: crypto.randomUUID(), agent: value.agent ?? "codex", workspaceMode: value.workspaceMode ?? "copy" });
     setPage("delegate");
   }
-  async function dictate() {
+  async function dictate(forPlan = page === "plan") {
     if (hearing.current || operation.current) return;
     hearing.current = true;
     setListening(true); setNotice(""); setDictationPreview(""); setDictationReady(false);
-    setPage("note");
+    if (!forPlan) setPage("note");
     try {
       stopSpeech();
       setDictationPaused(false);
@@ -219,6 +302,11 @@ export default function CompanionRoot() {
       dictationId.current = crypto.randomUUID();
       const text = (await companionApi.dictation("listen", dictationId.current)).trim();
       setDictationPreview("");
+      if (forPlan && text) {
+        setPlanText(current => [current, text].filter(Boolean).join("\n").slice(0, 4000));
+        setPage("plan");
+        return;
+      }
       if (version !== dictationVersion.current) {
         if (text) {
           setDraft(current => ({ ...current, text: [current.text, text].filter(Boolean).join("\n").slice(0, 4000) }));
@@ -264,10 +352,12 @@ export default function CompanionRoot() {
   const expression = { idle: "", curious: "?", excited: "✦", focused: "···", listening: "◌", reading: "♪", walking: "", cuddle: "♡", cheer: "✦", sleepy: "☾", spin: "♪" }[petState] || "";
   const tone = listening && !dictationPaused ? "我在听" : audio === "preparing" ? ttsPhase || "正在合成语音" : audio === "playing" ? "正在说话" : audio === "paused" ? "朗读已暂停" : smalltalk && personality.moment?.text ? personality.moment.text : stage.mood === "curious" ? "好奇地看看" : stage.mood === "excited" ? "来了精神" : stage.mood === "focused" ? "认真陪你" : "我在这儿";
   const canSave = Boolean(draft.text.trim() || draft.url.trim());
-  const pages: Record<Page, string> = { home: "浅羽", note: "随手记", saved: "笔记已保存", recap: "今日回顾", settings: "浅羽设置", delegate: "委托说明", jobs: "委托", news: "每日早报", focus: "开始投入" };
+  const pages: Record<Page, string> = { home: "浅羽", note: "随手记", saved: "笔记已保存", recap: "今日回顾", settings: "浅羽设置", delegate: "委托说明", jobs: "委托", news: "每日早报", focus: "开始投入", plan: "帮我规划", research: "后台调研", document: "检查论文格式", attention: "待关注" };
+  const unreadAttention = attention?.groups.filter(group => group.entries.some(entry => entry.unread)).length ?? 0;
+  const showAttentionDot = Boolean(attention?.showDot && unreadAttention && !expanded && status && !status.context.activeFocus);
   function closeBubble() {
     pauseSpeech();
-    if (!(page === "note" && canSave) && page !== "delegate" && page !== "focus" && !busy && !listening) {
+    if (!(page === "note" && canSave) && page !== "delegate" && page !== "focus" && page !== "plan" && page !== "research" && page !== "document" && !busy && !listening) {
       setPage("home");
       setNotice("");
     }
@@ -279,7 +369,7 @@ export default function CompanionRoot() {
       if (listening) { event.preventDefault(); void pauseDictation().catch(error); }
       else if (expanded) closeBubble();
     }}>
-    <Button className="asaba-pet-button" variant="ghost" aria-label={expanded ? "收起浅羽气泡" : "打开浅羽气泡"} aria-expanded={expanded}
+    <Button className="asaba-pet-button" variant="ghost" aria-label={expanded ? "收起浅羽气泡" : showAttentionDot ? "打开浅羽气泡，有未读待关注事项" : "打开浅羽气泡"} aria-expanded={expanded}
       style={{ left: layout.petX, top: layout.petY }}
       onContextMenu={event => { event.preventDefault(); interaction.wake(6500); personality.play(); }}
       onPointerEnter={interaction.enter}
@@ -315,6 +405,7 @@ export default function CompanionRoot() {
       {expression && <span className="asaba-emotion" aria-hidden="true">{expression}</span>}
       {!expanded && status?.context.activeFocus && <span className="asaba-focus-dot" aria-label="正在投入" />}
       {!expanded && !status?.context.activeFocus && focus.suggestion && <span className="asaba-focus-dot suggestion" aria-label="可以开始记录投入" />}
+      {showAttentionDot && <span className="asaba-attention-dot" aria-hidden="true" />}
     </Button>
     {speechActive && stage.speech && <div className="asaba-smalltalk" data-side={layout.bubbleLeft ? "left" : "right"} data-accent={personality.moment?.accent}
       style={{ left: layout.bubbleX, top: layout.bubbleY, "--asaba-tail-y": `${layout.tailY}px` } as CSSProperties}>
@@ -326,17 +417,19 @@ export default function CompanionRoot() {
     <header className="asaba-heading">
       <span className="asaba-feather" aria-hidden="true">✦</span>
       <div><strong>{pages[page]}</strong><small>{tone}</small></div>
-      {page !== "home" && <Button variant="ghost" size="small" onClick={() => { setPage("home"); setNotice(""); }}>返回</Button>}
+      {page !== "home" && <Button variant="ghost" size="small" disabled={page === "plan" && (busy || listening)} onClick={() => { setPage("home"); setNotice(""); }}>返回</Button>}
       <Button variant="ghost" size="small" iconOnly aria-label="收起气泡" onClick={closeBubble}>×</Button>
     </header>
     <section className="asaba-body">
       {page === "home" && <>
         <div className="asaba-home-actions">
           <Button className="asaba-primary" variant="primary" disabled={busy} onClick={() => status?.context.activeFocus ? void run(endFocus) : setPage("focus")}><AsabaIcon name="focus" />{status?.context.activeFocus ? "结束投入" : "开始投入"}</Button>
+          <Button onClick={() => { setPage("plan"); setNotice(""); }}>帮我规划</Button>
           <Button onClick={() => { setPage("note"); setNotice(""); }}><AsabaIcon name="note" />记一下</Button>
-          <Button onClick={() => { refreshJobs(); setPage("jobs"); setNotice(""); }}><AsabaIcon name="delegate" />委托{jobs.some(active) && <i className="asaba-job-dot" aria-label="有委托进行中" />}</Button>
+          <Button onClick={() => { refreshJobs(); setAttentionJob(null); setPage("jobs"); setNotice(""); }}><AsabaIcon name="delegate" />委托{jobs.some(active) && <i className="asaba-job-dot" aria-label="有委托进行中" />}</Button>
         </div>
         <div className="asaba-actions asaba-links">
+          <Button variant="ghost" size="small" disabled={busy} onClick={() => void run(openAttention)}>待关注{unreadAttention > 0 && ` · ${unreadAttention} 未读`}</Button>
           <Button variant="ghost" size="small" onClick={() => void openRecap()}>{recapBusy ? "回顾整理中" : "今日回顾"}</Button>
           <Button variant="ghost" size="small" onClick={() => void run(openNews)}>资讯</Button>
           {!listening && !dictationPaused && <Button variant="ghost" size="small" disabled={busy} onClick={() => void dictate()} title="Ctrl + Alt + Space"><AsabaIcon name="voice" />语音</Button>}
@@ -351,6 +444,50 @@ export default function CompanionRoot() {
           <Button size="small" variant="ghost" onClick={focus.dismiss}>暂时不用</Button>
         </div>}
       </>}
+      {page === "plan" && <div className="asaba-planning">
+        {planProject && <div className="asaba-actions"><small>项目 · {status?.context.projects?.find(item => item.id === planProject)?.title || "当前项目"}</small><Button variant="ghost" size="small" disabled={busy} onClick={() => { setPlanProject(null); setProjectAnswer(null); setPlan(null); setPlanSaved(null); }}>清除关联</Button></div>}
+        <Button size="small" variant="ghost" disabled={busy} onClick={() => { const intent = researchIntent(planText); setResearchTopic(intent?.topic || ""); setPage("research"); }}>设置调研范围</Button>
+        <label><span>你想实现什么？</span><textarea rows={3} maxLength={4000} value={planText} disabled={busy} onChange={event => setPlanText(event.target.value)} placeholder="例如，科研项目做到哪了？" /></label>
+        <div className="asaba-actions">
+          <Button variant="primary" size="small" disabled={busy || listening || !planText.trim()} onClick={() => void run(async () => {
+            const request = planText.trim();
+            await askForPlan(request, planProject);
+          })}>{busy && !plan ? "正在整理…" : plan || projectAnswer ? "重新生成建议" : "给我建议"}</Button>
+          <Button variant="ghost" size="small" disabled={busy || listening} onClick={() => void dictate(true)}>听写</Button>
+        </div>
+        {busy && <small role="status">浅羽正在处理…</small>}
+        {projectAnswer?.result.kind === "choose_project" && <div className="asaba-planning-preview">
+          <strong>{projectAnswer.result.projects.length ? "请选择要查看的项目" : "暂时没有可查看的项目"}</strong>
+          {projectAnswer.result.projects.map(item => <Button key={item.id} size="small" title={item.outcome} disabled={busy || listening || projectAnswer.request !== planText.trim()} onClick={() => void run(() => askForPlan(projectAnswer.request, item.id))}>{item.title}</Button>)}
+        </div>}
+        {projectAnswer?.result.kind === "progress" && <AsabaProjectAnswer onOpenError={setNotice} result={projectAnswer.result} disabled={busy || projectAnswer.request !== planText.trim()} onAdjust={() => void run(async () => {
+          const { result, request } = projectAnswer;
+          if (result.kind !== "progress") return;
+          await companionApi.openAdjustment({ projectId: result.projectId, request, suggestion: result.answer.nextAction });
+          await closeBubble();
+        })} />}
+        {plan && <section className="asaba-planning-preview">
+          <strong>{{ new_project: "建议建立项目", existing_project: "建议加入已有项目", action: "建议保存为独立行动", note: "建议先记下来" }[plan.draft.kind]}{plan.draft.projectTitle && " · " + plan.draft.projectTitle}</strong>
+          {!projectAnswer && <p>{plan.draft.reason}</p>}
+          {!projectAnswer && plan.draft.questions.length > 0 && <div><small>待确认</small><ul>{plan.draft.questions.map(question => <li key={question}>{question}</li>)}</ul></div>}
+          {plan.draft.kind === "new_project" && <>
+            <label><span>项目名称</span><input value={plan.draft.title} maxLength={200} disabled={busy || Boolean(planSaved)} onChange={event => setPlan({ ...plan, draft: { ...plan.draft, title: event.target.value } })} /></label>
+            <label><span>期望结果</span><textarea rows={2} value={plan.draft.outcome} maxLength={2000} disabled={busy || Boolean(planSaved)} onChange={event => setPlan({ ...plan, draft: { ...plan.draft, outcome: event.target.value } })} /></label>
+          </>}
+          {plan.draft.kind !== "note" && <label><span>{plan.draft.kind === "new_project" ? "第一步 · 可选" : "行动名称"}</span><input value={plan.draft.action} maxLength={200} disabled={busy || Boolean(planSaved)} onChange={event => setPlan({ ...plan, draft: { ...plan.draft, action: event.target.value } })} /></label>}
+          {plan.draft.milestone && <label className="asaba-planning-option"><input type="checkbox" checked={withMilestone} disabled={busy || Boolean(planSaved)} onChange={event => setWithMilestone(event.target.checked)} />关联当前节点 · {plan.draft.milestone.title}</label>}
+          {plan.draft.kind === "note" && <p>{plan.request}</p>}
+          <div className="asaba-actions">
+            {!planSaved && <Button variant="primary" size="small" disabled={busy || plan.request !== planText.trim() || (plan.draft.kind === "new_project" && (!plan.draft.title.trim() || !plan.draft.outcome.trim())) || (["action", "existing_project"].includes(plan.draft.kind) && !plan.draft.action.trim())} onClick={() => void run(async () => {
+              setPlanSaved(await companionApi.savePlan({ ...plan, attachMilestone: withMilestone })); setNotice("已保存。");
+            })}>{({ new_project: "创建项目", existing_project: "加入行动", action: "保存行动", note: "保存原话到笔记" })[plan.draft.kind]}</Button>}
+            {(planSaved?.projectId || plan.draft.projectId) && <Button size="small" disabled={busy} onClick={() => void run(async () => {
+              await companionApi.openPlanProject((planSaved?.projectId || plan.draft.projectId)!);
+            })}>打开项目</Button>}
+            {planSaved && <Button variant="ghost" size="small" onClick={() => { setProjectAnswer(null); setPlan(null); setPlanSaved(null); setPlanText(""); setNotice(""); }}>继续规划</Button>}
+          </div>
+        </section>}
+      </div>}
       {page === "focus" && status && <AsabaFocusPanel context={status.context} suggestedApplication={focus.suggestion} onChanged={() => { refresh(); setPage("home"); }} onError={setNotice} />}
       {page === "news" && <div className="asaba-news">
         {status?.context.brief ? <><small>{status.context.brief.date}</small><ol>{status.context.brief.news.map((item, index) => <li key={index}><Suspense fallback={<p>{item}</p>}><AiMarkdown>{item}</AiMarkdown></Suspense></li>)}</ol></> : <p>今天的早报还没有缓存，请在工作台首页刷新。</p>}
@@ -401,8 +538,14 @@ export default function CompanionRoot() {
         </details>
       </> : !recapBusy && <p>这次回顾暂未生成。</p>}
       </>}
+      {page === "attention" && (attention ? <AsabaAttention groups={attention.groups} busy={busy}
+        onCommand={command => void run(() => changeAttention(command))}
+        onOpen={(kind, id, keys) => void run(() => openAttentionItem(kind, id, keys))}
+      /> : <p>{busy ? "正在读取待关注事项…" : "暂时无法读取待关注事项。"}</p>)}
       {page === "settings" && <AsabaSettings
         observation={observation} status={status} idleMotion={roam} smalltalk={smalltalk} focusSuggestions={focusSuggestions} busy={busy}
+        attentionDot={attention?.showDot ?? true}
+        onAttentionDot={enabled => void run(() => changeAttention({ kind: "showDot", enabled }))}
         onIdleMotion={value => { setRoam(value); localStorage.setItem(movementKey, value ? "on" : "off"); }}
         onSmalltalk={value => { setSmalltalk(value); localStorage.setItem("asaba.smalltalk", value ? "on" : "off"); }}
         onFocusSuggestions={value => { setFocusSuggestions(value); localStorage.setItem("asaba.focus-suggestions", value ? "on" : "off"); }}
@@ -420,22 +563,27 @@ export default function CompanionRoot() {
         key={delegation.requestId} initial={delegation} projects={status?.context.projects ?? []} busy={busy}
         onSubmit={request => void run(async () => {
           await companionApi.delegate(request);
-          refreshJobs(); setPage("jobs");
+          refreshJobs(); setAttentionJob(null); setPage("jobs");
         })}
       />}
+      {page === "research" && <AsabaResearchForm initialTopic={researchTopic} busy={busy} onStart={(topic, background) => void run(() => startResearch(topic, background))} onCancel={() => setPage("plan")} />}
+      {page === "document" && <AsabaDocumentForm busy={busy} projects={status?.context.projects?.filter(project => !project.isDraft) ?? []} onStart={startDocument} onCancel={() => setPage("jobs")} onError={setNotice} />}
       {page === "jobs" && <>
+        {attentionJob && <Button size="small" onClick={() => setAttentionJob(null)}>所有委托</Button>}
+        <Button size="small" onClick={() => setPage("document")}>检查论文格式</Button>
         <details className="asaba-details"><summary>从已有笔记创建委托</summary>
           {(status?.context.notes ?? []).map(note => <Button key={note.id} size="small" variant="ghost" onClick={() => void run(async () => { await companionApi.action({ kind: "prepare_note", id: note.id, label: "从笔记创建委托" }); })}>{note.title}</Button>)}
           {!(status?.context.notes ?? []).length && <p>还没有浅羽笔记，可以先记一条。</p>}
         </details>
         <Button variant="primary" onClick={() => { setPage("note"); setNotice("先保存一篇笔记，再从笔记创建委托。"); }}>记下待委托的内容</Button>
-        <small>委托记录保留执行会话和测试结果。</small>
-        {jobs.length ? jobs.map(job => <AsabaJobCard key={job.id} job={job} onCancel={active(job) && job.state !== "recovering" ? () => void run(async () => { await companionApi.jobAction(job.id, "cancel"); setNotice("已请求取消。"); }) : undefined} onContinue={!active(job) ? () => void run(() => prepare({
+        <small>可在这里查看调研与论文检查成果，也可继续处理代码委托。</small>
+        {jobs.length ? jobs.filter(job => !attentionJob || job.id === attentionJob).map(job => <AsabaJobCard key={job.id} job={job} projects={status?.context.projects?.filter(project => !project.isDraft) ?? []} onArchive={command => companionApi.archiveWorker(command)} onCancel={active(job) && job.state !== "recovering" ? () => void run(async () => { await companionApi.jobAction(job.id, "cancel"); setNotice("已请求取消。"); }) : undefined} onContinue={job.agent === "codex" && !active(job) ? () => void run(() => prepare({
           ...job,
+          agent: "codex",
           previousJobId: job.sessionId ? job.id : undefined,
           description: ["interrupted", "cancelled", "failed"].includes(job.state) ? job.description : "",
-        })) : undefined} />) : <p>还没有委托。写下一个 Bug 后，可以交给 Codex 排查。</p>}
-        {jobs.some(active) && <small>{jobs.filter(active).map(job => asabaJobLabels[job.state]).join(" · ")}</small>}
+        })) : undefined} />) : <p>还没有委托。可以检查一份论文，或在「帮我规划」里提出公开调研。</p>}
+        {jobs.some(active) && <small>{jobs.filter(active).map(job => jobStatusLabel(job) ?? asabaJobLabels[job.state]).join(" · ")}</small>}
       </>}
     </section>
     {(notice || listening || dictationPaused || audio !== "off") && <footer className="asaba-footer">
@@ -452,4 +600,32 @@ export default function CompanionRoot() {
     </footer>}
     </aside>
   </main>;
+}
+
+function AsabaProjectAnswer({ result, disabled, onAdjust, onOpenError }: {
+  result: Extract<AsabaPlanningResult, { kind: "progress" }>;
+  disabled: boolean;
+  onAdjust: () => void;
+  onOpenError: (message: string) => void;
+}) {
+  const { answer, evidence, projectId, projectTitle, canAdjust } = result;
+  return <section className="asaba-planning-preview" aria-label="项目进展">
+    <strong>{projectTitle} · 项目进展</strong>
+    <p>{answer.summary}</p>
+    {answer.findings.map((finding, index) => <div key={index}>
+      <p>{finding.text}</p>
+      {finding.evidenceIds.map(id => {
+        const source = evidence.find(item => item.id === id);
+        return source && <details className="asaba-details" key={id}>
+          <summary>{source.title || "项目记录"} · {formatAsabaEvidenceDate(source.date)}</summary>
+          {source.text && <p>{source.text}</p>}
+        </details>;
+      })}
+    </div>)}
+    {answer.unknowns.length > 0 && <div><small>待核对</small><ul>{answer.unknowns.map((value, index) => <li key={index}>{value}</li>)}</ul></div>}
+    <div className="asaba-actions">
+      {canAdjust && <Button size="small" disabled={disabled} onClick={onAdjust}>打开计划调整</Button>}
+      {!result.actionDraft && <Button size="small" disabled={disabled} onClick={() => void companionApi.openPlanProject(projectId).catch(error => onOpenError(String(error)))}>打开项目</Button>}
+    </div>
+  </section>;
 }

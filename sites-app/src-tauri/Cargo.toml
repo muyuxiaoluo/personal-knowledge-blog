@@ -43,10 +43,12 @@ md-5 = "0.10"
 sha1 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream", "cookies"] }
 sha2 = "0.10"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tokio-util = { version = "0.7", features = ["io"] }
 url = "2"
+quick-xml = "0.38"
+zip = { version = "4.6", default-features = false, features = ["deflate"] }
 uuid = { version = "1", features = ["v4"] }
-zip = { version = "4.6.1", default-features = false }
 tauri-plugin-process = "2.3.1"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"

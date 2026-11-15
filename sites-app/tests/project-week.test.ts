@@ -11,6 +11,13 @@ function action(id: string, patch: Partial<WeekAction> = {}): WeekAction {
   return { id, projectId: "study", title: id, status: "later", date: "", due: "", minutes: 30, after: [], fixed: false, ...patch };
 }
 
+test("week scheduling can go past a target but respects an explicit deadline", () => {
+  const settings = readWeekSettings(null);
+  const actions = [action("target", { target: monday }), action("deadline", { due: monday })];
+  const result = scheduleWeek(wednesday, actions, new Set(["target", "deadline"]), settings, new Set());
+  assert.deepEqual(result.map(({ action: item, date }) => [item.id, date]), [["deadline", ""], ["target", wednesday]]);
+});
+
 test("a lost Wednesday moves only affected work and keeps Friday in place", () => {
   const settings = readWeekSettings(null);
   settings.exceptions = { [wednesday]: 0, [thursday]: 30 };

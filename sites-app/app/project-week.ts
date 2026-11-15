@@ -16,6 +16,7 @@ export type WeekAction = {
   title: string;
   date: string;
   due: string;
+  target?: string;
   minutes: number;
   status: ProjectTaskStatus;
   after: string[];
@@ -96,7 +97,7 @@ export function scheduleWeek(today: string, actions: WeekAction[], requested: Re
   const placements = new Map<string, WeekPlacement>();
   const pending = actions.filter((action) => moving.has(action.id));
   pending.sort((a, b) => Number(Boolean(a.newlyGenerated)) - Number(Boolean(b.newlyGenerated)) ||
-    (a.due || "9999").localeCompare(b.due || "9999") || (a.date || "9999").localeCompare(b.date || "9999"));
+    (a.due || "9999").localeCompare(b.due || "9999") || (a.target || "9999").localeCompare(b.target || "9999") || (a.date || "9999").localeCompare(b.date || "9999"));
   while (pending.length) {
     const index = pending.findIndex((action) => action.after.every((id) => !moving.has(id) || placements.has(id)));
     if (index < 0) {

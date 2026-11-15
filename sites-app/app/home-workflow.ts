@@ -1,3 +1,4 @@
+import { actionDeadline } from "./project-dates";
 import { isContinuablePlan } from "./action-planning";
 import { isSourceArticle, isThoughtInboxArticle } from "./article-helpers";
 import type { ArticleRepository } from "./data/article-repository";
@@ -15,6 +16,10 @@ export type HomeTaskCandidate = {
   planCarriedFrom: string;
   dueDate: string;
   stageDueDate: string;
+  dueDateKind?: import("./project-types").ProjectDateKind | null;
+  stageDueDateKind?: import("./project-types").ProjectDateKind | null;
+  projectTargetDate?: string;
+  projectTargetDateKind?: import("./project-types").ProjectDateKind | null;
   sortOrder: number;
   weekBlocked?: boolean;
 };
@@ -185,7 +190,7 @@ export async function findContextualEcho(
 
 function homeTaskRank(task: HomeTaskCandidate, today: string) {
   const planRank = task.plan?.plannedDate === today ? 0 : task.status === "next" ? 4 : 10;
-  const dueDate = task.dueDate || task.stageDueDate;
+  const dueDate = actionDeadline(task);
   const dueDifference = dueDate ? calendarDayDifference(dueDate, today) : null;
   const dueRank = dueDifference === null ? 30 : Math.max(0, dueDifference);
   return planRank + dueRank / 100 + task.sortOrder / 1000;

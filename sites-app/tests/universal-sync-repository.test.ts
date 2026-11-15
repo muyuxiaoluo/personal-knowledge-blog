@@ -200,6 +200,30 @@ test("round-trips standalone tasks and structured logs with null project ids", a
   sourceDatabase.close(); targetDatabase.close();
 });
 
+test("older clients changing a date cannot carry forward a confirmed deadline", async () => {
+  const database = new DatabaseSync(":memory:");
+  const adapter = new NodeSqliteAdapter(database);
+  const projects = new SqliteProjectRepository(adapter, { seedProjects: initialProjectSeeds });
+  const project = (await projects.list())[0];
+  await projects.saveProject({ ...project, targetDate: "2027-02-15", targetDateKind: "deadline" });
+  const sync = new UniversalSyncRepository(adapter);
+  await sync.initialize();
+  const original = database.prepare("SELECT * FROM projects WHERE id = ?").get(project.id)!;
+  const { target_date_kind: _omitted, ...oldClient } = original;
+  async function receive(date: string, version: number) {
+    await sync.commit({ protocolVersion: 3, cursor: String(version), hasMore: false, accepted: [], conflicts: [], failed: [],
+      changes: [{ entityType: "project", id: project.id, operation: "upsert", payload: { ...oldClient, target_date: date },
+        changeId: "legacy-" + version, version, deletedAt: null, updatedAt: "2027-01-01T00:00:00Z" }],
+    });
+    return (await projects.list()).find(item => item.id === project.id)!;
+  }
+  assert.equal((await receive("2027-02-15", 1)).targetDateKind, "deadline");
+  const changed = await receive("2027-03-15", 2);
+  assert.equal(changed.targetDate, "2027-03-15");
+  assert.equal(changed.targetDateKind, null);
+  database.close();
+});
+
 test("round-trips structured project accumulations", async () => {
   const sourceDatabase = new DatabaseSync(":memory:");
   const sourceAdapter = new NodeSqliteAdapter(sourceDatabase);

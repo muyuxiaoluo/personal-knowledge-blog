@@ -278,16 +278,16 @@ export class SqliteWorkRepository implements WorkRepository {
     const now = this.clock().toISOString();
     const removed = await this.database.execute(
       `DELETE FROM task_plans
-       WHERE source = 'auto' AND planned_date != '' AND planned_date <= ?
+       WHERE source = 'auto' AND planned_date != ''
          AND NOT EXISTS (
            SELECT 1 FROM project_tasks AS task
            LEFT JOIN projects AS project ON project.id = task.project_id
            WHERE task.id = task_plans.task_id AND task.deleted_at IS NULL AND task.status = 'next'
              AND (task.project_id IS NULL OR project.status = 'active')
-             AND task.auto_schedule_paused = 0 AND task.estimated_days BETWEEN 1 AND 365
+             AND task.due_date_kind IN ('deadline', 'target') AND task.auto_schedule_paused = 0 AND task.estimated_days BETWEEN 1 AND 365
              AND date(task.due_date, '-' || task.estimated_days || ' days') <= ?
          )`,
-      [today, today],
+      [today],
     );
     const result = await this.database.execute(
       `INSERT INTO task_plans(task_id, planned_date, source, skip_auto_date, priority, estimate_minutes, sort_order, updated_at)
@@ -298,7 +298,7 @@ export class SqliteWorkRepository implements WorkRepository {
        LEFT JOIN task_plans AS plan ON plan.task_id = task.id
        WHERE task.deleted_at IS NULL AND task.status = 'next'
          AND (task.project_id IS NULL OR project.status = 'active')
-         AND task.auto_schedule_paused = 0 AND task.estimated_days BETWEEN 1 AND 365
+         AND task.due_date_kind IN ('deadline', 'target') AND task.auto_schedule_paused = 0 AND task.estimated_days BETWEEN 1 AND 365
          AND date(task.due_date, '-' || task.estimated_days || ' days') <= ?
          AND (plan.task_id IS NULL OR plan.planned_date = '' OR plan.planned_date < ?)
          AND COALESCE(plan.skip_auto_date, '') != ?

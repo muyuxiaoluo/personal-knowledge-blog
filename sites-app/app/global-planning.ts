@@ -40,7 +40,7 @@ export function projectAttention(input: PlanningInput): ProjectAttention[] {
     const open = detail.tasks.filter((task) => !["done", "cancelled"].includes(task.status));
     const reasons: string[] = [];
     let rank = 0;
-    const overdue = [project.targetDate, ...detail.milestones.filter((m) => !["completed", "superseded"].includes(m.status)).map((m) => m.dueDate), ...open.map((task) => task.dueDate)].some((date) => date && date <= input.today);
+    const overdue = [project.targetDateKind === "deadline" ? project.targetDate : "", ...detail.milestones.filter((m) => m.dueDateKind === "deadline" && !["completed", "superseded"].includes(m.status)).map((m) => m.dueDate), ...open.filter((task) => task.dueDateKind === "deadline").map((task) => task.dueDate)].some((date) => date && date <= input.today);
     if (overdue) { reasons.push("有项目、阶段或行动已到截止日期"); rank += 100; }
     if (project.reviewDate && project.reviewDate <= input.today) { reasons.push("到了项目回顾日期"); rank += 60; }
     if (idleDays >= 7) { reasons.push(`已 ${idleDays} 天没有记录到推进`); rank += 40; }
@@ -70,8 +70,8 @@ export function buildGlobalPlanningContext(input: PlanningInput, request: string
     projects: relevantProjects.map(({ project, milestones, tasks: projectTasks, logs, accumulations }) => ({
       id: project.id, title: clip(project.title), outcome: clip(project.outcome), motivation: clip(project.motivation),
       status: project.status, projectType: project.projectType, parentProjectId: project.parentProjectId, planningMode: project.planningMode,
-      targetDate: project.targetDate, reviewDate: project.reviewDate,
-      milestones: milestones.filter((m) => m.status !== "superseded").map((m) => ({ id: m.id, title: clip(m.title), status: m.status, definitionOfDone: clip(m.definitionOfDone), dueDate: m.dueDate, predecessorIds: m.predecessorIds || [] })),
+      targetDate: project.targetDate, targetDateKind: project.targetDateKind ?? null, reviewDate: project.reviewDate,
+      milestones: milestones.filter((m) => m.status !== "superseded").map((m) => ({ id: m.id, title: clip(m.title), status: m.status, definitionOfDone: clip(m.definitionOfDone), dueDate: m.dueDate, dueDateKind: m.dueDateKind ?? null, predecessorIds: m.predecessorIds || [] })),
       completedTaskCount: projectTasks.filter((task) => task.status === "done").length,
       recentRecords: recent(logs, (log) => log.createdAt, 12).map((log) => ({ taskId: log.taskId, kind: log.kind, body: clip(log.body), createdAt: log.createdAt })),
       accumulationCount: accumulations.length,
@@ -80,7 +80,7 @@ export function buildGlobalPlanningContext(input: PlanningInput, request: string
     tasks: [...tasks.filter((task) => task.status !== "done"), ...relevantProjects.flatMap(({ project }) => recent(tasks.filter((task) => task.projectId === project.id && task.status === "done"), (task) => task.completedAt || "", 10))].map((task) => ({
       id: task.id, projectId: task.projectId, milestoneId: task.milestoneId, title: clip(task.title), status: task.status,
       currentFocus: clip(task.currentFocus), definitionOfDone: clip(task.definitionOfDone), details: clip(task.details), waitingFor: clip(task.waitingFor),
-      steps: task.steps.map((step) => ({ title: clip(step.title), completed: step.completed })), dueDate: task.dueDate, completedAt: task.completedAt,
+      steps: task.steps.map((step) => ({ title: clip(step.title), completed: step.completed })), dueDate: task.dueDate, dueDateKind: task.dueDateKind ?? null, completedAt: task.completedAt,
       plannedDate: task.plan?.plannedDate || "", estimateMinutes: task.plan?.estimateMinutes || 0,
     })),
     recentSituations: recent(input.dailySituations, (day) => day.date, 7).map((day) => ({ date: day.date, reason: clip(day.reason), actualWork: clip(day.actualWork), tasks: day.tasks.map((task) => ({ ...task, progress: clip(task.progress) })) })),

@@ -11,6 +11,9 @@ import {
   type SqliteValue,
 } from "../app/data/sqlite-article-repository";
 import type { Article } from "../app/types";
+import { SqliteProjectRepository } from "../app/data/sqlite-project-repository";
+import { initialProjectSeeds } from "../app/data/project-seeds";
+import { UniversalSyncRepository } from "../app/data/universal-sync-repository";
 
 class NodeSqliteAdapter implements SqliteDatabase {
   constructor(private readonly database: DatabaseSync) {}
@@ -54,6 +57,38 @@ const seedArticle: Article = {
   next: "",
   body: "这是一条已有内容。",
 };
+
+test("links only the current unassigned collection to a live project and syncs the existing article", async () => {
+  const database = new DatabaseSync(":memory:");
+  const adapter = new NodeSqliteAdapter(database);
+  const articles = new SqliteArticleRepository(adapter, { seedArticles: [], deviceId: "test-device" });
+  const projects = new SqliteProjectRepository(adapter, { seedProjects: initialProjectSeeds });
+  await articles.ready();
+  const [project] = (await projects.list()).filter(item => item.status === "active" && !item.isDraft);
+  assert.ok(project);
+  const sync = new UniversalSyncRepository(adapter);
+  await sync.initialize();
+  const fixture = await articles.save({ ...seedArticle, id: "sources/current", collection: "sources", branch: "收藏中" });
+  const [row] = await articles.listAttentionSources();
+  assert.equal(row.id, fixture.id);
+  const changed = await articles.save({ ...fixture, tags: ["更新"] });
+  assert.equal(await articles.linkAttentionSource(row.id, row.version, project.id, project.title), false);
+  assert.equal(await articles.linkAttentionSource(row.id, changed.storage.version, project.id, "旧名称"), false);
+  assert.equal(await articles.linkAttentionSource(row.id, changed.storage.version, project.id, project.title), true);
+  assert.equal(await articles.linkAttentionSource(row.id, changed.storage.version, project.id, project.title), false);
+  const [summary] = await articles.listProjectArticleSummaries(project.id);
+  assert.equal(summary.id, fixture.id);
+  assert.equal(summary.collection, "sources");
+  assert.equal((await articles.get(summary.id))?.body, fixture.body);
+  const pending = database.prepare("SELECT payload_json FROM sync_outbox WHERE entity_type = 'article' AND entity_id = ?").get(row.id);
+  assert.equal(JSON.parse(String(pending?.payload_json)).project_id, project.id);
+  const second = await articles.save({ ...fixture, id: "sources/second", storage: undefined });
+  await projects.updateProjectStatus(project.id, "completed", "验收");
+  assert.equal(await articles.linkAttentionSource(second.id, second.storage.version, project.id, project.title), false);
+  await articles.remove(second.id);
+  assert.equal(await articles.linkAttentionSource(second.id, second.storage.version, project.id, project.title), false);
+  database.close();
+});
 
 test("persists articles and sync metadata in a real SQLite database", async () => {
   const database = new DatabaseSync(":memory:");
