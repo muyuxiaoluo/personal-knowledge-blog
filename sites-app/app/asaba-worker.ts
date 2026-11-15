@@ -37,7 +37,9 @@ export function researchIntent(request: string) {
   return needsResearchReview(topic) ? { topic: "", requiresReview: true } : { topic, requiresReview: false };
 }
 
-export function researchProject(topic: string, selected: string | null, projects: ProjectSummary[]) {
+export function researchProject(topic: string, selected: string | null, projects: Array<Pick<ProjectSummary, "id" | "title" | "outcome"> & {
+  isDraft?: boolean; status: string; category?: ProjectSummary["category"];
+}>) {
   const eligible = projects.filter(project => !project.isDraft && project.status !== "completed");
   if (selected) return eligible.find(project => project.id === selected)?.id ?? null;
   const named = eligible.filter(project => topic.includes(project.title));
@@ -70,7 +72,7 @@ export function jobStatusLabel(job: AsabaJob) {
 }
 
 export function workerArchiveContent(job: AsabaJob) {
-  if (!job.report || job.agent === "codex") throw new Error("委托还没有可保存的成果。");
+  if (!job.report || job.agent === "codex" || job.agent === "career") throw new Error("委托还没有可直接归档的成果。");
   if (job.agent === "document") {
     const report = job.report as DocumentReport;
     return {

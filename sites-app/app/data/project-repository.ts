@@ -51,6 +51,8 @@ export interface ProjectRepository {
   updateProposalStatus(id: string, status: ProposalStatus, reviewNote: string): Promise<void>;
   removeProposal(id: string): Promise<void>;
   archiveWorkerReport(projectId: string, jobId: string, title: string, body: string, links: string[], action: string): Promise<void>;
+  careerSnapshot(projectId: string): Promise<string | null>;
+  adoptCareerRoute(input: CareerWrite): Promise<string>;
   saveAccumulation(accumulation: ProjectAccumulation): Promise<ProjectAccumulation>;
   removeAccumulation(id: string): Promise<void>;
   addLog(projectId: string | null, body: string, taskId?: string | null, kind?: ProjectLog["kind"]): Promise<ProjectLog>;
@@ -69,3 +71,4 @@ export class ProjectRepositoryError extends Error {
     this.name = "ProjectRepositoryError";
   }
 }
+import type { CareerWrite } from "../asaba-career";

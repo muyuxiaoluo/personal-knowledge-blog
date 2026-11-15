@@ -428,6 +428,7 @@ pub fn run() {
             companion_worker::asaba_bind_repository,
             companion_worker::asaba_delegate,
             companion_worker::asaba_research,
+            companion_worker::asaba_career,
             companion_worker::asaba_check_document,
             companion_worker::asaba_mark_archived,
             companion_worker::asaba_job_action,

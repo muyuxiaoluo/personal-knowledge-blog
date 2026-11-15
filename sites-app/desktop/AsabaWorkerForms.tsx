@@ -21,7 +21,7 @@ export function AsabaResearchForm({ initialTopic, busy, onStart, onCancel }: {
     <label><span>公开检索主题</span><textarea rows={2} maxLength={400} value={topic} disabled={busy} onChange={event => setTopic(event.target.value)} placeholder="例如，成都 机器人 ROS2 软件工程师 岗位要求" /></label>
     <small>检索词只填公开信息。个人情况请填在下方。</small>
     {needsReview && <small role="status">请将个人背景移到下方，再填写公开检索词。</small>}
-    {topic.trim() && !needsReview && <details><summary>查看会发送的检索词</summary><ul>{researchQueries(topic).map(query => <li key={query}>{query}</li>)}</ul></details>}
+    {topic.trim() && !needsReview && <details open><summary>将发送的检索词</summary><ul>{researchQueries(topic).map(query => <li key={query}>{query}</li>)}</ul></details>}
     <label><span>仅供 DeepSeek 整理报告时使用的个人背景 · 可选</span><textarea rows={2} maxLength={1500} value={background} disabled={busy} onChange={event => { setBackground(event.target.value); setConfirmed(false); }} placeholder="例如，希望结合某个已确认的学历条件筛选岗位" /></label>
     {background.trim() && <label className="asaba-planning-option"><input type="checkbox" checked={confirmed} disabled={busy} onChange={event => setConfirmed(event.target.checked)} />确认把上面这段背景发给 DeepSeek</label>}
     <div className="asaba-actions"><Button size="small" variant="primary" type="submit" disabled={busy || !topic.trim() || needsReview || Boolean(background.trim() && !confirmed)}>开始调研</Button><Button size="small" disabled={busy} onClick={onCancel}>返回</Button></div>

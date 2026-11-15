@@ -1,5 +1,7 @@
 import { AsabaDocumentForm, AsabaResearchForm } from "./AsabaWorkerForms";
-import { jobStatusLabel, researchIntent, researchQueries, type DocumentInput } from "../app/asaba-worker";
+import { jobStatusLabel, researchIntent, researchProject, researchQueries, type DocumentInput } from "../app/asaba-worker";
+import { asabaIntents, type AsabaIntent, type CareerScope } from "../app/asaba-career";
+import { AsabaCareerScope } from "./AsabaCareer";
 import { formatAsabaEvidenceDate, type AsabaPlanPreview, type AsabaPlanningResult } from "../app/asaba-planning";
 import "./companion-entry.css";
 import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties } from "react";
@@ -21,7 +23,7 @@ import { AsabaAttention } from "./AsabaAttention";
 import type { AttentionCommand, AttentionView } from "../app/asaba-attention";
 const AiMarkdown = lazy(async () => ({ default: (await import("./AiMarkdown")).AiMarkdown }));
 
-type Page = "home" | "note" | "saved" | "recap" | "settings" | "delegate" | "jobs" | "news" | "focus" | "plan" | "research" | "document" | "attention";
+type Page = "home" | "note" | "saved" | "recap" | "settings" | "delegate" | "jobs" | "news" | "focus" | "plan" | "research" | "document" | "attention" | "career";
 type Draft = { id: string; text: string; url: string; projectId: string };
 
 const blank = (): Draft => ({ id: crypto.randomUUID(), text: "", url: "", projectId: "" });
@@ -30,6 +32,10 @@ const kindLabel: Record<string, string> = { app: "前台应用", screen: "画面
 const active = (job: AsabaJob) => ["queued", "running", "recovering"].includes(job.state);
 const initialStage: AsabaStage = { expanded: false, walking: false, direction: 1, mood: "idle", layout: { petX: 0, petY: 0, bubbleX: 0, bubbleY: 0, tailY: 80, bubbleLeft: true } };
 const movementKey = "asaba.idle-motion";
+const intentLabels: Record<AsabaIntent, string> = {
+  note: "保存便签", progress: "查询项目进度", plan: "帮我规划", research: "公开资料调研", document: "检查论文格式",
+  delegate: "准备代码委托", career: "求职调研与路线",
+};
 
 function AsabaIcon({ name }: { name: "focus" | "delegate" | "note" | "voice" }) {
   return <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -49,6 +55,10 @@ export default function CompanionRoot() {
   const [jobs, setJobs] = useState<AsabaJob[]>([]);
   const [attention, setAttention] = useState<AttentionView | null>(null);
   const [attentionJob, setAttentionJob] = useState<string | null>(null);
+  const [requestText, setRequestText] = useState("");
+  const [careerRequest, setCareerRequest] = useState("");
+  const [intentOptions, setIntentOptions] = useState<AsabaIntent[]>([]);
+  const [progressTarget, setProgressTarget] = useState(false);
   const [recap, setRecap] = useState<AsabaRecap | null>(null);
   const [recapBusy, setRecapBusy] = useState(false);
   const [draft, setDraft] = useState<Draft>(blank);
@@ -88,7 +98,8 @@ export default function CompanionRoot() {
   const recapRequest = useRef(0);
   const recapPending = useRef(false);
   const hearing = useRef(false);
-  const dictationVersion = useRef(0);
+  const dictationTarget = useRef<"home" | "plan" | "note">("home");
+  const requestNote = useRef<{ text: string; id: string } | null>(null);
   const draftText = useRef<HTMLTextAreaElement>(null);
   const bubble = useRef<HTMLElement>(null);
   const press = useRef<{ x: number; y: number } | null>(null);
@@ -115,7 +126,6 @@ export default function CompanionRoot() {
     setStatus(next);
   }
   async function pauseDictation() {
-    dictationVersion.current += 1;
     await companionApi.dictation("stop");
     setDictationPaused(true);
     setNotice("");
@@ -234,9 +244,9 @@ export default function CompanionRoot() {
 
   async function askForPlan(request: string, projectId: string | null) {
     const research = researchIntent(request);
-    if (research) {
-      if (research.requiresReview) { setResearchTopic(""); setPage("research"); return; }
-      await startResearch(research.topic);
+    if (research && !projectId) {
+      setResearchTopic(research.topic);
+      setPage("research");
       return;
     }
     const result = await companionApi.plan(request, projectId);
@@ -246,6 +256,58 @@ export default function CompanionRoot() {
     setPlanSaved(null);
     setWithMilestone(Boolean(draft?.milestone));
     if (result.kind === "progress") setPlanProject(result.projectId);
+  }
+
+  async function openIntent(intent: AsabaIntent, projectId?: string) {
+    const request = requestText.trim();
+    setIntentOptions([]);
+    setProgressTarget(false);
+    if (intent === "note") {
+      if (requestNote.current?.text !== request) requestNote.current = { text: request, id: crypto.randomUUID() };
+      await companionApi.saveNote({ id: requestNote.current.id, text: request, url: "", projectId: "" });
+      setNotice("已保存原话到随手记。");
+    } else if (intent === "career") {
+      setCareerRequest(request);
+      setPage("career");
+    } else if (intent === "document") {
+      setPage("document");
+    } else if (intent === "delegate") {
+      setDraft({ ...blank(), text: request });
+      setPage("note");
+      setNotice("先核对并保存委托说明，再选择项目和执行目录。");
+    } else if (intent === "research") {
+      setResearchTopic(researchIntent(request)?.topic ?? "");
+      setPlanProject(null);
+      setPage("research");
+    } else {
+      const named = (status?.context.projects ?? []).filter(project => !project.isDraft && request.includes(project.title));
+      const target = projectId ?? (named.length === 1 ? named[0].id : null);
+      if (intent === "progress" && !target) { setProgressTarget(true); return; }
+      setPlanProject(intent === "progress" ? target : null);
+      setPlanText(request);
+      setProjectAnswer(null); setPlan(null); setPlanSaved(null);
+      setPage("plan");
+      await askForPlan(request, intent === "progress" ? target : null);
+    }
+  }
+
+  function submitRequest() {
+    if (/^(浅羽[，, ]*)?(听今天|讲讲今天|今天做了什么)[。！!？? ]*$/.test(requestText.trim())) {
+      void openRecap(false, true);
+      return;
+    }
+    const intentions = asabaIntents(requestText);
+    if (intentions.length === 1) void run(() => openIntent(intentions[0]));
+    else setIntentOptions(intentions);
+  }
+
+  function startCareer(id: string, scope: CareerScope) {
+    void run(async () => {
+      await companionApi.startCareer(id, scope);
+      setCareerRequest("");
+      setAttentionJob(id); refreshJobs(); setPage("jobs");
+      setNotice("已开始后台求职规划，可以收起气泡。");
+    });
   }
 
   async function openRecap(force = false, readAloud = false) {
@@ -290,41 +352,27 @@ export default function CompanionRoot() {
     setDelegation({ ...value, repository, requestId: crypto.randomUUID(), agent: value.agent ?? "codex", workspaceMode: value.workspaceMode ?? "copy" });
     setPage("delegate");
   }
-  async function dictate(forPlan = page === "plan") {
+  async function dictate(target: "home" | "plan" | "note" = "home") {
     if (hearing.current || operation.current) return;
     hearing.current = true;
     setListening(true); setNotice(""); setDictationPreview(""); setDictationReady(false);
-    if (!forPlan) setPage("note");
+    setPage(target);
+    dictationTarget.current = target;
     try {
       stopSpeech();
       setDictationPaused(false);
-      const version = ++dictationVersion.current;
       dictationId.current = crypto.randomUUID();
       const text = (await companionApi.dictation("listen", dictationId.current)).trim();
       setDictationPreview("");
-      if (forPlan && text) {
-        setPlanText(current => [current, text].filter(Boolean).join("\n").slice(0, 4000));
-        setPage("plan");
-        return;
-      }
-      if (version !== dictationVersion.current) {
-        if (text) {
-          setDraft(current => ({ ...current, text: [current.text, text].filter(Boolean).join("\n").slice(0, 4000) }));
-          setPage("note");
-        }
-        return;
-      }
       if (!text) { setNotice("没听清，可以再说一次。"); return; }
-      setNotice("");
-      if (/^(浅羽[，, ]*)?(听今天|讲讲今天|今天做了什么)[。！!？? ]*$/.test(text)) {
-        void openRecap(false, true);
-      } else if (/^(浅羽[，, ]*)?帮我(?:排查|查|修)(?:一下)?这个(?:\s*bug|问题)[。！!？? ]*$/i.test(text)) {
-        setNotice("先保存笔记，再从笔记整理委托说明。");
+      if (target === "plan") {
+        setPlanText(current => [current, text].filter(Boolean).join("\n").slice(0, 4000));
+      } else if (target === "note") {
+        setDraft(current => ({ ...current, text: [current.text, text].filter(Boolean).join("\n").slice(0, 4000) }));
       } else {
-        const instruction = /^(浅羽[，, ]*)?(记一下|记个笔记|帮我记)[。！!？?，, ]*$/.test(text);
-        setDraft(current => instruction ? current : { ...current, text: [current.text, text].filter(Boolean).join("\n").slice(0, 4000) });
-        setPage("note");
-        setNotice("");
+        setRequestText(current => [current, text].filter(Boolean).join("\n").slice(0, 4000));
+        setIntentOptions([]);
+        setProgressTarget(false);
       }
     } catch (err) { error(err); }
     finally { hearing.current = false; setListening(false); }
@@ -352,12 +400,12 @@ export default function CompanionRoot() {
   const expression = { idle: "", curious: "?", excited: "✦", focused: "···", listening: "◌", reading: "♪", walking: "", cuddle: "♡", cheer: "✦", sleepy: "☾", spin: "♪" }[petState] || "";
   const tone = listening && !dictationPaused ? "我在听" : audio === "preparing" ? ttsPhase || "正在合成语音" : audio === "playing" ? "正在说话" : audio === "paused" ? "朗读已暂停" : smalltalk && personality.moment?.text ? personality.moment.text : stage.mood === "curious" ? "好奇地看看" : stage.mood === "excited" ? "来了精神" : stage.mood === "focused" ? "认真陪你" : "我在这儿";
   const canSave = Boolean(draft.text.trim() || draft.url.trim());
-  const pages: Record<Page, string> = { home: "浅羽", note: "随手记", saved: "笔记已保存", recap: "今日回顾", settings: "浅羽设置", delegate: "委托说明", jobs: "委托", news: "每日早报", focus: "开始投入", plan: "帮我规划", research: "后台调研", document: "检查论文格式", attention: "待关注" };
+  const pages: Record<Page, string> = { home: "浅羽", note: "随手记", saved: "笔记已保存", recap: "今日回顾", settings: "浅羽设置", delegate: "委托说明", jobs: "委托", news: "每日早报", focus: "开始投入", plan: "帮我规划", research: "后台调研", document: "检查论文格式", attention: "待关注", career: "求职调研与路线" };
   const unreadAttention = attention?.groups.filter(group => group.entries.some(entry => entry.unread)).length ?? 0;
   const showAttentionDot = Boolean(attention?.showDot && unreadAttention && !expanded && status && !status.context.activeFocus);
   function closeBubble() {
     pauseSpeech();
-    if (!(page === "note" && canSave) && page !== "delegate" && page !== "focus" && page !== "plan" && page !== "research" && page !== "document" && !busy && !listening) {
+    if (!(page === "note" && canSave) && page !== "delegate" && page !== "focus" && page !== "plan" && page !== "research" && page !== "document" && page !== "career" && !busy && !listening) {
       setPage("home");
       setNotice("");
     }
@@ -422,6 +470,19 @@ export default function CompanionRoot() {
     </header>
     <section className="asaba-body">
       {page === "home" && <>
+        <form className="asaba-form" onSubmit={event => { event.preventDefault(); submitRequest(); }}>
+          <label className="asaba-field">想让浅羽帮你做什么<textarea value={requestText} maxLength={4000} rows={2}
+            onChange={event => { setRequestText(event.target.value); setIntentOptions([]); setProgressTarget(false); }}
+            placeholder="例如，帮我准备明年的机器人岗位求职" /></label>
+          <div className="asaba-actions">
+            <Button variant="primary" size="small" type="submit" disabled={busy || listening || !requestText.trim()}>继续</Button>
+            {requestText.trim() && <Button variant="ghost" size="small" disabled={busy || listening} onClick={() => void run(() => openIntent("note"))}>保存原话</Button>}
+          </div>
+          {intentOptions.length > 0 && <div className="asaba-actions">{intentOptions.map(intent =>
+            <Button key={intent} size="small" disabled={busy || listening} onClick={() => void run(() => openIntent(intent))}>{intentLabels[intent]}</Button>)}</div>}
+          {progressTarget && <SelectMenu label="选择要查询的项目" value="" onChange={value => { if (value) void run(() => openIntent("progress", value)); }}
+            options={[{ value: "", label: "请选择" }, ...(status?.context.projects ?? []).filter(project => !project.isDraft).map(project => ({ value: project.id, label: project.title }))]} />}
+        </form>
         <div className="asaba-home-actions">
           <Button className="asaba-primary" variant="primary" disabled={busy} onClick={() => status?.context.activeFocus ? void run(endFocus) : setPage("focus")}><AsabaIcon name="focus" />{status?.context.activeFocus ? "结束投入" : "开始投入"}</Button>
           <Button onClick={() => { setPage("plan"); setNotice(""); }}>帮我规划</Button>
@@ -453,7 +514,7 @@ export default function CompanionRoot() {
             const request = planText.trim();
             await askForPlan(request, planProject);
           })}>{busy && !plan ? "正在整理…" : plan || projectAnswer ? "重新生成建议" : "给我建议"}</Button>
-          <Button variant="ghost" size="small" disabled={busy || listening} onClick={() => void dictate(true)}>听写</Button>
+          <Button variant="ghost" size="small" disabled={busy || listening} onClick={() => void dictate("plan")}>听写</Button>
         </div>
         {busy && <small role="status">浅羽正在处理…</small>}
         {projectAnswer?.result.kind === "choose_project" && <div className="asaba-planning-preview">
@@ -510,7 +571,7 @@ export default function CompanionRoot() {
         </div>}
         <div className="asaba-actions">
           <Button variant="primary" type="submit" disabled={!canSave || busy || listening}>保存笔记</Button>
-          {!listening && !dictationPaused && <Button variant="ghost" disabled={busy} onClick={() => void dictate()}>听写</Button>}
+          {!listening && !dictationPaused && <Button variant="ghost" disabled={busy} onClick={() => void dictate("note")}>听写</Button>}
         </div>
       </form>}
       {page === "saved" && savedNote && <div className="asaba-form">
@@ -567,6 +628,9 @@ export default function CompanionRoot() {
         })}
       />}
       {page === "research" && <AsabaResearchForm initialTopic={researchTopic} busy={busy} onStart={(topic, background) => void run(() => startResearch(topic, background))} onCancel={() => setPage("plan")} />}
+      {careerRequest && <div hidden={page !== "career"}><AsabaCareerScope key={careerRequest} request={careerRequest} busy={busy} onStart={startCareer}
+        suggested={researchProject(careerRequest, null, (status?.context.projects ?? []).filter(project => project.status === "active"))}
+        projects={(status?.context.projects ?? []).filter(project => !project.isDraft && project.status === "active")} /></div>}
       {page === "document" && <AsabaDocumentForm busy={busy} projects={status?.context.projects?.filter(project => !project.isDraft) ?? []} onStart={startDocument} onCancel={() => setPage("jobs")} onError={setNotice} />}
       {page === "jobs" && <>
         {attentionJob && <Button size="small" onClick={() => setAttentionJob(null)}>所有委托</Button>}
@@ -589,8 +653,8 @@ export default function CompanionRoot() {
     {(notice || listening || dictationPaused || audio !== "off") && <footer className="asaba-footer">
       {notice && <p role="status">{notice}</p>}
       {(listening || dictationPreview) && <div className="asaba-dictation-preview"><small>{listening ? dictationReady ? "正在听写 · 实时预览" : "正在加载本机听写…" : "本次识别"}</small><p aria-live="polite">{dictationPreview || "开口后，识别结果会显示在这里。"}</p></div>}
-      {listening && <Button size="small" onClick={() => void pauseDictation().catch(error)}>停止并放入笔记</Button>}
-      {dictationPaused && !listening && <Button size="small" onClick={() => void dictate()}>继续听写</Button>}
+      {listening && <Button size="small" onClick={() => void pauseDictation().catch(error)}>停止并填入文字</Button>}
+      {dictationPaused && !listening && <Button size="small" onClick={() => void dictate(dictationTarget.current)}>继续听写</Button>}
       {progress && <div className="asaba-speech-progress"><small>第 {progress.index + 1} / {progress.total} 句</small><p>{progress.text}</p></div>}
       {audio !== "off" && <div className="asaba-actions">
         {audio === "error" ? <Button size="small" onClick={() => { setNotice(""); void retrySpeech(); }}>从当前句继续</Button>

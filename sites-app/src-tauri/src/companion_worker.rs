@@ -14,6 +14,8 @@ use tauri::{Emitter, Manager};
 use tokio::{process::Command, sync::watch};
 use uuid::Uuid;
 
+#[path = "companion_worker_career.rs"]
+mod career;
 #[path = "companion_worker_codex.rs"]
 mod codex;
 #[path = "companion_worker_document.rs"]
@@ -28,6 +30,7 @@ enum Agent {
     Codex,
     Research,
     Document,
+    Career,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +81,12 @@ pub(crate) struct Job {
     research: Option<research::Research>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     document: Option<document::Document>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    career: Option<career::Career>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    career_research: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project_snapshot: Option<String>,
 }
 impl Job {
     pub(super) fn codex_session(&self) -> Option<&str> {
@@ -182,6 +191,7 @@ pub(super) fn jobs(app: &tauri::AppHandle, project: Option<&str>) -> Result<Vec<
             .map(|mut job| {
                 job.research = None;
                 job.document = None;
+                job.career = None;
                 job
             })
             .collect())
@@ -502,6 +512,9 @@ pub(crate) async fn asaba_delegate(
             report: None,
             research: None,
             document: None,
+            career: None,
+            career_research: None,
+            project_snapshot: None,
         };
         next.jobs.push(job.clone());
         write_json(path, &next)?;
@@ -560,6 +573,7 @@ pub(crate) fn asaba_research(
         title,
         Some(request.input),
         None,
+        None,
     )
 }
 
@@ -578,6 +592,30 @@ pub(crate) async fn asaba_check_document(
         request.input.title(),
         None,
         Some(request.input),
+        None,
+    )
+}
+
+#[tauri::command]
+pub(crate) fn asaba_career(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    mut request: ReadonlyRequest<career::CareerRequest>,
+) -> Result<String, String> {
+    if window.label() != "main" {
+        return Err("请通过工作台确认调研范围。".into());
+    }
+    career::validate(&request.input)?;
+    request.input.research.clear_checkpoint();
+    let title = format!("求职路线 · {}", clip(&request.input.research.topic, 75));
+    start_readonly(
+        &app,
+        request.request_id,
+        request.project_id,
+        title,
+        Some(request.input.research),
+        None,
+        Some(request.input.plan),
     )
 }
 
@@ -588,13 +626,16 @@ fn start_readonly(
     title: String,
     research: Option<research::Research>,
     document: Option<document::Document>,
+    career: Option<career::Career>,
 ) -> Result<String, String> {
     Uuid::parse_str(&id).map_err(|_| "委托编号无效")?;
     let project_id = project_id.unwrap_or_default();
     if project_id.len() > 300 {
         return Err("项目编号无效".into());
     }
-    let agent = if research.is_some() {
+    let agent = if career.is_some() {
+        Agent::Career
+    } else if research.is_some() {
         Agent::Research
     } else {
         Agent::Document
@@ -607,6 +648,10 @@ fn start_readonly(
             }
             return Ok(None);
         }
+        let mut career = career;
+        let project_snapshot = career
+            .as_mut()
+            .and_then(|plan| plan.project_snapshot.take());
         let job = Job {
             id: id.clone(),
             note_id: String::new(),
@@ -636,6 +681,9 @@ fn start_readonly(
             report: None,
             research,
             document,
+            career,
+            career_research: None,
+            project_snapshot,
         };
         let mut next = current.clone();
         next.jobs.push(job.clone());
@@ -694,6 +742,7 @@ fn spawn_readonly(app: &tauri::AppHandle, job: Job, mut rx: watch::Receiver<bool
             match job.agent {
                 Agent::Research => research::run(&app, &job).await,
                 Agent::Document => document::run(&app, &job).await,
+                Agent::Career => career::run(&app, &job).await,
                 Agent::Codex => unreachable!(),
             }
         };

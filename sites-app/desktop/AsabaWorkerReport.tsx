@@ -12,7 +12,7 @@ export function AsabaWorkerReport({ job, projects, onArchive }: {
 }) {
   const [selected, setSelected] = useState(job.projectId || "");
   const [includeAction, setIncludeAction] = useState(false);
-  const [action, setAction] = useState(job.report?.nextAction || "");
+  const [action, setAction] = useState((job.report as ResearchReport | DocumentReport | undefined)?.nextAction || "");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const id = useId();

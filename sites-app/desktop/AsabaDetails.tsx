@@ -4,6 +4,8 @@ import { useState } from "react";
 import { asabaJobLabels, type AsabaJob } from "../app/companion-types";
 import { companionApi } from "./companionApi";
 import { Button } from "./DesktopControls";
+import type { CareerReport } from "../app/asaba-career";
+import { CareerSources } from "./AsabaCareer";
 
 export function AsabaShotPreview({ id }: { id: string }) {
   const [src, setSrc] = useState("");
@@ -20,11 +22,20 @@ export function AsabaJobCard({ job, projects = [], onArchive, onCancel, onContin
   job: AsabaJob; onCancel?: () => void; onContinue?: () => void; onReviewed?: () => void;
 }) {
   const [openError, setOpenError] = useState("");
+  const career = job.agent === "career" ? job.report as CareerReport | undefined : undefined;
+  const research = career?.research ?? job.careerResearch;
   return <details className="asaba-details">
     <summary>{job.title || "Bug 排查"} · {jobStatusLabel(job) ?? asabaJobLabels[job.state]}</summary>
-    {job.agent === "codex" ? <small>Codex · {job.workspaceMode === "original" ? "项目原目录" : "独立副本"}</small> : <small>{job.agent === "research" ? "公开资料调研" : "本机 Word 格式检查"}</small>}
+    {job.agent === "codex" ? <small>Codex · {job.workspaceMode === "original" ? "项目原目录" : "独立副本"}</small> : <small>{job.agent === "research" ? "公开资料调研" : job.agent === "career" ? "岗位调研与求职规划" : "本机 Word 格式检查"}</small>}
     {job.progress && <p role="status">{job.progress}</p>}
-    {job.agent !== "codex" && job.report && <AsabaWorkerReport job={job} projects={projects} onArchive={onArchive} />}
+    {(job.agent === "research" || job.agent === "document") && job.report && <AsabaWorkerReport job={job} projects={projects} onArchive={onArchive} />}
+    {job.agent === "career" && research && <CareerSources report={research} />}
+    {career && !career.route && <p>目前缺少可核对的岗位样本。可以查看调研结果，再用更具体的范围重新发起。</p>}
+    {career?.route && <p>{career.route.outcome}</p>}
+    {career?.route && job.state === "review" && <Button size="small" variant="primary" onClick={() => {
+      setOpenError("");
+      void companionApi.openCareerReview(job.id).catch(error => setOpenError(String(error)));
+    }}>查看并确认项目路线</Button>}
     {job.agent !== "codex" && ["failed", "interrupted", "cancelled"].includes(job.state) && <Button size="small" onClick={() => void companionApi.jobAction(job.id, "retry").catch(error => setOpenError(String(error)))}>继续委托</Button>}
     {job.summary && <p>{job.summary}</p>}
     {job.error && <p>{job.error}</p>}

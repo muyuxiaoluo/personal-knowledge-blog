@@ -3,6 +3,20 @@ import test from "node:test";
 import { companionReadout, companionTodayRecords, type CompanionStatus } from "../app/companion-types";
 import { asabaSpeechSegments } from "../desktop/useAsabaSpeech";
 import { researchIntent, researchQueries } from "../app/asaba-worker";
+import { asabaIntents, careerRecruitmentBatch, careerResearchTopic } from "../app/asaba-career";
+
+test("routes a career request without copying personal details into the public scope", () => {
+  const request = "帮我准备明年的机器人岗位求职，结合我的学历和 ROS2 经历，邮箱 user@example.com";
+  assert.deepEqual(asabaIntents(request), ["career"]);
+  assert.equal(careerResearchTopic(request), "机器人 ROS2");
+  assert.equal(careerRecruitmentBatch(request, 2026), "2027 年");
+  assert.equal(careerRecruitmentBatch("2028 年秋招，机器人"), "2028 年秋招");
+  assert.equal(careerRecruitmentBatch("准备 2027 年机器人岗位求职"), "2027 年");
+  assert.deepEqual(asabaIntents("这个项目做到哪了，另外帮我查论文格式"), ["progress", "document"]);
+  assert.deepEqual(asabaIntents("记下这个想法：机器人岗位求职准备"), ["note"]);
+  assert.deepEqual(asabaIntents("帮我查查机器人岗位"), ["research"]);
+  assert.equal(asabaIntents("有个想法").length > 1, true);
+});
 
 test("routes explicit public research without treating project progress as a web search", () => {
   assert.equal(researchIntent("帮我查一下科研项目进度"), null);

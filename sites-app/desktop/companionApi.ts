@@ -1,5 +1,6 @@
 import type { DocumentInput, ResearchInput, WorkerArchive, WorkerRequest } from "../app/asaba-worker";
 import type { AttentionCommand, AttentionJob, AttentionView } from "../app/asaba-attention";
+import type { CareerScope } from "../app/asaba-career";
 import type { AsabaPlanSave, AsabaPlanningResult, AsabaAdjustmentRequest } from "../app/asaba-planning";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen } from "@tauri-apps/api/event";
@@ -24,6 +25,12 @@ async function askWorkbench<T>(event: string, command: { id: string } & Record<s
 }
 
 export const companionApi = {
+  async startCareer(id: string, scope: CareerScope) {
+    await askWorkbench<object>("asaba-start-career", { id, scope }, 20_000, "委托尚未确认，可用原范围重试。");
+  },
+  async openCareerReview(jobId: string) {
+    await askWorkbench<object>("asaba-review-career", { id: crypto.randomUUID(), jobId }, 15_000, "工作台尚未打开路线，请重试。");
+  },
   async attention(command: AttentionCommand) {
     return (await askWorkbench<{ view: AttentionView }>("asaba-attention", { id: crypto.randomUUID(), ...command }, 12_000, "工作台尚未响应，可以重试。")).view;
   },

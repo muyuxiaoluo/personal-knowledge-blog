@@ -1,4 +1,6 @@
-import { workerArchiveContent, type WorkerArchive } from "../app/asaba-worker";
+import { needsResearchReview, workerArchiveContent, type WorkerArchive } from "../app/asaba-worker";
+import { careerArchiveText, type CareerReport, type CareerReview, type CareerScope } from "../app/asaba-career";
+import { CareerReviewDialog } from "./AsabaCareer";
 import { writeAsabaPlan } from "../app/save-asaba-plan";
 import { buildAsabaPlanningInput, buildAsabaProgressInput, previewAsabaPlan, type AsabaAdjustmentRequest, type AsabaPlanningResult, type AsabaPlanSave } from "../app/asaba-planning";
 import { invoke, isTauri } from "@tauri-apps/api/core";
@@ -49,6 +51,7 @@ import {
   loadCachedDeepSeekModels,
   loadDeepSeekModelSettings,
   resolveAvailableDeepSeekModel,
+  resolveDeepSeekModel,
   saveDeepSeekModelSettings,
 } from "../app/ai-model-settings";
 import { rootProjectStatusCounts } from "../app/project-selectors";
@@ -287,6 +290,7 @@ export function DesktopWorkbench({
   const [batchIds, setBatchIds] = useState<Set<string>>(new Set());
   const [asabaAdjustment, setAsabaAdjustment] = useState<AsabaAdjustmentRequest | null>(null);
   const [requestedProjectId, setRequestedProjectId] = useState<string | null>(null);
+  const [careerReview, setCareerReview] = useState<{ jobId: string; report: CareerReport; projectId: string | null; snapshot: string | null } | null>(null);
   const [requestedTaskId, setRequestedTaskId] = useState<string | null>(null);
   const [selectedArticle, setSelectedArticle] = useState<StoredArticle | null>(null);
   const [query, setQuery] = useState("");
@@ -1006,6 +1010,58 @@ export function DesktopWorkbench({
     setProjectWeekRevision(value => value + 1);
   }
 
+  async function startAsabaCareer(id: string, scope: CareerScope) {
+    if (!scope.topic.trim() || needsResearchReview(scope.topic) || !scope.queries.length ||
+        scope.queries.some(query => !query.trim() || needsResearchReview(query))) {
+      throw new Error("请核对将发送的公开搜索词。");
+    }
+    if ((await companionApi.attentionJobs()).some(job => job.id === id && job.agent === "career")) return;
+    const projectSnapshot = scope.projectId ? await projectRepository.careerSnapshot(scope.projectId) : null;
+    if (scope.projectId && !projectSnapshot) throw new Error("所选项目已不可用，请重新选择。");
+    const researchModel = resolveDeepSeekModel("research");
+    const planningModel = resolveDeepSeekModel("projectReplan");
+    await invoke("asaba_career", { request: { requestId: id, projectId: scope.projectId,
+      input: { research: { topic: scope.topic, queries: scope.queries, model: researchModel },
+        plan: { model: planningModel, background: scope.background, projectSnapshot } } } });
+  }
+
+  async function openCareerReview(jobId: string) {
+    const job = (await companionApi.jobs()).find(item => item.id === jobId && item.agent === "career" && item.state === "review");
+    const report = job?.report as CareerReport | undefined;
+    if (!job || !report?.route) throw new Error("没有找到待确认的求职路线。");
+    if (projectEditing) throw new Error("请先保存或关闭正在编辑的项目。");
+    await invoke("show_main_window");
+    if (!await switchSection("projects")) throw new Error("请先完成当前操作。");
+    const initialProject = (await refreshProjects()).find(project => project.id === job.projectId && project.status === "active" && !project.isDraft);
+    if (initialProject) setRequestedProjectId(initialProject.id);
+    setCareerReview({ jobId, report, projectId: job.projectId || null, snapshot: job.projectSnapshot ?? null });
+  }
+
+  async function verifyCareerProject(id: string) {
+    const snapshot = await projectRepository.careerSnapshot(id);
+    await projectRepository.list();
+    const detail = await projectRepository.get(id);
+    if (!snapshot || !detail || detail.project.status !== "active" || detail.project.isDraft) throw new Error("项目已不可用，请选择其他项目。");
+    return { snapshot, current: [detail.project.outcome, ...detail.milestones.filter(item => item.status === "current").map(item => "当前阶段 · " + item.title),
+      ...detail.tasks.filter(item => item.status === "next").map(item => "当前行动 · " + item.title)].filter(Boolean) };
+  }
+
+  async function saveCareerReview(jobId: string, review: CareerReview) {
+    const job = (await companionApi.jobs()).find(item => item.id === jobId && item.agent === "career");
+    const report = job?.report as CareerReport | undefined;
+    if (!job || !report?.route || !["review", "reviewed"].includes(job.state)) throw new Error("求职路线已不可用。");
+    const sourceIds = new Set(report.research.sources.map(source => source.id));
+    if (review.stages.some(stage => !stage.sourceIds.length || stage.sourceIds.some(id => !sourceIds.has(id)))) throw new Error("路线包含无效的调研来源。");
+    const id = await projectRepository.adoptCareerRoute({ ...review, jobId, body: careerArchiveText(report, review),
+      links: report.research.sources.map(source => source.url) });
+    await companionApi.markArchived(jobId, id);
+    await Promise.all([refreshProjects(), refreshWork()]);
+    setProjectWeekRevision(value => value + 1);
+    setRequestedProjectId(id);
+    setCareerReview(null);
+    showMessage("已保存求职路线。");
+  }
+
   async function openAsabaAdjustment(command: AsabaAdjustmentRequest) {
     if (!command.request.trim() || command.request.length > 4000 || command.suggestion.length > 200) throw new Error("调整原因无效，请重新生成建议。");
     await projectRepository.list();
@@ -1598,7 +1654,11 @@ export function DesktopWorkbench({
       {activeSession && <GlobalFocusBar session={activeSession} task={workspaceTasks.find((task) => task.id === activeSession.taskId) ?? null} onShow={() => activeSession.taskId ? openTask(activeSession.taskId) : switchSection("tasks")} onPause={() => void stopFocus()} onCorrect={() => setFocusEditorSession(activeSession)} />}
       <Suspense fallback={null}><FocusTools activeSession={activeSession} repository={workRepository} preferencesRepository={preferencesRepository} editorSession={focusEditorSession} onEdit={setFocusEditorSession} historyOpen={focusHistoryOpen} onCloseHistory={() => setFocusHistoryOpen(false)} onChanged={refreshWork} onMessage={showMessage} /></Suspense>
       <ObserverIndicator onOpen={() => void switchSection("observer")} />
-      <Suspense fallback={null}><CompanionBridge projects={projects} tasks={workspaceTasks} articles={articles} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} activeSession={activeSession} onFocus={companionFocus} onError={showMessage} onSaveNote={saveAsabaNote} onPlan={planWithAsaba} onOpenAdjustment={openAsabaAdjustment} onArchiveWorker={archiveAsabaWorker} onSavePlan={saveAsabaPlan} onAction={async (action: CompanionAction) => {
+      {careerReview && <CareerReviewDialog key={careerReview.jobId} jobId={careerReview.jobId} report={careerReview.report}
+        initialProjectId={careerReview.projectId} initialSnapshot={careerReview.snapshot}
+        projects={projects.filter(project => project.status === "active" && !project.isDraft)}
+        onSnapshot={verifyCareerProject} onSave={saveCareerReview} onClose={() => setCareerReview(null)} />}
+      <Suspense fallback={null}><CompanionBridge projects={projects} tasks={workspaceTasks} articles={articles} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} activeSession={activeSession} onFocus={companionFocus} onError={showMessage} onSaveNote={saveAsabaNote} onPlan={planWithAsaba} onOpenAdjustment={openAsabaAdjustment} onArchiveWorker={archiveAsabaWorker} onSavePlan={saveAsabaPlan} onStartCareer={startAsabaCareer} onCareerReview={openCareerReview} onAction={async (action: CompanionAction) => {
         if (action.kind === "prepare_note") {
           const note = await repository.get(action.id);
           if (!note) throw new Error("这篇笔记已不存在。");

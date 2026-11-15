@@ -1,4 +1,6 @@
 import type { DocumentReport, ResearchReport } from "./asaba-worker";
+import type { CareerReport } from "./asaba-career";
+import type { ProjectCategory } from "./project-types";
 export type CompanionAction = { kind: "open_project" | "open_note" | "prepare_note" | "start_task" | "capture" | "open_observer" | "open_settings"; id: string; label: string; text?: string };
 export type CompanionAskScope = "chat" | "work" | "news";
 export type CompanionEvidence = { id: string; threadId: string; title: string; projectPath: string; occurredAt: string; updatedAt: string; status: string; text: string; limited: boolean };
@@ -6,7 +8,7 @@ export type CompanionMessage = { id: string; role: "user" | "assistant"; text: s
 export type CompanionContext = {
   updatedAt?: string;
   model?: string;
-  projects?: Array<{ id: string; title: string; outcome: string; status: string; isDraft?: boolean }>;
+  projects?: Array<{ id: string; title: string; outcome: string; status: string; isDraft?: boolean; category?: ProjectCategory }>;
   tasks?: Array<{ id: string; title: string; projectId: string | null; projectTitle: string }>;
   notes?: Array<{ id: string; title: string; summary: string; project: string; at?: string }>;
   news?: Array<{ title: string; summary: string; url: string; matched?: boolean }>;
@@ -26,10 +28,11 @@ export type AsabaObservation = { enabled: boolean; sourceApplication: string | n
 export type AsabaRecap = { text: string; local_model: boolean; day: string; generated_at: string; items: Array<{ at: string; end: string | null; kind: string; text: string; source: string | null }> };
 export type AsabaJob = {
   id: string; noteId: string; projectId: string; title: string; description: string; repository: string;
-  agent: "codex" | "research" | "document"; workspaceMode: "copy" | "original"; hadLocalChanges: boolean; previousJobId: string | null;
+  agent: "codex" | "research" | "document" | "career"; workspaceMode: "copy" | "original"; hadLocalChanges: boolean; previousJobId: string | null;
   base: string | null; sessionId: string | null; updatedAt: string; summary: string | null; commands: string[];
   diff: string | null; error: string | null;
-  progress?: string; report?: ResearchReport | DocumentReport; attempt?: number;
+  progress?: string; report?: ResearchReport | DocumentReport | CareerReport; attempt?: number;
+  careerResearch?: ResearchReport; projectSnapshot?: string;
   state: "queued" | "running" | "recovering" | "review" | "reviewed" | "completed" | "interrupted" | "cancelled" | "failed";
 };
 export type AsabaDelegation = Pick<AsabaJob, "noteId" | "projectId" | "title" | "description" | "repository"> & {

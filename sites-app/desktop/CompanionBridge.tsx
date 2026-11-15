@@ -1,4 +1,5 @@
 import { researchProject, type WorkerArchive } from "../app/asaba-worker";
+import type { CareerScope } from "../app/asaba-career";
 import type { AsabaAdjustmentRequest, AsabaPlanningResult, AsabaPlanSave } from "../app/asaba-planning";
 import { useEffect, useRef } from "react";
 import { emitTo, listen } from "@tauri-apps/api/event";
@@ -15,19 +16,21 @@ import type { WorkspaceTask } from "./WorkPages";
 import { companionApi } from "./companionApi";
 import { Button } from "./DesktopControls";
 
-export function CompanionBridge({ projects, tasks, articles, dashboardRepository, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onArchiveWorker, onSavePlan, onError }: {
+export function CompanionBridge({ projects, tasks, articles, dashboardRepository, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError }: {
   projects: ProjectSummary[]; tasks: WorkspaceTask[]; articles: StoredArticle[]; dashboardRepository: DashboardRepository;
   onAction: (action: CompanionAction) => Promise<void>; onError: (message: string) => void;
   onSaveNote: (note: AsabaNote) => Promise<string>;
   onPlan: (request: string, projectId: string | null) => Promise<AsabaPlanningResult>;
   onArchiveWorker: (request: WorkerArchive) => Promise<void>;
+  onStartCareer: (id: string, scope: CareerScope) => Promise<void>;
+  onCareerReview: (jobId: string) => Promise<void>;
   onOpenAdjustment: (request: AsabaAdjustmentRequest) => Promise<void>;
   onSavePlan: (request: AsabaPlanSave) => Promise<{ projectId?: string }>;
   dashboardPreferences: DashboardPreferences; activeSession: FocusSession | null;
   onFocus: (command: AsabaFocusCommand) => Promise<void>;
 }) {
-  const latest = useRef({ projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onArchiveWorker, onSavePlan, onError });
-  latest.current = { projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onArchiveWorker, onSavePlan, onError };
+  const latest = useRef({ projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError });
+  latest.current = { projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError };
   const opened = useRef(false);
   const publish = useRef<(() => Promise<void>) | null>(null);
   useEffect(() => {
@@ -43,7 +46,7 @@ export function CompanionBridge({ projects, tasks, articles, dashboardRepository
       const { projects, tasks, articles, dashboardPreferences, activeSession } = latest.current;
       await companionApi.context({
         updatedAt: new Date().toISOString(), model: loadDeepSeekModelSettings().defaultModel,
-        projects: projects.filter(project => project.status !== "completed").slice(0, 40).map(({ id, title, outcome, status, isDraft }) => ({ id, title, outcome: outcome.slice(0, 500), status, isDraft })),
+        projects: projects.filter(project => project.status !== "completed").slice(0, 40).map(({ id, title, outcome, status, isDraft, category }) => ({ id, title, outcome: outcome.slice(0, 500), status, isDraft, category })),
         tasks: tasks.filter(task => !["done", "cancelled", "waiting"].includes(task.status)).slice(0, 80).map(({ id, title, projectId, projectTitle }) => ({ id, title, projectId, projectTitle })),
         notes: articles.filter(article => article.source.includes("浅羽随手记")).slice(0, 60).map(({ id, title, summary, project, updated }) => ({ id, title, summary: summary.slice(0, 400), project, at: updated })),
         news: (ai?.value.items ?? []).filter(item => matchingAiKeywords(item, dashboardPreferences.aiHighlightKeywords).length > 0).map(item => ({ title: item.title, summary: item.summary.slice(0, 500), url: item.originalUrl || item.aihotUrl, matched: true })),
@@ -100,6 +103,24 @@ export function CompanionBridge({ projects, tasks, articles, dashboardRepository
         await emitTo("companion", "asaba-save-worker-result", { id: payload.id });
       } catch (error) { await emitTo("companion", "asaba-save-worker-result", { id: payload.id, error: String(error) }); }
     });
+    const careerStart = listen<{ id: string; scope: CareerScope }>("asaba-start-career", async ({ payload }) => {
+      if (!active) return;
+      try {
+        await latest.current.onStartCareer(payload.id, payload.scope);
+        await emitTo("companion", "asaba-start-career-result", { id: payload.id });
+      } catch (error) {
+        await emitTo("companion", "asaba-start-career-result", { id: payload.id, error: String(error) });
+      }
+    });
+    const careerReview = listen<{ id: string; jobId: string }>("asaba-review-career", async ({ payload }) => {
+      if (!active) return;
+      try {
+        await latest.current.onCareerReview(payload.jobId);
+        await emitTo("companion", "asaba-review-career-result", { id: payload.id });
+      } catch (error) {
+        await emitTo("companion", "asaba-review-career-result", { id: payload.id, error: String(error) });
+      }
+    });
     const savePlan = listen<AsabaPlanSave>("asaba-save-plan", async ({ payload }) => {
       if (!active) return;
       try {
@@ -134,7 +155,7 @@ export function CompanionBridge({ projects, tasks, articles, dashboardRepository
       }
     });
     if (!opened.current) { opened.current = true; void companionApi.window(false).catch(error => latest.current.onError(String(error))); }
-    return () => { active = false; publish.current = null; window.clearInterval(timer); for (const subscription of [focus, capture, refreshRequested, plan, savePlan, openPlan, adjustment, archive, researchModel]) void subscription.then(stop => stop()); void subscription.then(stop => stop()); };
+    return () => { active = false; publish.current = null; window.clearInterval(timer); for (const subscription of [focus, capture, refreshRequested, plan, savePlan, openPlan, adjustment, archive, researchModel, careerStart, careerReview]) void subscription.then(stop => stop()); void subscription.then(stop => stop()); };
   }, [dashboardRepository]);
   useEffect(() => {
     if (!isTauri()) return;

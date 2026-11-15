@@ -1,4 +1,5 @@
 import { projectDateKind } from "../project-dates";
+import type { CareerWrite } from "../asaba-career";
 import { routeParents, validateRoute } from "../project-route";
 import { prepareProjectRoute } from "../project-route-proposal";
 import type {
@@ -30,6 +31,13 @@ import {
 } from "./project-repository";
 import { executeSqliteTransaction, type SqliteDatabase, type SqliteStatement } from "./sqlite-article-repository";
 import { projectWeekKey, readWeekSettings, type WeekAction } from "../project-week";
+
+const careerSnapshotSql = `SELECT json_array(p.updated_at, p.status, p.planning_mode,
+  json((SELECT json_group_array(json_array(id, updated_at, status, sort_order))
+    FROM (SELECT id, updated_at, status, sort_order FROM project_milestones WHERE project_id = p.id ORDER BY id))),
+  json((SELECT json_group_array(json_array(id, updated_at, status))
+    FROM (SELECT id, updated_at, status FROM project_tasks WHERE project_id = p.id AND deleted_at IS NULL ORDER BY id)))
+) AS stamp FROM projects p WHERE p.id = ?1 AND p.status = 'active' AND p.is_draft = 0`;
 
 const projectWeekSnapshot = `SELECT json_object(
   'settings', (SELECT value FROM app_meta WHERE key = '${projectWeekKey}'),
@@ -1418,6 +1426,91 @@ export class SqliteProjectRepository implements ProjectRepository {
       const [saved] = await this.database.select<{ project_id: string }>("SELECT project_id FROM project_accumulations WHERE id = ?", [accumulationId]);
       if (saved?.project_id === projectId) return;
       if (saved) throw new ProjectRepositoryError("这份成果已经归档到其他项目。", "invalid_data");
+      throw error;
+    } finally {
+      this.indexCache.clear();
+    }
+  }
+
+  async careerSnapshot(projectId: string): Promise<string | null> {
+    await this.initialize();
+    const [row] = await this.database.select<{ stamp: string }>(careerSnapshotSql, [projectId]);
+    return row?.stamp ?? null;
+  }
+
+  async adoptCareerRoute(input: CareerWrite): Promise<string> {
+    const { jobId, title, outcome, action, stages, body, links, snapshot } = input;
+    const invalid = (message: string) => new ProjectRepositoryError(message, "invalid_data");
+    if (!/^[0-9a-f-]{36}$/i.test(jobId) || !title.trim() || title.length > 100 || !outcome.trim() ||
+        outcome.length > 320 || action.length > 200 || stages.length > 4 ||
+        stages.some(stage => !stage.title.trim() || stage.title.length > 100 || !stage.done.trim() || stage.done.length > 320)) {
+      throw invalid("请核对项目目标、阶段完成标准和行动。");
+    }
+    await this.initialize();
+    const projectId = input.projectId ?? "project-asaba-career-" + jobId;
+    const id = "asaba-worker-" + jobId;
+    const existing = async () => (await this.database.select<{ project_id: string }>(
+      "SELECT project_id FROM project_accumulations WHERE id = ?", [id],
+    ))[0]?.project_id;
+    const alreadySaved = await existing();
+    if (alreadySaved) {
+      if (alreadySaved === projectId) return projectId;
+      throw invalid("这份路线已经保存到另一项目。");
+    }
+
+    const now = this.now();
+    const statements: SqliteStatement[] = [];
+    let direction: ProjectCategory = "career";
+    let stageOffset = 0;
+    let useStages = stages.length > 0;
+    if (input.projectId) {
+      const [row] = await this.database.select<ProjectRow>("SELECT * FROM projects WHERE id = ? AND status = 'active' AND is_draft = 0", [projectId]);
+      if (!row || !snapshot || await this.careerSnapshot(projectId) !== snapshot) {
+        throw invalid("项目有变化。请核对项目现状后再保存。");
+      }
+      direction = normalizeLifeDomain(row.category);
+      useStages = useStages && row.planning_mode !== "direct";
+      const [max] = await this.database.select<{ max_order: number }>(
+        "SELECT COALESCE(MAX(sort_order), 0) AS max_order FROM project_milestones WHERE project_id = ?", [projectId]);
+      stageOffset = max.max_order;
+      statements.push({
+        sql: `SELECT json_extract(CASE WHEN (${careerSnapshotSql}) = ?2 THEN '{}' ELSE 'project changed' END, '$')`,
+        bindValues: [projectId, snapshot],
+      });
+    } else {
+      statements.push(projectWriteStatement({
+        id: projectId, title: title.trim(), outcome: outcome.trim(), motivation: "", projectType: "main",
+        planningMode: useStages ? "staged" : "direct", parentProjectId: null, supportsMilestoneId: null,
+        status: "active", category: direction, sortOrder: 100, isDraft: false, sourceNote: "浅羽求职规划",
+        targetDate: "", reviewDate: "", completedAt: null, createdAt: now, updatedAt: now,
+      }));
+    }
+    statements.push({
+      sql: "INSERT INTO project_accumulations(id, project_id, milestone_id, kind, title, completed_work, takeaway, reference, created_at, updated_at) VALUES (?, ?, NULL, 'other', ?, ?, '', ?, ?, ?)",
+      bindValues: [id, projectId, title.trim(), body, links.join("\n"), now, now],
+    });
+    const stageId = (index: number) => "stage-" + id + "-" + index;
+    if (useStages) stages.forEach((stage, index) => statements.push(milestoneWriteStatement({
+      id: stageId(index), projectId, title: stage.title.trim(), definitionOfDone: stage.done.trim(),
+      status: !input.projectId && index === 0 ? "current" : "planned", dueDate: "", dueDateKind: null,
+      predecessorIds: index ? [stageId(index - 1)] : [], sortOrder: stageOffset + (index + 1) * 10,
+      createdAt: now, updatedAt: now,
+    })));
+    if (action.trim()) statements.push(taskWriteStatement({
+      id: "task-" + id, projectId, milestoneId: !input.projectId && useStages ? stageId(0) : null,
+      direction, title: action.trim(), actionType: "organize", definitionOfDone: "", steps: [], currentFocus: "",
+      details: "来源 · 浅羽求职规划", benefit: "", dueDate: "", status: input.projectId ? "later" : "next",
+      waitingFor: "", resumeAction: "", context: "anywhere", sortOrder: 1000, createdAt: now, updatedAt: now, completedAt: null,
+    }));
+    statements.push({ sql: "UPDATE projects SET updated_at = ? WHERE id = ?", bindValues: [now, projectId] });
+    try {
+      await executeSqliteTransaction(this.database, statements);
+      return projectId;
+    } catch (error) {
+      const saved = await existing();
+      if (saved === projectId) return projectId;
+      if (saved) throw invalid("这份路线已经保存到另一项目。");
+      if (input.projectId && await this.careerSnapshot(projectId) !== snapshot) throw invalid("保存前项目发生了变化。请重新核对。");
       throw error;
     } finally {
       this.indexCache.clear();

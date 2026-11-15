@@ -38,6 +38,45 @@ class NodeSqliteAdapter implements SqliteDatabase {
   }
 }
 
+test("adopts a confirmed career route atomically and preserves the current action", async () => {
+  const database = new DatabaseSync(":memory:");
+  const adapter = new NodeSqliteAdapter(database);
+  const repository = new SqliteProjectRepository(adapter, { seedProjects: initialProjectSeeds });
+  const original = (await repository.list()).find(project => project.title === "机器人岗位投递与面试迭代")!;
+  const target = await repository.saveProject({ ...original, planningMode: "staged" });
+  const snapshot = await repository.careerSnapshot(target.id);
+  const draft = { jobId: crypto.randomUUID(), projectId: target.id, snapshot, title: "机器人岗位路线", outcome: "准备投递",
+    stages: [{ title: "岗位要求对照", done: "完成五份职位要求对比" }], action: "核对现有材料", body: "依据 [s1]",
+    links: ["https://example.org/jobs"] };
+  adapter.beforeTransaction = () => {
+    adapter.beforeTransaction = undefined;
+    database.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run("2026-11-15T13:00:00.000Z", target.id);
+  };
+  await assert.rejects(repository.adoptCareerRoute(draft), /发生了变化/);
+  assert.equal(database.prepare("SELECT count(*) AS count FROM project_accumulations WHERE id = ?").get("asaba-worker-" + draft.jobId)?.count, 0);
+  const refreshed = { ...draft, snapshot: await repository.careerSnapshot(target.id) };
+  assert.equal(await repository.adoptCareerRoute(refreshed), target.id);
+  assert.equal(await repository.adoptCareerRoute(refreshed), target.id);
+  await assert.rejects(repository.adoptCareerRoute({ ...refreshed, projectId: null }), /另一项目/);
+  const existing = (await repository.get(target.id))!;
+  assert.equal(existing.tasks.find(task => task.id === original.nextTask?.id)?.status, original.nextTask?.status);
+  assert.equal(existing.tasks.filter(task => task.title === draft.action && task.status === "later").length, 1);
+  assert.equal(existing.milestones.filter(stage => stage.title === draft.stages[0].title && stage.dueDate === "").length, 1);
+  assert.equal(existing.accumulations.filter(item => item.id === "asaba-worker-" + draft.jobId).length, 1);
+  const createdId = await repository.adoptCareerRoute({ ...draft, jobId: crypto.randomUUID(), projectId: null, snapshot: null });
+  const created = (await repository.get(createdId))!;
+  assert.equal(created.project.planningMode, "staged");
+  assert.equal(created.milestones[0].status, "current");
+  assert.equal(created.tasks[0].milestoneId, created.milestones[0].id);
+  const direct = await repository.saveProject({ ...created.project, planningMode: "direct" });
+  await repository.adoptCareerRoute({ ...draft, jobId: crypto.randomUUID(), projectId: direct.id,
+    snapshot: await repository.careerSnapshot(direct.id), action: "" });
+  const directResult = (await repository.get(direct.id))!;
+  assert.equal(directResult.milestones.length, 1);
+  assert.equal(directResult.accumulations.length, 2);
+  database.close();
+});
+
 test("archives a worker report and optional action exactly once without replacing the current action", async () => {
   const database = new DatabaseSync(":memory:");
   const repository = new SqliteProjectRepository(new NodeSqliteAdapter(database), { seedProjects: initialProjectSeeds });
