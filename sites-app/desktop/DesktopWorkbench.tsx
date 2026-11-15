@@ -2,7 +2,7 @@ import { needsResearchReview, workerArchiveContent, type WorkerArchive } from ".
 import { careerArchiveText, type CareerReport, type CareerReview, type CareerScope } from "../app/asaba-career";
 import { CareerReviewDialog } from "./AsabaCareer";
 import { writeAsabaPlan } from "../app/save-asaba-plan";
-import { analyzeProjectProgress, buildAsabaPlanningInput, buildAsabaProgressInput, previewAsabaPlan, projectDelegationSource, readAuthorizedProjectEvidence, resolveProjectDecision, type AsabaAdjustmentRequest, type AsabaPlanningResult, type AsabaPlanSave, type AsabaProjectDecision } from "../app/asaba-planning";
+import { analyzeProjectProgress, buildAsabaPlanningInput, buildAsabaProgressInput, isHypotheticalProjectRequest, previewAsabaPlan, projectDelegationSource, readAuthorizedProjectEvidence, resolveProjectDecision, type AsabaAdjustmentRequest, type AsabaPlanningResult, type AsabaPlanSave, type AsabaProjectDecision } from "../app/asaba-planning";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { companionApi } from "./companionApi";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -54,7 +54,7 @@ import {
   resolveDeepSeekModel,
   saveDeepSeekModelSettings,
 } from "../app/ai-model-settings";
-import { projectStatusCounts } from "../app/project-selectors";
+import { projectStatusCounts, projectWorkStatus } from "../app/project-selectors";
 import type { ProjectDetail, ProjectProposal, ProjectSummary, ProjectTask } from "../app/project-types";
 import type { Article, StoredArticle } from "../app/types";
 import {
@@ -957,6 +957,19 @@ export function DesktopWorkbench({
 
   const planningSaves = useRef(new Map<string, Promise<{ projectId?: string }>>());
 
+  async function readAsabaProjectProgress(projectId: string) {
+    await projectRepository.list();
+    const detail = await projectRepository.get(projectId);
+    if (!detail || detail.project.isDraft) throw new Error("所选项目已不可用。");
+    const { next, waiting, recent } = projectWorkStatus(detail);
+    return {
+      title: detail.project.title, outcome: detail.project.outcome, status: detail.project.status,
+      recent: recent ? { title: recent.source, date: recent.at, text: recent.text } : null,
+      next: next ? [next.currentFocus || next.title] : [],
+      waiting: waiting.slice(0, 3).map(item => item.waitingFor ? item.title + " · " + item.waitingFor : item.title),
+    };
+  }
+
   async function planWithAsaba(rawRequest: string, projectId: string | null, authorizedNoteIds: string[] = [], milestoneId?: string | null): Promise<AsabaPlanningResult> {
     const request = rawRequest.trim();
     const authorizedProjectId = projectId;
@@ -967,7 +980,10 @@ export function DesktopWorkbench({
       const model = await resolveAvailableDeepSeekModel("projectCreate", desktopApi.deepseek.apiModels);
       const input = buildAsabaPlanningInput(request, null, eligible);
       const { content } = await desktopApi.deepseek.planWithAsaba({ model, input });
-      if (content.kind !== "project_progress" && content.kind !== "existing_project") return { kind: "plan", draft: previewAsabaPlan(content, eligible) };
+      if (content.kind !== "project_progress" && content.kind !== "existing_project") {
+        if (isHypotheticalProjectRequest(request)) return { kind: "clarify", question: "这个假设涉及哪个项目？可以从项目里打开「问浅羽」继续分析。" };
+        return { kind: "plan", draft: previewAsabaPlan(content, eligible) };
+      }
       projectId = content.projectId;
       if (!projectId) return { kind: "choose_project", projects: eligible.map(({ project: { id, title, outcome } }) => ({ id, title, outcome })) };
     }
@@ -994,7 +1010,7 @@ export function DesktopWorkbench({
         return readAuthorizedProjectEvidence(projectId, approvedNoteIds.filter((id) => linkedIds.has(id)), (id) => repository.get(id));
       } : undefined,
     );
-    return resolveProjectDecision(detail, analysis, scope);
+    return resolveProjectDecision(detail, analysis, scope, input.scenario === "hypothetical");
   }
 
   async function prepareProjectDelegation(result: AsabaProjectDecision) {
@@ -1088,6 +1104,7 @@ export function DesktopWorkbench({
 
   async function openAsabaAdjustment(command: AsabaAdjustmentRequest) {
     if (!command.request.trim() || command.request.length > 4000 || command.suggestion.length > 200) throw new Error("调整原因无效，请重新生成建议。");
+    if (isHypotheticalProjectRequest(command.request)) throw new Error("请在变化实际确认后再调整计划。");
     await projectRepository.list();
     const target = await projectRepository.get(command.projectId);
     if (!target || target.project.status !== "active" || target.project.isDraft) throw new Error("该项目已不可调整，请重新选择。");
@@ -1684,7 +1701,7 @@ export function DesktopWorkbench({
         initialProjectId={careerReview.projectId} initialSnapshot={careerReview.snapshot}
         projects={projects.filter(project => project.status === "active" && !project.isDraft)}
         onSnapshot={verifyCareerProject} onSave={saveCareerReview} onClose={() => setCareerReview(null)} />}
-      <Suspense fallback={null}><CompanionBridge projects={projects} tasks={workspaceTasks} articles={articles} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} activeSession={activeSession} onFocus={companionFocus} onError={showMessage} onSaveNote={saveAsabaNote} onPlan={planWithAsaba} onOpenAdjustment={openAsabaAdjustment} onOpenProjectDelegation={prepareProjectDelegation} onArchiveWorker={archiveAsabaWorker} onSavePlan={saveAsabaPlan} onStartCareer={startAsabaCareer} onCareerReview={openCareerReview} onAction={async (action: CompanionAction) => {
+      <Suspense fallback={null}><CompanionBridge projects={projects} tasks={workspaceTasks} articles={articles} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} activeSession={activeSession} onFocus={companionFocus} onError={showMessage} onSaveNote={saveAsabaNote} onPlan={planWithAsaba} onProjectProgress={readAsabaProjectProgress} onOpenAdjustment={openAsabaAdjustment} onOpenProjectDelegation={prepareProjectDelegation} onArchiveWorker={archiveAsabaWorker} onSavePlan={saveAsabaPlan} onStartCareer={startAsabaCareer} onCareerReview={openCareerReview} onAction={async (action: CompanionAction) => {
         if (action.kind === "prepare_note") {
           const note = await repository.get(action.id);
           if (!note) throw new Error("这篇笔记已不存在。");

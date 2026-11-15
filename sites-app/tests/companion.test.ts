@@ -3,19 +3,48 @@ import test from "node:test";
 import { companionReadout, companionTodayRecords, type CompanionStatus } from "../app/companion-types";
 import { asabaSpeechSegments } from "../desktop/useAsabaSpeech";
 import { researchIntent, researchQueries } from "../app/asaba-worker";
-import { asabaIntents, careerRecruitmentBatch, careerResearchTopic } from "../app/asaba-career";
+import { careerRecruitmentBatch, careerResearchTopic } from "../app/asaba-career";
+import { matchAsabaProject, routeAsabaRequest } from "../app/asaba-capabilities";
 
-test("routes a career request without copying personal details into the public scope", () => {
+test("prepares career search terms without copying personal details into the public scope", () => {
   const request = "帮我准备明年的机器人岗位求职，结合我的学历和 ROS2 经历，邮箱 user@example.com";
-  assert.deepEqual(asabaIntents(request), ["career"]);
   assert.equal(careerResearchTopic(request), "机器人 ROS2");
   assert.equal(careerRecruitmentBatch(request, 2026), "2027 年");
   assert.equal(careerRecruitmentBatch("2028 年秋招，机器人"), "2028 年秋招");
   assert.equal(careerRecruitmentBatch("准备 2027 年机器人岗位求职"), "2027 年");
-  assert.deepEqual(asabaIntents("这个项目做到哪了，另外帮我查论文格式"), ["progress", "document"]);
-  assert.deepEqual(asabaIntents("记下这个想法：机器人岗位求职准备"), ["note"]);
-  assert.deepEqual(asabaIntents("帮我查查机器人岗位"), ["research"]);
-  assert.equal(asabaIntents("有个想法").length > 1, true);
+});
+
+test("local routing validates supported calls, arguments and clarification before dispatch", async () => {
+  const requests = [
+    ["记下这个想法，但暂时不要做。", { kind: "call", id: "note", args: {} }],
+    ["帮我看看科研项目最近做到哪里了。", { kind: "call", id: "progress", args: { project: "科研项目" } }],
+    ["浅语这个问题交给 Codex 修改。", { kind: "call", id: "delegate", args: { project: "浅语" } }],
+    ["如果答辩提前了，我应该怎么办？", { kind: "call", id: "plan", args: {} }],
+    ["帮我查一下最新的机器人岗位要求。", { kind: "call", id: "research", args: { topic: "机器人岗位要求" } }],
+  ] as const;
+  for (const [request, result] of requests) {
+    const route = await routeAsabaRequest(request, async (sent, catalog) => {
+      assert.equal(sent, request);
+      assert.equal(catalog.progress.external, false);
+      assert.equal(catalog.delegate.confirm, true);
+      return result;
+    });
+    assert.deepEqual(route, { kind: "ready", call: { id: result.id, args: result.args } });
+  }
+  for (const request of ["这个项目暂时不想动。", "我还没决定是否要立项。"]) {
+    const question = "你想先记下来，还是讨论一下？";
+    assert.deepEqual(await routeAsabaRequest(request, async () => ({ kind: "clarify", question })), { kind: "clarify", question });
+  }
+  for (const invalid of [
+    { kind: "call", id: "create_project", args: {} },
+    { kind: "call", id: "delegate", args: { projectId: "model-chosen-id", confirm: true } },
+    { kind: "call", id: "research", args: { topic: ["robotics"] } },
+  ]) assert.deepEqual(await routeAsabaRequest("有个想法", async () => invalid), { kind: "manual", reason: "invalid" });
+  assert.deepEqual(await routeAsabaRequest("有个想法", async () => { throw Error("offline"); }), { kind: "manual", reason: "unavailable" });
+  const projects = [{ id: "1", title: "科研项目 A" }, { id: "2", title: "科研项目 B" }, { id: "3", title: "草稿", isDraft: true }];
+  assert.equal(matchAsabaProject(projects, "科研项目"), undefined);
+  assert.equal(matchAsabaProject(projects, "科研项目 ａ")?.id, "1");
+  assert.equal(matchAsabaProject(projects, "草稿"), undefined);
 });
 
 test("routes explicit public research without treating project progress as a web search", () => {

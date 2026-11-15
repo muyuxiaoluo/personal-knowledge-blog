@@ -1,5 +1,6 @@
 import { researchProject, type WorkerArchive } from "../app/asaba-worker";
 import type { CareerScope } from "../app/asaba-career";
+import type { AsabaLocalProjectProgress } from "../app/asaba-capabilities";
 import type { AsabaAdjustmentRequest, AsabaPlanningResult, AsabaPlanSave, AsabaProjectDecision } from "../app/asaba-planning";
 import { useEffect, useRef } from "react";
 import { emitTo, listen } from "@tauri-apps/api/event";
@@ -16,10 +17,11 @@ import type { WorkspaceTask } from "./WorkPages";
 import { companionApi } from "./companionApi";
 import { Button } from "./DesktopControls";
 
-export function CompanionBridge({ projects, tasks, articles, dashboardRepository, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onOpenProjectDelegation, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError }: {
+export function CompanionBridge({ projects, tasks, articles, dashboardRepository, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onProjectProgress, onOpenAdjustment, onOpenProjectDelegation, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError }: {
   projects: ProjectSummary[]; tasks: WorkspaceTask[]; articles: StoredArticle[]; dashboardRepository: DashboardRepository;
   onAction: (action: CompanionAction) => Promise<void>; onError: (message: string) => void;
   onSaveNote: (note: AsabaNote) => Promise<string>;
+  onProjectProgress: (projectId: string) => Promise<AsabaLocalProjectProgress>;
   onPlan: (request: string, projectId: string | null, authorizedNoteIds?: string[], milestoneId?: string | null) => Promise<AsabaPlanningResult>;
   onArchiveWorker: (request: WorkerArchive) => Promise<void>;
   onStartCareer: (id: string, scope: CareerScope) => Promise<void>;
@@ -30,8 +32,8 @@ export function CompanionBridge({ projects, tasks, articles, dashboardRepository
   dashboardPreferences: DashboardPreferences; activeSession: FocusSession | null;
   onFocus: (command: AsabaFocusCommand) => Promise<void>;
 }) {
-  const latest = useRef({ projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onOpenProjectDelegation, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError });
-  latest.current = { projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onOpenProjectDelegation, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError };
+  const latest = useRef({ projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onProjectProgress, onOpenAdjustment, onOpenProjectDelegation, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError });
+  latest.current = { projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onProjectProgress, onOpenAdjustment, onOpenProjectDelegation, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError };
   const opened = useRef(false);
   const publish = useRef<(() => Promise<void>) | null>(null);
   useEffect(() => {
@@ -79,6 +81,13 @@ export function CompanionBridge({ projects, tasks, articles, dashboardRepository
       } catch (error) {
         await emitTo("companion", "asaba-note-result", { id: payload.id, error: String(error) });
       }
+    });
+    const projectProgress = listen<{ id: string; projectId: string }>("asaba-local-project-progress", async ({ payload }) => {
+      if (!active) return;
+      try {
+        const result = await latest.current.onProjectProgress(payload.projectId);
+        await emitTo("companion", "asaba-local-project-progress-result", { id: payload.id, result });
+      } catch (error) { await emitTo("companion", "asaba-local-project-progress-result", { id: payload.id, error: String(error) }); }
     });
     const plan = listen<{ id: string; request: string; projectId: string | null; authorizedNoteIds?: string[]; milestoneId?: string | null }>("asaba-plan", async ({ payload }) => {
       if (!active) return;
@@ -163,7 +172,7 @@ export function CompanionBridge({ projects, tasks, articles, dashboardRepository
       }
     });
     if (!opened.current) { opened.current = true; void companionApi.window(false).catch(error => latest.current.onError(String(error))); }
-    return () => { active = false; publish.current = null; window.clearInterval(timer); for (const subscription of [focus, capture, refreshRequested, plan, savePlan, openPlan, adjustment, delegation, archive, researchModel, careerStart, careerReview]) void subscription.then(stop => stop()); void subscription.then(stop => stop()); };
+    return () => { active = false; publish.current = null; window.clearInterval(timer); for (const subscription of [focus, capture, refreshRequested, plan, projectProgress, savePlan, openPlan, adjustment, delegation, archive, researchModel, careerStart, careerReview]) void subscription.then(stop => stop()); void subscription.then(stop => stop()); };
   }, [dashboardRepository]);
   useEffect(() => {
     if (!isTauri()) return;

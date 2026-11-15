@@ -417,6 +417,7 @@ pub fn run() {
             companion::asaba_recap,
             companion::asaba_cancel_recap,
             asaba::asaba_observation,
+            asaba::asaba_route,
             asaba::asaba_activity,
             asaba::asaba_shot,
             asaba::asaba_restore_source,

@@ -19,6 +19,7 @@ export function ActionPlanningAssistant({ projects, loadProject, projectDecision
   const [constraints, setConstraints] = useState("");
   const [proposal, setProposal] = useState<NextActionProposal | null>(null);
   const [decision, setDecision] = useState<AsabaProjectDecision | null>(null);
+  const [repeatCompletedAction, setRepeatCompletedAction] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [today, setToday] = useState(false);
@@ -41,7 +42,7 @@ export function ActionPlanningAssistant({ projects, loadProject, projectDecision
     return { detail, milestone };
   }
   async function generate() {
-    setBusy(true); setError(""); setProposal(null); setDecision(null);
+    setBusy(true); setError(""); clearResult();
     try {
       if (projectId) {
         const result = await projectDecisions.ask(projectId, projectRequest, milestoneId || undefined);
@@ -70,7 +71,7 @@ export function ActionPlanningAssistant({ projects, loadProject, projectDecision
     setBusy(true); setError("");
     try {
       const { detail, milestone } = await readSelection();
-      if (decision) assertProjectActionIsCurrent(detail, proposal.action.title, decision.expectedUpdatedAt);
+      if (decision) assertProjectActionIsCurrent(detail, proposal.action.title, decision.expectedUpdatedAt, repeatCompletedAction);
       const saved = await onAddTask({ projectId: detail?.project.id ?? null, milestoneId: milestone?.id ?? null, direction: detail?.project.category ?? "uncategorized", title: proposal.action.title,
         currentFocus: proposal.action.currentFocus, definitionOfDone: proposal.action.definitionOfDone, steps: [],
         details: [`想做的事：${request.trim()}`, constraints.trim() ? `目标与投入约束：${constraints.trim()}` : "", proposal.reason, proposal.action.details].filter(Boolean).join("\n\n"),
@@ -80,7 +81,7 @@ export function ActionPlanningAssistant({ projects, loadProject, projectDecision
     finally { setBusy(false); }
   }
   const projectRequest = [request.trim(), constraints.trim() && "本次约束：" + constraints.trim()].filter(Boolean).join("\n\n");
-  function clearResult() { setProposal(null); setDecision(null); }
+  function clearResult() { setProposal(null); setDecision(null); setRepeatCompletedAction(false); }
   async function follow(up: () => Promise<void>) {
     setBusy(true); setError("");
     try { await up(); onClose(); }
@@ -112,11 +113,12 @@ export function ActionPlanningAssistant({ projects, loadProject, projectDecision
           <label><span>这次具体做什么</span><textarea value={proposal.action.currentFocus} onChange={(event) => update({ currentFocus: event.target.value })} /></label>
           <label><span>做到哪里就可以停</span><textarea value={proposal.action.definitionOfDone} onChange={(event) => update({ definitionOfDone: event.target.value })} /></label>
           <label><span>后续参考与取舍</span><textarea value={proposal.action.details} onChange={(event) => update({ details: event.target.value })} /></label>
+          {decision?.actionDraft?.previousCompletion && <label className="situation-check"><input type="checkbox" checked={repeatCompletedAction} onChange={(event) => setRepeatCompletedAction(event.target.checked)} /><span>「{decision.actionDraft.previousCompletion.title}」已有完成记录。确认这是一次新的执行。</span></label>}
           <label className="situation-check"><input type="checkbox" checked={today} onChange={(event) => setToday(event.target.checked)} /><span>安排到今天（不勾选则留在待继续）</span></label>
         </div>}
       </fieldset>
       {error && <p role="alert" className="project-ai-error">{error}</p>}
-      {proposal && <footer><Button variant="secondary" type="button" disabled={busy} onClick={clearResult}>调整想法再生成</Button><Button variant="primary" disabled={busy || !proposal.action.title.trim() || !proposal.action.currentFocus.trim() || !proposal.action.definitionOfDone.trim()} onClick={() => void save()}>{busy ? "正在保存…" : "采用这一步"}</Button></footer>}
+      {proposal && <footer><Button variant="secondary" type="button" disabled={busy} onClick={clearResult}>调整想法再生成</Button><Button variant="primary" disabled={busy || !proposal.action.title.trim() || !proposal.action.currentFocus.trim() || !proposal.action.definitionOfDone.trim() || Boolean(decision?.actionDraft?.previousCompletion && !repeatCompletedAction)} onClick={() => void save()}>{busy ? "正在保存…" : "采用这一步"}</Button></footer>}
     </section>
   </div>;
 }

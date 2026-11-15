@@ -1,21 +1,5 @@
 import type { ResearchReport } from "./asaba-worker";
 
-export type AsabaIntent = "note" | "progress" | "plan" | "research" | "document" | "delegate" | "career";
-
-export function asabaIntents(text: string): AsabaIntent[] {
-  const request = text.trim().replace(/^浅羽[，,：:\s]*/u, "");
-  if (!request) return [];
-  if (/^(?:请|帮我)?(?:记一下|记个笔记|记下|记一笔|随手记|帮我记)/u.test(request)) return ["note"];
-  const matches: AsabaIntent[] = [];
-  if (/(?:项目|行动|任务).{0,20}(?:进度|进展|做到哪|状态|卡在哪)|(?:做到哪|做到了哪)/u.test(request)) matches.push("progress");
-  if (/(?:论文|文档|稿件).{0,18}(?:排版|格式)|(?:检查|核对).{0,18}(?:排版|格式)/u.test(request)) matches.push("document");
-  if (/委托|交给\s*codex|让\s*codex/iu.test(request)) matches.push("delegate");
-  if (/(求职|找工作|校招|投简历|岗位准备)/u.test(request) && /准备|规划|安排|路线|差距/u.test(request)) matches.push("career");
-  if (!matches.includes("career") && !matches.includes("progress") && /调研|搜(?:索|集|一下|搜)|查(?:一下|查|找)|联网/u.test(request)) matches.push("research");
-  if (!matches.length && /规划|安排|帮我做|新建项目|想要|我想|计划/u.test(request)) matches.push("plan");
-  return matches.length ? matches : ["note", "plan", "progress", "research", "document", "delegate", "career"];
-}
-
 export type CareerScope = { topic: string; queries: string[]; projectId: string | null; background: string };
 export type CareerStage = { title: string; done: string; sourceIds: string[] };
 export type CareerRoute = {

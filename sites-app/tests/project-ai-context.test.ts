@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildAsabaProgressInput, resolveProjectDecision, type AsabaProgressAnswer } from "../app/asaba-planning";
+import { assertProjectActionIsCurrent, buildAsabaProgressInput, resolveProjectDecision, type AsabaProgressAnswer } from "../app/asaba-planning";
 import type { Milestone, ProjectDetail, ProjectTask } from "../app/project-types";
 
 const now = "2026-09-22T08:00:00.000Z";
@@ -55,7 +55,19 @@ test("branch AI context includes ancestors and shared facts but excludes a paral
   assert.equal(result.answer.decision, "continue");
   assert.equal(result.existingAction?.id, leftTask.id);
   assert.equal(result.actionDraft, null);
-  assert.equal(resolveProjectDecision(detail, { answer: { ...answer, nextAction: rootTask.title }, evidence: input.evidence }, left).answer.decision, "keep");
+  const repeat = resolveProjectDecision(detail, { answer: { ...answer, nextAction: rootTask.title }, evidence: input.evidence }, left);
+  assert.equal(repeat.actionDraft?.previousCompletion?.id, rootTask.id);
+  assert.throws(() => assertProjectActionIsCurrent(detail, rootTask.title, now), /新的执行/);
+  assert.doesNotThrow(() => assertProjectActionIsCurrent(detail, rootTask.title, now, true));
+  assert.throws(() => assertProjectActionIsCurrent(detail, leftTask.title, now, true), /未完成行动/);
+  const hypothetical = buildAsabaProgressInput("如果答辩提前了，我应该怎么办？", detail);
+  assert.equal(hypothetical.scenario, "hypothetical");
+  assert.ok(!hypothetical.evidence.some(item => item.id === "request:current"));
+  const hypotheticalDecision = resolveProjectDecision(detail, {
+    answer: { ...answer, decision: "adjust", nextAction: "提前实验" }, evidence: hypothetical.evidence,
+  }, undefined, hypothetical.scenario === "hypothetical");
+  assert.equal(hypotheticalDecision.canAdjust, false);
+  assert.equal(hypotheticalDecision.actionDraft, null);
   const paused = { ...detail, project: { ...detail.project, status: "paused" as const } };
   assert.equal(resolveProjectDecision(paused, { answer: { ...answer, nextAction: "检查新输入" }, evidence: input.evidence }).actionDraft, null);
 });

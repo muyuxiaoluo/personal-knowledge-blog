@@ -20,6 +20,7 @@ export type AsabaPlanPreview = AsabaPlan & {
   milestone: { id: string; title: string } | null;
   expectedUpdatedAt?: string;
   completionCondition?: string;
+  previousCompletion?: { id: string; title: string; date: string };
 };
 
 export type AsabaPlanRoute = AsabaPlan | (Omit<AsabaPlan, "kind"> & { kind: "project_progress" });
@@ -48,6 +49,7 @@ export type AsabaProgressEvidence = {
 export type AsabaPlanningResult =
   | { kind: "plan"; draft: AsabaPlanPreview }
   | { kind: "choose_project"; projects: { id: string; title: string; outcome: string }[] }
+  | { kind: "clarify"; question: string }
   | AsabaProjectDecision;
 
 export type AsabaProjectDecision = { kind: "progress"; projectId: string; projectTitle: string; expectedUpdatedAt: string; answer: AsabaProgressAnswer; evidence: AsabaProgressEvidence[]; actionDraft: AsabaPlanPreview | null; canAdjust: boolean; existingAction?: { id: string; title: string }; investigation?: string };
@@ -79,6 +81,10 @@ export function projectDelegationSource(result: AsabaProjectDecision) {
     description: result.answer.nextAction + "\n\n验收条件\n" + result.answer.completionCondition };
 }
 
+export function isHypotheticalProjectRequest(text: string) {
+  return /(?:^|[。！？?!，,：:\n])\s*(?:如果|假如|假设|假定|万一|要是|倘若|若是|是否可能)|(?:的话[,，]?\s*(?:怎么|该|是否|要不要))|(?:会不会|要不要|是否应该).{0,35}[？?]/u.test(text);
+}
+
 export function buildAsabaProgressInput(request: string, detail: ProjectDetail, branch?: Milestone | null, jobs: AsabaJob[] = []) {
   const { project, milestones, tasks, logs, accumulations } = scopeProjectAiRecords(detail, branch);
   const taskById = new Map(tasks.map((item) => [item.id, item]));
@@ -89,8 +95,9 @@ export function buildAsabaProgressInput(request: string, detail: ProjectDetail, 
   const activeTasks = project.status === "active" ? byRecent(tasks.filter((item) => (item.status === "next" || item.status === "later") &&
     (!item.milestoneId || currentMilestones.has(item.milestoneId))), (item) => item.updatedAt)
     .sort((left, right) => Number(right.status === "next") - Number(left.status === "next")).slice(0, 5) : [];
+  const hypothetical = isHypotheticalProjectRequest(request);
   const evidence: AsabaProgressEvidence[] = [
-    { id: "request:current", kind: "user_input", title: "本次提供的问题或变化", text: clip(request, 4000), date: "" },
+    ...(!hypothetical ? [{ id: "request:current", kind: "user_input" as const, title: "本次提供的问题或变化", text: clip(request, 4000), date: "" }] : []),
     ...projectDecisionRecords(detail).map((item): AsabaProgressEvidence => ({
       id: "proposal:" + item.id, kind: "decision", title: item.title,
       text: clip((item.status === "accepted" ? "已采纳" : item.status === "deferred" ? "已暂缓" : "已否决") + (item.reason ? " · " + item.reason : "")), date: item.decidedAt,
@@ -132,7 +139,7 @@ export function buildAsabaProgressInput(request: string, detail: ProjectDetail, 
           text: clip([item.content, item.reference].filter(Boolean).join("\n")), date: item.updatedAt, milestoneId: item.milestoneId };
       }),
   ];
-  return { request, project: { id: project.id, title: clip(project.title, 140), outcome: clip(project.outcome), background: clip(project.motivation, 700), status: project.status,
+  return { request, ...(hypothetical ? { scenario: "hypothetical" as const } : {}), project: { id: project.id, title: clip(project.title, 140), outcome: clip(project.outcome), background: clip(project.motivation, 700), status: project.status,
     deadline: project.targetDateKind === "deadline" ? project.targetDate : "", reviewDate: project.reviewDate },
     ...(branch !== undefined ? { scope: { milestoneId: branch?.id ?? null } } : {}),
     evidence: evidence.map((source) => ({ ...source, projectId: project.id })) };
@@ -164,20 +171,24 @@ export function findDuplicateProjectAction(detail: ProjectDetail, title: string)
   const normalize = (value: string) => value.normalize("NFKC").toLowerCase().replace(/[\p{P}\s]/gu, "");
   const key = normalize(title);
   if (!key) return undefined;
-  return detail.tasks.find((task) => task.status !== "cancelled" && [task.title, task.currentFocus].some((value) => normalize(value) === key));
+  const matches = detail.tasks.filter((task) => task.status !== "cancelled" && [task.title, task.currentFocus].some((value) => normalize(value) === key));
+  return matches.find(task => task.status !== "done") ?? matches.sort((a, b) => (b.completedAt ?? b.updatedAt).localeCompare(a.completedAt ?? a.updatedAt))[0];
 }
 
-export function assertProjectActionIsCurrent(detail: ProjectDetail | null, title: string, updatedAt: string) {
+export function assertProjectActionIsCurrent(detail: ProjectDetail | null, title: string, updatedAt: string, repeatCompletedAction = false) {
   if (!detail || detail.project.isDraft || detail.project.status !== "active" || detail.project.updatedAt !== updatedAt) {
     throw new Error("项目或行动已有变化，请重新生成建议。");
   }
-  if (findDuplicateProjectAction(detail, title)) throw new Error("项目中已有同名行动或完成记录，请核对后再保存。");
+  const duplicate = findDuplicateProjectAction(detail, title);
+  if (duplicate?.status === "done" && !repeatCompletedAction) throw new Error("已有同名完成记录，请确认这是一次新的执行。");
+  if (duplicate && duplicate.status !== "done") throw new Error("项目中已有同名未完成行动，请打开已有行动。");
 }
 
 export function resolveProjectDecision(
   detail: ProjectDetail,
   analysis: Awaited<ReturnType<typeof analyzeProjectProgress>>,
   branch?: Milestone | null,
+  hypothetical = false,
 ): AsabaProjectDecision {
   const { project } = detail;
   const { evidence, investigation } = analysis;
@@ -185,15 +196,22 @@ export function resolveProjectDecision(
   const active = project.status === "active" && !project.isDraft;
   const actionable = (task: ProjectDetail["tasks"][number]) => evidence.some((item) => item.kind === "action" && item.id === "task:" + task.id);
   let existing = answer.decision === "continue" ? detail.tasks.find((task) => "task:" + task.id === answer.taskEvidenceId && actionable(task)) : undefined;
+  let previousCompletion: AsabaPlanPreview["previousCompletion"];
   if (answer.decision === "new_action") {
     const duplicate = findDuplicateProjectAction(detail, answer.nextAction);
-    if (duplicate) {
+    if (duplicate?.status === "done") {
+      previousCompletion = { id: duplicate.id, title: duplicate.title, date: duplicate.completedAt ?? duplicate.updatedAt };
+    } else if (duplicate) {
       existing = actionable(duplicate) ? duplicate : undefined;
       answer = { ...answer, decision: existing ? "continue" : duplicate.status === "waiting" ? "wait" : "keep",
         summary: duplicate.status === "waiting" ? [duplicate.title, duplicate.waitingFor, duplicate.resumeAction].filter(Boolean).join(" · ") :
-          duplicate.status === "done" ? "这项工作已有完成记录：" + duplicate.title : "项目中已有这项工作：" + duplicate.title,
+          "项目中已有这项工作：" + duplicate.title,
         taskEvidenceId: existing ? "task:" + existing.id : null, nextAction: "", completionCondition: "" };
     }
+  }
+  if (hypothetical && ["delegate", "adjust", "new_action"].some(decision => decision === answer.decision)) {
+    answer = { ...answer, decision: "keep", summary: "实际条件确认后再决定。假设成立时可考虑：" + answer.nextAction,
+      nextAction: "", completionCondition: "", taskEvidenceId: null };
   }
   if (!active && answer.decision && !["keep", "clarify", "wait"].includes(answer.decision)) {
     answer = { ...answer, decision: "keep", summary: project.status === "paused" ? "项目当前处于暂停状态。" : "项目当前不可推进。",
@@ -206,7 +224,7 @@ export function resolveProjectDecision(
       ...previewAsabaPlan({ kind: "existing_project", projectId: project.id, title: "", outcome: "", reason: answer.summary,
         questions: answer.unknowns, action: answer.nextAction }, [detail]),
       ...(branch !== undefined ? { milestone: branch ? { id: branch.id, title: branch.title } : null } : {}),
-      expectedUpdatedAt: project.updatedAt, completionCondition: answer.completionCondition,
+      expectedUpdatedAt: project.updatedAt, completionCondition: answer.completionCondition, previousCompletion,
     } : null;
   return { kind: "progress", projectId: project.id, projectTitle: project.title, expectedUpdatedAt: project.updatedAt,
     answer, evidence, investigation, existingAction, actionDraft, canAdjust: active && answer.decision === "adjust" };
@@ -217,6 +235,7 @@ export type AsabaPlanSave = {
   request: string;
   draft: AsabaPlanPreview;
   attachMilestone: boolean;
+  repeatCompletedAction?: boolean;
 };
 
 export function buildAsabaPlanningInput(request: string, projectId: string | null, details: ProjectDetail[]) {

@@ -35,7 +35,7 @@ export async function writeAsabaPlan(projectRepository: ProjectRepository, saveN
     const detail = draft.projectId ? await projectRepository.get(draft.projectId) : null;
     if (!detail || detail.project.status === "completed" || detail.project.isDraft) throw new Error("该项目已不可用，请重新生成建议。");
     if (!detail.tasks.some(item => item.id === taskId)) {
-      if (draft.expectedUpdatedAt !== undefined) assertProjectActionIsCurrent(detail, task.title, draft.expectedUpdatedAt);
+      if (draft.expectedUpdatedAt !== undefined) assertProjectActionIsCurrent(detail, task.title, draft.expectedUpdatedAt, command.repeatCompletedAction);
       const milestoneId = attachMilestone ? draft.milestone?.id ?? null : null;
       const current = detail.milestones.filter(item => item.status === "current");
       if (attachMilestone && (!milestoneId || (draft.expectedUpdatedAt !== undefined
