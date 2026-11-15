@@ -565,6 +565,27 @@ test("plan confirmation refuses a project changed while applying the proposal", 
   database.close();
 });
 
+test("a project advice draft cannot add an action after a competing project update", async () => {
+  const database = new DatabaseSync(":memory:");
+  const adapter = new NodeSqliteAdapter(database);
+  const repository = new SqliteProjectRepository(adapter, { seedProjects: initialProjectSeeds });
+  await repository.confirmProject("project-research-direction");
+  const detail = (await repository.get("project-research-direction"))!;
+  const projectId = detail.project.id;
+  const command: AsabaPlanSave = {
+    id: crypto.randomUUID(), request: "准备一次对照实验", attachMilestone: false,
+    draft: { ...previewAsabaPlan({ kind: "existing_project", projectId, title: "", outcome: "", reason: "",
+      questions: [], action: "运行一次对照实验" }, [detail]), expectedUpdatedAt: detail.project.updatedAt, completionCondition: "记录一组可比较的结果" },
+  };
+  adapter.beforeTransaction = () => {
+    adapter.beforeTransaction = undefined;
+    database.prepare("UPDATE projects SET updated_at = ?, status = 'paused' WHERE id = ?").run("2099-01-01T00:00:00.000Z", projectId);
+  };
+  await assert.rejects(writeAsabaPlan(repository, async () => {}, command), /项目或行动已有变化/);
+  assert.ok(!(await repository.get(projectId))?.tasks.some(task => task.title === command.draft.action));
+  database.close();
+});
+
 test("completes the current stage, advances the route, and keeps unfinished actions", async () => {
   const repository = new SqliteProjectRepository(new NodeSqliteAdapter(new DatabaseSync(":memory:")), {
     seedProjects: initialProjectSeeds,

@@ -98,12 +98,15 @@ export const companionApi = {
   async archiveWorker(command: WorkerArchive) {
     await askWorkbench<object>("asaba-save-worker", { id: crypto.randomUUID(), ...command }, 15_000, "归档尚未确认，可重试。");
   },
-  async plan(request: string, projectId: string | null, authorizedNoteIds: string[] = []) {
-    const command = { id: crypto.randomUUID(), request, projectId, authorizedNoteIds };
+  async plan(request: string, projectId: string | null, authorizedNoteIds: string[] = [], milestoneId?: string | null) {
+    const command = { id: crypto.randomUUID(), request, projectId, authorizedNoteIds, milestoneId };
     return (await askWorkbench<{ result: AsabaPlanningResult }>("asaba-plan", command, authorizedNoteIds.length ? 240_000 : 180_000, "规划尚未返回，请稍后再试。")).result;
   },
   async openAdjustment(command: Omit<AsabaAdjustmentRequest, "id">) {
     await askWorkbench<object>("asaba-open-adjustment", { id: crypto.randomUUID(), ...command }, 15_000, "计划调整窗口未响应，请重试。");
+  },
+  async openProjectDelegation(result: Extract<AsabaPlanningResult, { kind: "progress" }>) {
+    await askWorkbench<object>("asaba-open-project-delegation", { id: crypto.randomUUID(), result }, 15_000, "委托表单未响应，请重试。");
   },
   async openPlanProject(projectId: string) {
     await askWorkbench<object>("asaba-open-plan-project", { id: crypto.randomUUID(), projectId }, 15_000, "项目窗口未响应，请重试。");

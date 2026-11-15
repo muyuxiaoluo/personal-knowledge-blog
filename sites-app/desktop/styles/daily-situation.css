@@ -13,6 +13,9 @@
 .situation-candidates { display: grid; gap: 12px; }
 .situation-candidates article { border: 1px solid var(--workspace-border); padding: 14px; border-radius: 14px; display: grid; gap: 10px; }
 .situation-task-fields { display: grid; gap: 12px; }
+.situation-dialog .project-decision-result { display: grid; gap: 8px; padding: 12px 0; border-top: 1px solid var(--ui-border); overflow-wrap: anywhere; }
+.situation-dialog .project-decision-result :is(p, ul) { margin: 0; }
+.situation-dialog .project-decision-result .asaba-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .situation-summary, .situation-week { padding: 20px; border-radius: 16px; margin: 16px 0; }
 .situation-summary { background: var(--workspace-surface-strong); border: 1px solid var(--workspace-border); }
 .situation-summary p, .situation-week p, .ai-start-reason { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }

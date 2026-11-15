@@ -2,7 +2,8 @@ import { AsabaDocumentForm, AsabaResearchForm } from "./AsabaWorkerForms";
 import { jobStatusLabel, researchIntent, researchProject, researchQueries, type DocumentInput } from "../app/asaba-worker";
 import { asabaIntents, type AsabaIntent, type CareerScope } from "../app/asaba-career";
 import { AsabaCareerScope } from "./AsabaCareer";
-import { formatAsabaEvidenceDate, maxAuthorizedProjectNotes, type AsabaPlanPreview, type AsabaPlanningResult, type AsabaProjectNote } from "../app/asaba-planning";
+import { maxAuthorizedProjectNotes, type AsabaPlanPreview, type AsabaPlanningResult, type AsabaProjectNote } from "../app/asaba-planning";
+import { ProjectDecisionResult } from "./ProjectDecisionResult";
 import "./companion-entry.css";
 import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -70,6 +71,7 @@ export default function CompanionRoot() {
   const [planText, setPlanText] = useState("");
   const [projectAnswer, setProjectAnswer] = useState<{ request: string; result: Exclude<AsabaPlanningResult, { kind: "plan" }> } | null>(null);
   const [planProject, setPlanProject] = useState<string | null>(null);
+  const [planScope, setPlanScope] = useState<{ projectId: string; milestoneId: string | null; title: string } | null>(null);
   const [projectNotes, setProjectNotes] = useState<{ projectId: string; notes: AsabaProjectNote[] } | null>(null);
   const [authorizedNoteIds, setAuthorizedNoteIds] = useState<string[]>([]);
   const [plan, setPlan] = useState<{ id: string; request: string; draft: AsabaPlanPreview } | null>(null);
@@ -143,9 +145,10 @@ export default function CompanionRoot() {
       listen("asaba-voice-shortcut", () => voiceAction.current()),
       listen<string>("asaba-tts-phase", ({ payload }) => setTtsPhase(payload)),
       listen<string>("companion-action-result", ({ payload }) => setNotice(payload)),
-      listen<{ projectId: string; notes?: AsabaProjectNote[] }>("asaba-plan-project", ({ payload }) => {
+      listen<{ projectId: string; notes?: AsabaProjectNote[]; scope?: { projectId: string; milestoneId: string | null; title: string } }>("asaba-plan-project", ({ payload }) => {
         if (operation.current || hearing.current) { setNotice("浅羽正在处理，请稍后再次打开项目规划。"); return; }
         setPlanProject(payload.projectId);
+        setPlanScope(payload.scope ?? null);
         setProjectNotes({ projectId: payload.projectId, notes: payload.notes ?? [] });
         setAuthorizedNoteIds([]);
         setPlanText("请根据这个项目的当前进展，建议一个下一步。");
@@ -246,16 +249,17 @@ export default function CompanionRoot() {
     });
   }
 
-  async function askForPlan(request: string, projectId: string | null) {
+  async function askForPlan(request: string, projectId: string | null, usePanelScope = true) {
     const research = researchIntent(request);
     if (research && !projectId) {
       setResearchTopic(research.topic);
       setPage("research");
       return;
     }
-    const approved = projectId && projectId === projectNotes?.projectId ? authorizedNoteIds : [];
+    const approved = usePanelScope && projectId && projectId === projectNotes?.projectId ? authorizedNoteIds : [];
     setAuthorizedNoteIds([]);
-    const result = await companionApi.plan(request, projectId, approved);
+    const result = await companionApi.plan(request, projectId, approved,
+      usePanelScope && planScope && planScope.projectId === projectId ? planScope.milestoneId : undefined);
     const draft = result.kind === "plan" ? result.draft : result.kind === "progress" ? result.actionDraft : null;
     setProjectAnswer(result.kind === "plan" ? null : { request, result });
     setPlan(draft ? { id: crypto.randomUUID(), request, draft } : null);
@@ -266,6 +270,9 @@ export default function CompanionRoot() {
 
   async function openIntent(intent: AsabaIntent, projectId?: string) {
     const request = requestText.trim();
+    setPlanScope(null);
+    setProjectNotes(null);
+    setAuthorizedNoteIds([]);
     setIntentOptions([]);
     setProgressTarget(false);
     if (intent === "note") {
@@ -293,7 +300,7 @@ export default function CompanionRoot() {
       setPlanText(request);
       setProjectAnswer(null); setPlan(null); setPlanSaved(null);
       setPage("plan");
-      await askForPlan(request, intent === "progress" ? target : null);
+      await askForPlan(request, intent === "progress" ? target : null, false);
     }
   }
 
@@ -512,7 +519,7 @@ export default function CompanionRoot() {
         </div>}
       </>}
       {page === "plan" && <div className="asaba-planning">
-        {planProject && <div className="asaba-actions"><small>项目 · {status?.context.projects?.find(item => item.id === planProject)?.title || "当前项目"}</small><Button variant="ghost" size="small" disabled={busy} onClick={() => { setPlanProject(null); setProjectNotes(null); setAuthorizedNoteIds([]); setProjectAnswer(null); setPlan(null); setPlanSaved(null); }}>清除关联</Button></div>}
+        {planProject && <div className="asaba-actions"><small>项目 · {status?.context.projects?.find(item => item.id === planProject)?.title || "当前项目"}{planScope && " · " + planScope.title}</small><Button variant="ghost" size="small" disabled={busy} onClick={() => { setPlanProject(null); setPlanScope(null); setProjectNotes(null); setAuthorizedNoteIds([]); setProjectAnswer(null); setPlan(null); setPlanSaved(null); }}>清除关联</Button></div>}
         <Button size="small" variant="ghost" disabled={busy} onClick={() => { const intent = researchIntent(planText); setResearchTopic(intent?.topic || ""); setPage("research"); }}>设置调研范围</Button>
         <label><span>你想实现什么？</span><textarea rows={3} maxLength={4000} value={planText} disabled={busy} onChange={event => setPlanText(event.target.value)} placeholder="例如，科研项目做到哪了？" /></label>
         {projectNotes?.projectId === planProject && projectNotes.notes.length > 0 && <details className="asaba-details">
@@ -535,12 +542,18 @@ export default function CompanionRoot() {
           <strong>{projectAnswer.result.projects.length ? "请选择要查看的项目" : "暂时没有可查看的项目"}</strong>
           {projectAnswer.result.projects.map(item => <Button key={item.id} size="small" title={item.outcome} disabled={busy || listening || projectAnswer.request !== planText.trim()} onClick={() => void run(() => askForPlan(projectAnswer.request, item.id))}>{item.title}</Button>)}
         </div>}
-        {projectAnswer?.result.kind === "progress" && <AsabaProjectAnswer onOpenError={setNotice} result={projectAnswer.result} disabled={busy || projectAnswer.request !== planText.trim()} onAdjust={() => void run(async () => {
+        {projectAnswer?.result.kind === "progress" && <ProjectDecisionResult result={projectAnswer.result} disabled={busy || projectAnswer.request !== planText.trim()}
+          onContinue={(id) => void run(async () => { await companionApi.openAttentionItem("task", id); })}
+          onDelegate={() => void run(async () => { if (projectAnswer.result.kind === "progress") await companionApi.openProjectDelegation(projectAnswer.result); })}
+          onAdjust={() => void run(async () => {
           const { result, request } = projectAnswer;
           if (result.kind !== "progress") return;
-          await companionApi.openAdjustment({ projectId: result.projectId, request, suggestion: result.answer.nextAction });
+          await companionApi.openAdjustment({ projectId: result.projectId, request, suggestion: result.answer.nextAction, expectedUpdatedAt: result.expectedUpdatedAt });
           await closeBubble();
         })} />}
+        {projectAnswer?.result.kind === "progress" && !plan && <Button size="small" disabled={busy} onClick={() => void run(async () => {
+          if (projectAnswer.result.kind === "progress") await companionApi.openPlanProject(projectAnswer.result.projectId);
+        })}>打开项目</Button>}
         {plan && <section className="asaba-planning-preview">
           <strong>{{ new_project: "建议建立项目", existing_project: "建议加入已有项目", action: "建议保存为独立行动", note: "建议先记下来" }[plan.draft.kind]}{plan.draft.projectTitle && " · " + plan.draft.projectTitle}</strong>
           {!projectAnswer && <p>{plan.draft.reason}</p>}
@@ -550,10 +563,11 @@ export default function CompanionRoot() {
             <label><span>期望结果</span><textarea rows={2} value={plan.draft.outcome} maxLength={2000} disabled={busy || Boolean(planSaved)} onChange={event => setPlan({ ...plan, draft: { ...plan.draft, outcome: event.target.value } })} /></label>
           </>}
           {plan.draft.kind !== "note" && <label><span>{plan.draft.kind === "new_project" ? "第一步 · 可选" : "行动名称"}</span><input value={plan.draft.action} maxLength={200} disabled={busy || Boolean(planSaved)} onChange={event => setPlan({ ...plan, draft: { ...plan.draft, action: event.target.value } })} /></label>}
+          {plan.draft.expectedUpdatedAt !== undefined && <label><span>完成条件</span><textarea value={plan.draft.completionCondition ?? ""} maxLength={500} disabled={busy || Boolean(planSaved)} onChange={event => setPlan({ ...plan, draft: { ...plan.draft, completionCondition: event.target.value } })} /></label>}
           {plan.draft.milestone && <label className="asaba-planning-option"><input type="checkbox" checked={withMilestone} disabled={busy || Boolean(planSaved)} onChange={event => setWithMilestone(event.target.checked)} />关联当前节点 · {plan.draft.milestone.title}</label>}
           {plan.draft.kind === "note" && <p>{plan.request}</p>}
           <div className="asaba-actions">
-            {!planSaved && <Button variant="primary" size="small" disabled={busy || plan.request !== planText.trim() || (plan.draft.kind === "new_project" && (!plan.draft.title.trim() || !plan.draft.outcome.trim())) || (["action", "existing_project"].includes(plan.draft.kind) && !plan.draft.action.trim())} onClick={() => void run(async () => {
+            {!planSaved && <Button variant="primary" size="small" disabled={busy || plan.request !== planText.trim() || (plan.draft.kind === "new_project" && (!plan.draft.title.trim() || !plan.draft.outcome.trim())) || (["action", "existing_project"].includes(plan.draft.kind) && !plan.draft.action.trim()) || (plan.draft.expectedUpdatedAt !== undefined && !plan.draft.completionCondition?.trim())} onClick={() => void run(async () => {
               setPlanSaved(await companionApi.savePlan({ ...plan, attachMilestone: withMilestone })); setNotice("已保存。");
             })}>{({ new_project: "创建项目", existing_project: "加入行动", action: "保存行动", note: "保存原话到笔记" })[plan.draft.kind]}</Button>}
             {(planSaved?.projectId || plan.draft.projectId) && <Button size="small" disabled={busy} onClick={() => void run(async () => {
@@ -678,37 +692,4 @@ export default function CompanionRoot() {
     </footer>}
     </aside>
   </main>;
-}
-
-function AsabaProjectAnswer({ result, disabled, onAdjust, onOpenError }: {
-  result: Extract<AsabaPlanningResult, { kind: "progress" }>;
-  disabled: boolean;
-  onAdjust: () => void;
-  onOpenError: (message: string) => void;
-}) {
-  const { answer, evidence, projectId, projectTitle, canAdjust } = result;
-  return <section className="asaba-planning-preview" aria-label="项目进展">
-    <strong>{projectTitle} · 项目进展</strong>
-    {result.investigation && <small>{result.investigation}</small>}
-    <p>{answer.summary}</p>
-    {answer.findings.map((finding, index) => <div key={index}>
-      <p>{finding.text}</p>
-      {finding.evidenceIds.map(id => {
-        const source = evidence.find(item => item.id === id);
-        return source && <details className="asaba-details" key={id}>
-          <summary>{source.title || "项目记录"} · {formatAsabaEvidenceDate(source.date)}</summary>
-          {source.text && <p>{source.text}</p>}
-        </details>;
-      })}
-    </div>)}
-    {answer.unknowns.length > 0 && <div><small>待核对</small><ul>{answer.unknowns.map((value, index) => <li key={index}>{value}</li>)}</ul></div>}
-    {answer.decision === "delegate" && <div><small>可委托的工作</small><p>{answer.nextAction}</p></div>}
-    {answer.decision === "adjust" && <div><small>建议调整</small><p>{answer.nextAction}</p></div>}
-    <div className="asaba-actions">
-      {result.existingAction && <Button size="small" disabled={disabled} onClick={() => void companionApi.openAttentionItem("task", result.existingAction!.id).catch(error => onOpenError(String(error)))}>继续 · {result.existingAction.title}</Button>}
-      {answer.decision === "delegate" && <Button size="small" disabled={disabled} onClick={() => void navigator.clipboard.writeText(answer.nextAction).catch(error => onOpenError(String(error)))}>复制委托说明</Button>}
-      {canAdjust && <Button size="small" disabled={disabled} onClick={onAdjust}>打开计划调整</Button>}
-      {!result.actionDraft && <Button size="small" disabled={disabled} onClick={() => void companionApi.openPlanProject(projectId).catch(error => onOpenError(String(error)))}>打开项目</Button>}
-    </div>
-  </section>;
 }

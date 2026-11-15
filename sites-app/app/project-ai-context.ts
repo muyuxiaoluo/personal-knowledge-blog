@@ -16,32 +16,19 @@ export function projectMaterialKind(item: ProjectDetail["accumulations"][number]
   return item.id.startsWith("asaba-worker-") ? "worker_report" : "reference";
 }
 
-export function buildBranchAiContext(
-  detail: ProjectDetail,
-  milestone: Milestone | null,
-  extra: Record<string, unknown> = {},
-) {
+export function scopeProjectAiRecords(detail: ProjectDetail, milestone?: Milestone | null) {
+  if (milestone === undefined) return detail;
   const milestoneIds = milestone ? collectMilestoneAndAncestors(detail.milestones, milestone.id) : new Set<string>();
-  const branchTasks = detail.tasks.filter((task) => {
-    if (task.status === "cancelled") return false;
-    return milestone ? Boolean(task.milestoneId && milestoneIds.has(task.milestoneId)) : task.milestoneId === null;
-  });
-  const taskIds = new Set(branchTasks.map((task) => task.id));
-  const targetIds = new Set([...milestoneIds, ...taskIds]);
-  const accumulations = detail.accumulations.filter((item) => item.milestoneId === null || milestoneIds.has(item.milestoneId));
-  const context = baseProjectContext(detail, {
-    branch: milestone ? {
-      selectedMilestoneId: milestone.id,
-      milestones: detail.milestones
-        .filter((item) => milestoneIds.has(item.id))
-        .map(compactMilestone),
-    } : null,
-    tasks: branchTasks.map(compactTask),
-    accumulations: accumulations.map(compactAccumulation),
-    recentRecords: detail.logs.filter((log) => branchLogMatches(log, taskIds, targetIds)).slice(0, 20).map(compactLog),
-    ...extra,
-  });
-  return fitContext(context);
+  const tasks = detail.tasks.filter((task) => milestone ? task.milestoneId !== null && milestoneIds.has(task.milestoneId) : task.milestoneId === null);
+  const taskIds = new Set(tasks.map((task) => task.id));
+  const targetIds = new Set([detail.project.id, ...milestoneIds, ...taskIds]);
+  return {
+    ...detail,
+    milestones: detail.milestones.filter((item) => milestoneIds.has(item.id)),
+    tasks,
+    accumulations: detail.accumulations.filter((item) => item.milestoneId === null || milestoneIds.has(item.milestoneId)),
+    logs: detail.logs.filter((log) => log.kind === "goal_revision" || branchLogMatches(log, taskIds, targetIds)),
+  };
 }
 
 export function buildRouteAiContext(detail: ProjectDetail, extra: Record<string, unknown> = {}) {
@@ -55,7 +42,7 @@ export function buildRouteAiContext(detail: ProjectDetail, extra: Record<string,
   return fitContext(context);
 }
 
-export function collectMilestoneAndAncestors(milestones: Milestone[], milestoneId: string) {
+function collectMilestoneAndAncestors(milestones: Milestone[], milestoneId: string) {
   const parents = routeParents(milestones);
   const selected = new Set<string>();
   const visit = (id: string) => {

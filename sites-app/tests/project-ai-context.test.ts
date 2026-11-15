@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildBranchAiContext } from "../app/project-ai-context";
+import { buildAsabaProgressInput, resolveProjectDecision, type AsabaProgressAnswer } from "../app/asaba-planning";
 import type { Milestone, ProjectDetail, ProjectTask } from "../app/project-types";
 
 const now = "2026-09-22T08:00:00.000Z";
@@ -38,7 +38,8 @@ test("branch AI context includes ancestors and shared facts but excludes a paral
     ],
   };
 
-  const serialized = JSON.stringify(buildBranchAiContext(detail, left));
+  const input = buildAsabaProgressInput("我现在可以做什么？", detail, left);
+  const serialized = JSON.stringify(input);
   assert.match(serialized, /共同基础/);
   assert.match(serialized, /A 的当前实验/);
   assert.match(serialized, /共享论文/);
@@ -47,4 +48,14 @@ test("branch AI context includes ancestors and shared facts but excludes a paral
   assert.doesNotMatch(serialized, /B 的未完成实验/);
   assert.doesNotMatch(serialized, /B 正在调参/);
   assert.doesNotMatch(serialized, /B 结果/);
+  assert.doesNotMatch(serialized, /继续 B/);
+  assert.ok(input.evidence.every(source => source.projectId === detail.project.id));
+  const answer: AsabaProgressAnswer = { summary: "先做实验", unknowns: [], findings: [], nextAction: "Ａ 的当前实验。", completionCondition: "得到结果", decision: "new_action" };
+  const result = resolveProjectDecision(detail, { answer, evidence: input.evidence }, left);
+  assert.equal(result.answer.decision, "continue");
+  assert.equal(result.existingAction?.id, leftTask.id);
+  assert.equal(result.actionDraft, null);
+  assert.equal(resolveProjectDecision(detail, { answer: { ...answer, nextAction: rootTask.title }, evidence: input.evidence }, left).answer.decision, "keep");
+  const paused = { ...detail, project: { ...detail.project, status: "paused" as const } };
+  assert.equal(resolveProjectDecision(paused, { answer: { ...answer, nextAction: "检查新输入" }, evidence: input.evidence }).actionDraft, null);
 });

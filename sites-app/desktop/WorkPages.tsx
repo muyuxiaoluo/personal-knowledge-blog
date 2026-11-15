@@ -58,6 +58,7 @@ import { Button, SearchField, SelectMenu } from "./DesktopControls";
 import { isConfirmedTodayPlan, type actionCenterLanes } from "../app/action-planning";
 import type { DailySituation } from "../app/work-types";
 import { ActionPlanningAssistant } from "./ActionPlanningAssistant";
+import type { ProjectDecisionActions } from "../app/asaba-planning";
 import { GlobalPlanningAssistant } from "./GlobalPlanningAssistant";
 import type { PlanningHistoryRepository } from "../app/data/sqlite-ai-repository";
 import { HomeNextActions } from "./HomeNextActions";
@@ -106,6 +107,7 @@ export type NewActionInput = {
   status?: ProjectTask["status"];
   plannedToday: boolean;
   keepAvailable?: boolean;
+  expectedProjectUpdatedAt?: string;
 };
 
 export type SourceOrganizationInput =
@@ -544,6 +546,8 @@ export function TasksPage({
   projects,
   projectDetails,
   loadProject,
+  projectDecisions,
+  onOpenTask,
   initialTaskId,
   onTaskOpened,
   onAddTask,
@@ -561,6 +565,8 @@ export function TasksPage({
   projects: ProjectSummary[];
   projectDetails: ProjectDetail[];
   loadProject: (id: string) => Promise<ProjectDetail | null>;
+  projectDecisions: ProjectDecisionActions;
+  onOpenTask: (id: string) => void;
   initialTaskId?: string | null;
   onTaskOpened?: () => void;
   onAddTask: (input: NewActionInput) => Promise<boolean>;
@@ -655,7 +661,8 @@ export function TasksPage({
         <Button variant={showAll ? "secondary" : "ghost"} type="button" aria-pressed={showAll} onClick={() => setShowAll(true)}>全部行动</Button>
         {showAll && <SearchField label="搜索行动" value={query} onChange={setQuery} placeholder="搜索行动或项目" />}
       </nav>
-      {showAi && <ActionPlanningAssistant projects={projectDetails} loadProject={loadProject} onClose={() => setShowAi(false)} onAddTask={onAddTask} />}
+      {showAi && <ActionPlanningAssistant projects={projectDetails} loadProject={loadProject} projectDecisions={projectDecisions}
+        onOpenTask={(id) => { setShowAi(false); onOpenTask(id); }} onClose={() => setShowAi(false)} onAddTask={onAddTask} />}
       <div className="action-center-grid">
         <div className="action-center-list">
           {showAll ? <section className="workspace-card action-center-panel"><h2>全部行动</h2>

@@ -1,6 +1,6 @@
 import type { ProjectRepository } from "./data/project-repository";
 import type { Project, ProjectTask } from "./project-types";
-import { validateAsabaPlanSave, type AsabaPlanSave } from "./asaba-planning";
+import { assertProjectActionIsCurrent, validateAsabaPlanSave, type AsabaPlanSave } from "./asaba-planning";
 
 export async function writeAsabaPlan(projectRepository: ProjectRepository, saveNote: (id: string, request: string) => Promise<unknown>, command: AsabaPlanSave): Promise<{ projectId?: string }> {
   validateAsabaPlanSave(command);
@@ -9,7 +9,7 @@ export async function writeAsabaPlan(projectRepository: ProjectRepository, saveN
   const taskId = "task-asaba-plan-" + id;
   const task: ProjectTask = {
     id: taskId, projectId: null, milestoneId: null, direction: "uncategorized", title: draft.action.trim(),
-    actionType: "organize", definitionOfDone: "", steps: [], currentFocus: "", details: request.trim(), benefit: "",
+    actionType: "organize", definitionOfDone: draft.completionCondition?.trim() ?? "", steps: [], currentFocus: "", details: request.trim(), benefit: "",
     dueDate: "", status: "later", waitingFor: "", resumeAction: "", context: "anywhere", sortOrder: 10,
     createdAt: now, updatedAt: now, completedAt: null,
   };
@@ -35,11 +35,14 @@ export async function writeAsabaPlan(projectRepository: ProjectRepository, saveN
     const detail = draft.projectId ? await projectRepository.get(draft.projectId) : null;
     if (!detail || detail.project.status === "completed" || detail.project.isDraft) throw new Error("该项目已不可用，请重新生成建议。");
     if (!detail.tasks.some(item => item.id === taskId)) {
+      if (draft.expectedUpdatedAt !== undefined) assertProjectActionIsCurrent(detail, task.title, draft.expectedUpdatedAt);
       const milestoneId = attachMilestone ? draft.milestone?.id ?? null : null;
       const current = detail.milestones.filter(item => item.status === "current");
-      if (attachMilestone && (!milestoneId || current.length !== 1 || current[0].id !== milestoneId)) throw new Error("当前节点已变化。请取消关联或重新生成建议。");
+      if (attachMilestone && (!milestoneId || (draft.expectedUpdatedAt !== undefined
+        ? !detail.milestones.some(item => item.id === milestoneId && (item.status === "current" || item.status === "planned"))
+        : current.length !== 1 || current[0].id !== milestoneId))) throw new Error("关联节点已变化。请取消关联或重新生成建议。");
       await projectRepository.saveTask({ ...task, projectId: detail.project.id, milestoneId, direction: detail.project.category,
-        sortOrder: Math.max(0, ...detail.tasks.map(item => item.sortOrder)) + 10 });
+        sortOrder: Math.max(0, ...detail.tasks.map(item => item.sortOrder)) + 10 }, draft.expectedUpdatedAt);
     }
     savedProjectId = detail.project.id;
   } else if (!(await projectRepository.listStandaloneTasks()).some(item => item.id === taskId)) {

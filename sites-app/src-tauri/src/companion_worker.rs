@@ -461,7 +461,7 @@ pub(crate) async fn asaba_delegate(
         || request.description.trim().is_empty()
         || request.description.chars().count() > 4000
     {
-        return Err("请先保存 Bug 便签，并检查委托说明。".into());
+        return Err("请检查委托来源与任务说明。".into());
     }
     let repository = git_root(&request.repository).await?;
     let had_local_changes = request.workspace_mode == WorkspaceMode::Original

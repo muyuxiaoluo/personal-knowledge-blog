@@ -3,18 +3,22 @@ import type { NextActionProposal } from "../app/ai-api-types";
 import { resolveAvailableDeepSeekModel } from "../app/ai-model-settings";
 import type { NewActionInput } from "./WorkPages";
 import type { ProjectDetail } from "../app/project-types";
-import { buildBranchAiContext } from "../app/project-ai-context";
+import { assertProjectActionIsCurrent, type AsabaProjectDecision, type ProjectDecisionActions } from "../app/asaba-planning";
 import { desktopApi } from "./integrationApi";
 import { Button, SelectMenu } from "./DesktopControls";
+import { ProjectDecisionResult } from "./ProjectDecisionResult";
 
-export function ActionPlanningAssistant({ projects, loadProject, onClose, onAddTask }: {
+export function ActionPlanningAssistant({ projects, loadProject, projectDecisions, onOpenTask, onClose, onAddTask }: {
   projects: ProjectDetail[];
   loadProject: (id: string) => Promise<ProjectDetail | null>;
+  projectDecisions: ProjectDecisionActions;
+  onOpenTask: (id: string) => void;
   onClose: () => void; onAddTask: (input: NewActionInput) => Promise<boolean>;
 }) {
   const [request, setRequest] = useState("");
   const [constraints, setConstraints] = useState("");
   const [proposal, setProposal] = useState<NextActionProposal | null>(null);
+  const [decision, setDecision] = useState<AsabaProjectDecision | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [today, setToday] = useState(false);
@@ -37,17 +41,25 @@ export function ActionPlanningAssistant({ projects, loadProject, onClose, onAddT
     return { detail, milestone };
   }
   async function generate() {
-    setBusy(true); setError(""); setProposal(null);
+    setBusy(true); setError(""); setProposal(null); setDecision(null);
     try {
-      const { detail, milestone } = await readSelection();
+      if (projectId) {
+        const result = await projectDecisions.ask(projectId, projectRequest, milestoneId || undefined);
+        setDecision(result);
+        if (result.actionDraft) {
+          const { action, completionCondition } = result.actionDraft;
+          setProposal({ reason: "", action: { milestoneId: milestoneId || null, title: action, currentFocus: action,
+            definitionOfDone: completionCondition ?? "", details: "", dueDate: "" } });
+        }
+        return;
+      }
       const context = {
         userRequest: request.trim(), effortAndOutcome: constraints.trim(),
         purpose: "先判断怎样最省力地达到用户认可的结果，再建议一个有范围和停止条件的起步行动。reason 用简短中文说明路线、暂时省略什么及关键假设。后续路线仅作为 details 中的参考，不生成阶段和待办清单。信息不足时先建议验证关键未知，不编造时间预算或保证结果。",
       };
       const model = await resolveAvailableDeepSeekModel("nextAction", desktopApi.deepseek.apiModels);
       const response = await desktopApi.deepseek.suggestNextAction({ model,
-        input: detail ? buildBranchAiContext(detail, milestone, context) : context,
-        allowedMilestoneIds: milestone ? [milestone.id] : [], allowedTaskIds: [],
+        input: context, allowedMilestoneIds: [], allowedTaskIds: [],
       });
       setProposal(response.content);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "生成失败，请重试。"); }
@@ -58,12 +70,21 @@ export function ActionPlanningAssistant({ projects, loadProject, onClose, onAddT
     setBusy(true); setError("");
     try {
       const { detail, milestone } = await readSelection();
+      if (decision) assertProjectActionIsCurrent(detail, proposal.action.title, decision.expectedUpdatedAt);
       const saved = await onAddTask({ projectId: detail?.project.id ?? null, milestoneId: milestone?.id ?? null, direction: detail?.project.category ?? "uncategorized", title: proposal.action.title,
         currentFocus: proposal.action.currentFocus, definitionOfDone: proposal.action.definitionOfDone, steps: [],
         details: [`想做的事：${request.trim()}`, constraints.trim() ? `目标与投入约束：${constraints.trim()}` : "", proposal.reason, proposal.action.details].filter(Boolean).join("\n\n"),
-        dueDate: proposal.action.dueDate, dueDateKind: "target", plannedToday: today });
+        dueDate: proposal.action.dueDate, dueDateKind: "target", plannedToday: today, expectedProjectUpdatedAt: decision?.expectedUpdatedAt });
       if (saved) onClose(); else setError("行动未保存，请重试。");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "保存失败，请重试。"); }
+    finally { setBusy(false); }
+  }
+  const projectRequest = [request.trim(), constraints.trim() && "本次约束：" + constraints.trim()].filter(Boolean).join("\n\n");
+  function clearResult() { setProposal(null); setDecision(null); }
+  async function follow(up: () => Promise<void>) {
+    setBusy(true); setError("");
+    try { await up(); onClose(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
   }
   function update(patch: Partial<NextActionProposal["action"]>) { if (proposal) setProposal({ ...proposal, action: { ...proposal.action, ...patch } }); }
@@ -71,18 +92,22 @@ export function ActionPlanningAssistant({ projects, loadProject, onClose, onAddT
     <section className="task-closeout-dialog situation-dialog" role="dialog" aria-modal="true" aria-label="AI 帮我起步">
       <header><div><span>先找到值得做的一小步</span><h2>AI 帮我起步</h2></div><Button variant="secondary" size="small" iconOnly type="button" disabled={busy} onClick={onClose} aria-label="关闭">×</Button></header>
       <fieldset disabled={busy}>
-        <label><span>说说你想做的事</span><textarea autoFocus value={request} onChange={(event) => { setRequest(event.target.value); setProposal(null); }} placeholder="例如：准备一门考试，想找合适资料、刷些题就去考，不想做完整的学习计划。" /></label>
-        <label><span>做到什么程度、最多投入多少 · 可选</span><textarea value={constraints} onChange={(event) => { setConstraints(event.target.value); setProposal(null); }} placeholder="例如：只求通过；下周考试，总共愿意投入三小时。也可以写不想做的事。" /></label>
+        <label><span>说说你想做的事</span><textarea autoFocus value={request} onChange={(event) => { setRequest(event.target.value); clearResult(); }} placeholder="例如：准备一门考试，想找合适资料、刷些题就去考，不想做完整的学习计划。" /></label>
+        <label><span>做到什么程度、最多投入多少 · 可选</span><textarea value={constraints} onChange={(event) => { setConstraints(event.target.value); clearResult(); }} placeholder="例如：只求通过；下周考试，总共愿意投入三小时。也可以写不想做的事。" /></label>
         <label><span>所属项目</span><SelectMenu label="所属项目" disabled={busy} value={projectId} onChange={(value) => {
-          setProjectId(value); setMilestoneId(""); setProposal(null);
+          setProjectId(value); setMilestoneId(""); clearResult();
         }} options={[{ value: "", label: "独立行动" }, ...eligible.map(({ project }) => ({ value: project.id, label: project.title }))]} /></label>
         {milestones.length > 0 && <label><span>关联里程碑</span><SelectMenu label="关联里程碑" disabled={busy} value={milestoneId} onChange={(value) => {
-          setMilestoneId(value); setProposal(null);
+          setMilestoneId(value); clearResult();
         }} options={[{ value: "", label: "项目行动" }, ...milestones.map((node) => ({ value: node.id, label: node.title }))]} /></label>}
         <p>{projectId ? "本次会将输入、所选项目目标、相关路线、行动、积累和近期记录发送给已配置的 AI。" : "本次只将这里填写的内容发送给已配置的 AI。"}采用后才保存行动。</p>
-        {!proposal && <Button variant="primary" disabled={!request.trim()} onClick={() => void generate()}>{busy ? "正在分析…" : "帮我找最小可行的起点"}</Button>}
+        {!proposal && <Button variant="primary" disabled={!request.trim()} onClick={() => void generate()}>{busy ? "正在分析…" : decision ? "重新分析" : "帮我找最小可行的起点"}</Button>}
+        {decision && <ProjectDecisionResult result={decision} disabled={busy} onContinue={onOpenTask}
+          onDelegate={() => void follow(() => projectDecisions.delegate(decision))}
+          onAdjust={() => void follow(() => projectDecisions.adjust({ id: crypto.randomUUID(), projectId, request: projectRequest,
+            suggestion: decision.answer.nextAction, expectedUpdatedAt: decision.expectedUpdatedAt }))} />}
         {proposal && <div className="situation-task-fields">
-          <p className="ai-start-reason">{proposal.reason}</p>
+          {proposal.reason && <p className="ai-start-reason">{proposal.reason}</p>}
           <label><span>行动名称</span><input value={proposal.action.title} onChange={(event) => update({ title: event.target.value })} /></label>
           <label><span>这次具体做什么</span><textarea value={proposal.action.currentFocus} onChange={(event) => update({ currentFocus: event.target.value })} /></label>
           <label><span>做到哪里就可以停</span><textarea value={proposal.action.definitionOfDone} onChange={(event) => update({ definitionOfDone: event.target.value })} /></label>
@@ -91,7 +116,7 @@ export function ActionPlanningAssistant({ projects, loadProject, onClose, onAddT
         </div>}
       </fieldset>
       {error && <p role="alert" className="project-ai-error">{error}</p>}
-      {proposal && <footer><Button variant="secondary" type="button" disabled={busy} onClick={() => setProposal(null)}>调整想法再生成</Button><Button variant="primary" disabled={busy || !proposal.action.title.trim() || !proposal.action.currentFocus.trim() || !proposal.action.definitionOfDone.trim()} onClick={() => void save()}>{busy ? "正在保存…" : "采用这一步"}</Button></footer>}
+      {proposal && <footer><Button variant="secondary" type="button" disabled={busy} onClick={clearResult}>调整想法再生成</Button><Button variant="primary" disabled={busy || !proposal.action.title.trim() || !proposal.action.currentFocus.trim() || !proposal.action.definitionOfDone.trim()} onClick={() => void save()}>{busy ? "正在保存…" : "采用这一步"}</Button></footer>}
     </section>
   </div>;
 }

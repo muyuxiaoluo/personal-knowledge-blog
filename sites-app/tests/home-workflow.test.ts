@@ -79,7 +79,7 @@ test("action center treats legacy automatic dates as suggestions and keeps manua
 });
 
 test("project investigation only reads selected linked notes when the first answer has gaps", async () => {
-  const input = { request: "目前还差什么？", project: { title: "验收项目", outcome: "完成验收", background: "", status: "active", deadline: "", reviewDate: "" } as const, evidence: [] };
+  const input = { request: "目前还差什么？", project: { id: "project-1", title: "验收项目", outcome: "完成验收", background: "", status: "active", deadline: "", reviewDate: "" } as const, evidence: [] };
   const read: string[] = [];
   const readApproved = () => readAuthorizedProjectEvidence("project-1", ["chosen", "chosen", "different", "removed", "outside-limit"], async (id) => {
     read.push(id);
@@ -89,18 +89,19 @@ test("project investigation only reads selected linked notes when the first answ
   });
   const answer = { summary: "维持已有安排", findings: [], unknowns: [], nextAction: "", decision: "keep" as const, taskEvidenceId: null };
   await analyzeProjectProgress(input, async () => answer, readApproved);
+  await analyzeProjectProgress(input, async () => ({ ...answer, unknowns: ["不影响维持现状的细节"] }), readApproved);
   assert.deepEqual(read, []);
   const passes: string[][] = [];
   const result = await analyzeProjectProgress(input, async (context) => {
     passes.push(context.evidence.map((source) => source.id));
-    return context.investigation ? answer : { ...answer, unknowns: ["复验结果"] };
+    return context.investigation ? answer : { ...answer, decision: "clarify", unknowns: ["复验结果"] };
   }, readApproved);
   assert.deepEqual(read, ["chosen", "different", "removed"]);
   assert.deepEqual(passes, [[], ["note:chosen"]]);
   assert.match(result.evidence[0].text, /（节选）$/);
   const fallback = await analyzeProjectProgress(input, async (context) => {
     if (context.investigation) throw new Error("model unavailable");
-    return { ...answer, unknowns: ["复验结果"] };
+    return { ...answer, decision: "clarify", unknowns: ["复验结果"] };
   }, readApproved);
   assert.deepEqual(fallback.answer.unknowns, ["复验结果"]);
   assert.equal(fallback.evidence.length, 0);

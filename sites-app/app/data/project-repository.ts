@@ -41,7 +41,7 @@ export interface ProjectRepository {
   saveMilestone(milestone: Milestone, useDependencies?: boolean): Promise<Milestone>;
   completeMilestone(id: string, logBody: string): Promise<Milestone | null>;
   removeMilestone(id: string): Promise<void>;
-  saveTask(task: ProjectTask): Promise<ProjectTask>;
+  saveTask(task: ProjectTask, expectedProjectUpdatedAt?: string): Promise<ProjectTask>;
   removeTask(id: string): Promise<void>;
   restoreTask(id: string): Promise<void>;
   updateTaskStatus(id: string, status: ProjectTaskStatus): Promise<void>;

@@ -1104,7 +1104,7 @@ export class SqliteProjectRepository implements ProjectRepository {
     }
   }
 
-  async saveTask(task: ProjectTask): Promise<ProjectTask> {
+  async saveTask(task: ProjectTask, expectedProjectUpdatedAt?: string): Promise<ProjectTask> {
     this.indexCache.clear();
     if (!task.title.trim()) {
       throw new ProjectRepositoryError("行动名称不能为空", "invalid_data");
@@ -1138,6 +1138,10 @@ export class SqliteProjectRepository implements ProjectRepository {
         completedAt: task.status === "done" ? task.completedAt || now : null,
       };
       const statements: SqliteStatement[] = [];
+      if (expectedProjectUpdatedAt !== undefined) statements.push({
+        sql: "SELECT json_extract(CASE WHEN EXISTS (SELECT 1 FROM projects WHERE id = ? AND updated_at = ? AND status = 'active' AND is_draft = 0) THEN '{}' ELSE 'stale project action' END, '$')",
+        bindValues: [saved.projectId, expectedProjectUpdatedAt],
+      });
       if (saved.status === "next") {
         statements.push({
           sql: saved.projectId
@@ -1155,6 +1159,12 @@ export class SqliteProjectRepository implements ProjectRepository {
       return saved;
     } catch (error) {
       if (error instanceof ProjectRepositoryError) throw error;
+      if (expectedProjectUpdatedAt !== undefined && task.projectId) {
+        const [project] = await this.database.select<ProjectRow>("SELECT * FROM projects WHERE id = ?", [task.projectId]);
+        if (!project || project.updated_at !== expectedProjectUpdatedAt || project.status !== "active" || project.is_draft) {
+          throw new ProjectRepositoryError("项目或行动已有变化，请重新生成建议。", "invalid_data");
+        }
+      }
       throw new ProjectRepositoryError("保存项目行动失败", "save_failed", error);
     }
   }
@@ -1604,7 +1614,7 @@ export class SqliteProjectRepository implements ProjectRepository {
         this.database.select<ProjectTaskRow>("SELECT * FROM project_tasks WHERE project_id = ? AND deleted_at IS NULL ORDER BY sort_order ASC", [draft.projectId]),
       ]);
       const projectRow = projectRows[0];
-      if (!projectRow || projectRow.status === "completed" || projectRow.is_draft) throw new ProjectRepositoryError("项目已不可调整", "invalid_data");
+      if (!projectRow || projectRow.status !== "active" || projectRow.is_draft) throw new ProjectRepositoryError("项目已不可调整", "invalid_data");
       const staleMessage = "项目已发生变化，请重新生成调整草案。";
       if (draft.expectedUpdatedAt && draft.expectedUpdatedAt !== projectRow.updated_at) throw new ProjectRepositoryError(staleMessage, "invalid_data");
       const milestoneById = new Map(milestoneRows.map((row) => [row.id, row]));
@@ -1613,10 +1623,12 @@ export class SqliteProjectRepository implements ProjectRepository {
       const selectedTaskChanges = draft.proposal.taskChanges.filter((change) => change.selected);
       const selectedNewTasks = draft.proposal.newTasks.filter((item) => item.selected);
       for (const change of selectedMilestoneChanges) {
-        if (!milestoneById.has(change.id)) throw new ProjectRepositoryError("调整草案包含其他项目的节点", "invalid_data");
+        const milestone = milestoneById.get(change.id);
+        if (!milestone || (milestone.status !== "current" && milestone.status !== "planned")) throw new ProjectRepositoryError("调整草案包含不可调整的里程碑", "invalid_data");
       }
       for (const change of selectedTaskChanges) {
-        if (!taskById.has(change.id)) throw new ProjectRepositoryError("调整草案包含其他项目的行动", "invalid_data");
+        const task = taskById.get(change.id);
+        if (!task || task.status === "done" || task.status === "cancelled") throw new ProjectRepositoryError("调整草案包含不可调整的行动", "invalid_data");
       }
 
       const now = this.now();
@@ -1766,7 +1778,7 @@ export class SqliteProjectRepository implements ProjectRepository {
         bindValues: [`log-plan-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, draft.projectId, `计划调整｜${JSON.stringify(revision)}`, now],
       });
       if (draft.expectedUpdatedAt) statements.unshift({
-        sql: "SELECT json_extract(CASE WHEN EXISTS (SELECT 1 FROM projects WHERE id = ? AND updated_at = ? AND status != 'completed' AND is_draft = 0) THEN '{}' ELSE 'stale project adjustment' END, '$')",
+        sql: "SELECT json_extract(CASE WHEN EXISTS (SELECT 1 FROM projects WHERE id = ? AND updated_at = ? AND status = 'active' AND is_draft = 0) THEN '{}' ELSE 'stale project adjustment' END, '$')",
         bindValues: [draft.projectId, draft.expectedUpdatedAt],
       });
       try {
@@ -1774,7 +1786,7 @@ export class SqliteProjectRepository implements ProjectRepository {
       } catch (error) {
         if (draft.expectedUpdatedAt) {
           const [current] = await this.database.select<ProjectRow>("SELECT * FROM projects WHERE id = ?", [draft.projectId]);
-          if (!current || current.status === "completed" || current.is_draft || current.updated_at !== draft.expectedUpdatedAt) {
+          if (!current || current.status !== "active" || current.is_draft || current.updated_at !== draft.expectedUpdatedAt) {
             throw new ProjectRepositoryError(staleMessage, "invalid_data");
           }
         }

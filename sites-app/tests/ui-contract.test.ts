@@ -56,12 +56,12 @@ test("project route relationships are edited directly on the graph", () => {
 
 test("project AI keeps next-action help inside the selected branch and exposes durable accumulation", () => {
   const source = readFileSync(new URL("../desktop/ProjectWorkspace.tsx", import.meta.url), "utf8");
-  assert.match(source, /AI 帮我填写/);
+  assert.match(source, /onClick=\{onAskAsaba\}>问浅羽/);
   assert.match(source, /已积累/);
   assert.match(source, /AI 推荐主线/);
   assert.match(source, /贴一张积累便签/);
   assert.doesNotMatch(source, /积累类型|已经完成了什么|关键结论或可复用价值/);
-  assert.match(source, /buildBranchAiContext\(detail, milestone/);
+  assert.match(source, /onAskAsaba\(currentMilestone\?\.id \?\? null\)/);
   assert.doesNotMatch(source, />建议下一步</);
   assert.doesNotMatch(source, /openPanel\("next"\)/);
 });

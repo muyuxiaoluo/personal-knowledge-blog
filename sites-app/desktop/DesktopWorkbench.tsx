@@ -2,7 +2,7 @@ import { needsResearchReview, workerArchiveContent, type WorkerArchive } from ".
 import { careerArchiveText, type CareerReport, type CareerReview, type CareerScope } from "../app/asaba-career";
 import { CareerReviewDialog } from "./AsabaCareer";
 import { writeAsabaPlan } from "../app/save-asaba-plan";
-import { analyzeProjectProgress, buildAsabaPlanningInput, buildAsabaProgressInput, previewAsabaPlan, readAuthorizedProjectEvidence, type AsabaAdjustmentRequest, type AsabaPlanningResult, type AsabaPlanSave } from "../app/asaba-planning";
+import { analyzeProjectProgress, buildAsabaPlanningInput, buildAsabaProgressInput, previewAsabaPlan, projectDelegationSource, readAuthorizedProjectEvidence, resolveProjectDecision, type AsabaAdjustmentRequest, type AsabaPlanningResult, type AsabaPlanSave, type AsabaProjectDecision } from "../app/asaba-planning";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { companionApi } from "./companionApi";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -957,43 +957,54 @@ export function DesktopWorkbench({
 
   const planningSaves = useRef(new Map<string, Promise<{ projectId?: string }>>());
 
-  async function planWithAsaba(rawRequest: string, projectId: string | null, authorizedNoteIds: string[] = []): Promise<AsabaPlanningResult> {
+  async function planWithAsaba(rawRequest: string, projectId: string | null, authorizedNoteIds: string[] = [], milestoneId?: string | null): Promise<AsabaPlanningResult> {
     const request = rawRequest.trim();
     const authorizedProjectId = projectId;
     if (!request || request.length > 4000) throw new Error("请填写想实现的目标，最多 4000 字。");
-    await projectRepository.list();
-    const details = await projectRepository.listIndexDetails();
-    const eligible = details.filter(({ project }) => !project.isDraft);
-    const model = await resolveAvailableDeepSeekModel("projectCreate", desktopApi.deepseek.apiModels);
     if (!projectId) {
+      await projectRepository.list();
+      const eligible = (await projectRepository.listIndexDetails()).filter(({ project }) => !project.isDraft);
+      const model = await resolveAvailableDeepSeekModel("projectCreate", desktopApi.deepseek.apiModels);
       const input = buildAsabaPlanningInput(request, null, eligible);
       const { content } = await desktopApi.deepseek.planWithAsaba({ model, input });
-      if (content.kind !== "project_progress") return { kind: "plan", draft: previewAsabaPlan(content, eligible) };
+      if (content.kind !== "project_progress" && content.kind !== "existing_project") return { kind: "plan", draft: previewAsabaPlan(content, eligible) };
       projectId = content.projectId;
       if (!projectId) return { kind: "choose_project", projects: eligible.map(({ project: { id, title, outcome } }) => ({ id, title, outcome })) };
     }
+    return askProjectDecision(projectId, request, milestoneId, authorizedProjectId === projectId ? authorizedNoteIds : []);
+  }
+
+  async function askProjectDecision(projectId: string, rawRequest: string, milestoneId?: string | null, authorizedNoteIds: string[] = []) {
+    const request = rawRequest.trim();
+    if (!request || request.length > 4000) throw new Error("请填写想实现的目标，最多 4000 字。");
+    await projectRepository.list();
     const detail = await projectRepository.get(projectId);
     if (!detail || detail.project.isDraft) throw new Error("当前项目已不可用，请清除关联后重试。");
-    const input = buildAsabaProgressInput(request, detail);
-    const selectedProjectId = projectId;
-    const approvedNoteIds = authorizedProjectId === selectedProjectId && Array.isArray(authorizedNoteIds) ? authorizedNoteIds : [];
-    const { answer, evidence, investigation } = await analyzeProjectProgress(input,
+    const branch = milestoneId ? detail.milestones.find((item) => item.id === milestoneId && (item.status === "planned" || item.status === "current")) : null;
+    if (milestoneId && !branch) throw new Error("所选里程碑已变化，请重新选择。");
+    const scope = milestoneId === undefined ? undefined : branch ?? null;
+    const jobs = scope === undefined ? await companionApi.jobs(projectId).catch(() => []) : [];
+    const input = buildAsabaProgressInput(request, detail, scope, jobs);
+    const model = await resolveAvailableDeepSeekModel("nextAction", desktopApi.deepseek.apiModels);
+    const approvedNoteIds = Array.isArray(authorizedNoteIds) ? authorizedNoteIds : [];
+    const analysis = await analyzeProjectProgress(input,
       async (context) => (await desktopApi.deepseek.asabaProgress({ model, input: context })).content,
       approvedNoteIds.length ? async () => {
-        const linkedIds = new Set((await loadProjectArticles(selectedProjectId)).map((note) => note.id));
-        return readAuthorizedProjectEvidence(selectedProjectId, approvedNoteIds.filter((id) => linkedIds.has(id)), (id) => repository.get(id));
+        const linkedIds = new Set((await loadProjectArticles(projectId)).map((note) => note.id));
+        return readAuthorizedProjectEvidence(projectId, approvedNoteIds.filter((id) => linkedIds.has(id)), (id) => repository.get(id));
       } : undefined,
     );
-    const suggestedTitle = answer.nextAction.trim();
-    const requestedExisting = evidence.find((source) => source.kind === "action" && source.id === answer.taskEvidenceId);
-    const existing = detail.project.status === "active" ? detail.tasks.find((task) => requestedExisting ? "task:" + task.id === requestedExisting.id :
-      (answer.decision === "new_action" || !answer.decision) && Boolean(suggestedTitle) &&
-      (task.status === "next" || task.status === "later") && (task.title === suggestedTitle || task.currentFocus === suggestedTitle)) : undefined;
-    const existingAction = existing && { id: existing.id, title: existing.title };
-    const canAdjust = detail.project.status === "active" && (answer.decision === "adjust" || !answer.decision);
-    const actionDraft = detail.project.status === "active" && !existingAction && (answer.decision === "new_action" || !answer.decision) && suggestedTitle ?
-      previewAsabaPlan({ kind: "existing_project", projectId, title: "", outcome: "", reason: answer.summary, questions: answer.unknowns, action: suggestedTitle }, [detail]) : null;
-    return { kind: "progress", projectId, projectTitle: detail.project.title, answer, evidence, actionDraft, canAdjust, existingAction, investigation };
+    return resolveProjectDecision(detail, analysis, scope);
+  }
+
+  async function prepareProjectDelegation(result: AsabaProjectDecision) {
+    await projectRepository.list();
+    const fresh = await projectRepository.get(result.projectId);
+    if (fresh?.project.status !== "active" || fresh.project.isDraft || fresh.project.updatedAt !== result.expectedUpdatedAt) {
+      throw new Error("项目已有变化，请重新生成建议。");
+    }
+    await companionApi.window(true);
+    await emitTo("companion", "asaba-prepare-note", projectDelegationSource(result));
   }
 
   function saveAsabaPlan(command: AsabaPlanSave) {
@@ -1079,7 +1090,8 @@ export function DesktopWorkbench({
     if (!command.request.trim() || command.request.length > 4000 || command.suggestion.length > 200) throw new Error("调整原因无效，请重新生成建议。");
     await projectRepository.list();
     const target = await projectRepository.get(command.projectId);
-    if (!target || target.project.status === "completed" || target.project.isDraft) throw new Error("该项目已不可调整，请重新选择。");
+    if (!target || target.project.status !== "active" || target.project.isDraft) throw new Error("该项目已不可调整，请重新选择。");
+    if (command.expectedUpdatedAt !== undefined && command.expectedUpdatedAt !== target.project.updatedAt) throw new Error("项目已有变化，请重新生成建议。");
     await invoke("show_main_window");
     if (projectEditing) throw new Error("请先保存或关闭正在编辑的项目，再打开计划调整。");
     if (!await switchSection("projects")) throw new Error("请先结束当前操作，再打开计划调整。");
@@ -1087,10 +1099,14 @@ export function DesktopWorkbench({
     setAsabaAdjustment(command);
   }
 
-  async function openAsabaProjectPlanning(projectId: string) {
+  async function openAsabaProjectPlanning(projectId: string, milestoneId?: string | null) {
+    const detail = milestoneId === undefined ? null : await projectRepository.get(projectId);
+    const milestone = detail?.milestones.find(item => item.id === milestoneId);
+    if (milestoneId && !milestone) throw new Error("里程碑已变化，请重新打开项目。");
+    const scope = milestoneId === undefined ? undefined : { projectId, milestoneId, title: milestone?.title ?? "项目行动" };
     const notes = (await loadProjectArticles(projectId).catch(() => [])).map(({ id, title }) => ({ id, title }));
     await companionApi.window(true);
-    await emitTo("companion", "asaba-plan-project", { projectId, notes });
+    await emitTo("companion", "asaba-plan-project", { projectId, notes, scope });
   }
 
   async function saveAsabaNote(note: AsabaNote) {
@@ -1400,7 +1416,7 @@ export function DesktopWorkbench({
       completedAt: null,
     };
     try {
-      const saved = await projectRepository.saveTask(task);
+      const saved = await projectRepository.saveTask(task, input.expectedProjectUpdatedAt);
       if (input.plannedToday || input.keepAvailable) {
         await workRepository.savePlan({ taskId: saved.id, plannedDate: input.plannedToday ? today : "", priority: "normal", estimateMinutes: 0, sortOrder: 99, updatedAt: "" });
       }
@@ -1668,7 +1684,7 @@ export function DesktopWorkbench({
         initialProjectId={careerReview.projectId} initialSnapshot={careerReview.snapshot}
         projects={projects.filter(project => project.status === "active" && !project.isDraft)}
         onSnapshot={verifyCareerProject} onSave={saveCareerReview} onClose={() => setCareerReview(null)} />}
-      <Suspense fallback={null}><CompanionBridge projects={projects} tasks={workspaceTasks} articles={articles} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} activeSession={activeSession} onFocus={companionFocus} onError={showMessage} onSaveNote={saveAsabaNote} onPlan={planWithAsaba} onOpenAdjustment={openAsabaAdjustment} onArchiveWorker={archiveAsabaWorker} onSavePlan={saveAsabaPlan} onStartCareer={startAsabaCareer} onCareerReview={openCareerReview} onAction={async (action: CompanionAction) => {
+      <Suspense fallback={null}><CompanionBridge projects={projects} tasks={workspaceTasks} articles={articles} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} activeSession={activeSession} onFocus={companionFocus} onError={showMessage} onSaveNote={saveAsabaNote} onPlan={planWithAsaba} onOpenAdjustment={openAsabaAdjustment} onOpenProjectDelegation={prepareProjectDelegation} onArchiveWorker={archiveAsabaWorker} onSavePlan={saveAsabaPlan} onStartCareer={startAsabaCareer} onCareerReview={openCareerReview} onAction={async (action: CompanionAction) => {
         if (action.kind === "prepare_note") {
           const note = await repository.get(action.id);
           if (!note) throw new Error("这篇笔记已不存在。");
@@ -1742,7 +1758,8 @@ export function DesktopWorkbench({
           onConsumeAsabaAdjustment={(id) => setAsabaAdjustment(current => current?.id === id ? null : current)}
           onProjectsChange={refreshProjects}
           onArchiveWorker={archiveAsabaWorker}
-          onAskAsaba={(id) => void openAsabaProjectPlanning(id).catch(error => showMessage(String(error)))}
+          onAskAsaba={(id, milestoneId) => void openAsabaProjectPlanning(id, milestoneId).catch(error => showMessage(String(error)))}
+          askProjectDecision={askProjectDecision}
           onBackToHall={() => setRequestedProjectId(null)}
           onRemoveTask={removeTask}
           onOpenTask={openTask}
@@ -1781,7 +1798,7 @@ export function DesktopWorkbench({
       ) : (
         <section className="workspace-main-stage">
           {section === "home" && <HomeDashboard planningHistoryRepository={aiRepository} projectDetails={projectDetails} dailySituations={dailySituations} onSupplementDay={setSituationDate} today={today} tasks={workspaceTasks} articles={articles} articleRepository={repository} weeklyFocus={weeklyFocus} integrationRepository={integrationRepository} dashboardRepository={dashboardRepository} dashboardPreferences={dashboardPreferences} calendarEvents={calendarEvents} restDays={restDays} healthProfile={healthProfile} healthToday={healthToday} healthMeals={healthMealsToday} onOpenHealth={() => switchSection("health")} onOpenTools={() => switchSection("tools")} onSaveWeeklyFocus={saveWeeklyFocus} onSaveDashboardPreferences={saveDashboardPreferences} onSaveCalendarEvent={saveCalendarEvent} onDeleteCalendarEvent={deleteCalendarEvent} onSetRestDay={setRestDay} onSaveSource={saveExternalSource} onNotice={showMessage} onOpenArticle={openArticle} onOpenProject={openProject} onOpenTask={openTask} onOpenTasks={() => switchSection("tasks")} {...taskActions} />}
-          {section === "tasks" && <TasksPage onOpenFocusHistory={() => setFocusHistoryOpen(true)} onSupplementDay={setSituationDate} dailySituations={dailySituations} today={today} tasks={workspaceTasks} lanes={actionLanes} projects={projects} projectDetails={projectDetails} loadProject={(id) => projectRepository.get(id)} initialTaskId={requestedTaskId} onTaskOpened={() => setRequestedTaskId(null)} onAddTask={addTask} onRemoveTask={removeTask} onOpenProject={openProject} onArchiveWorker={archiveAsabaWorker} {...taskActions} />}
+          {section === "tasks" && <TasksPage onOpenFocusHistory={() => setFocusHistoryOpen(true)} onSupplementDay={setSituationDate} dailySituations={dailySituations} today={today} tasks={workspaceTasks} lanes={actionLanes} projects={projects} projectDetails={projectDetails} loadProject={(id) => projectRepository.get(id)} projectDecisions={{ ask: askProjectDecision, delegate: prepareProjectDelegation, adjust: openAsabaAdjustment }} onOpenTask={openTask} initialTaskId={requestedTaskId} onTaskOpened={() => setRequestedTaskId(null)} onAddTask={addTask} onRemoveTask={removeTask} onOpenProject={openProject} onArchiveWorker={archiveAsabaWorker} {...taskActions} />}
           {section === "observer" && <WorkObserverPage tasks={workspaceTasks} activeSession={activeSession} onOpenTask={openTask} />}
           {section === "health" && <HealthPage repository={healthRepository} today={today} onChanged={() => void refreshHealth()} onNotice={showMessage} onOpenAiSettings={() => switchSection("settings")} />}
           {section === "wealth" && <WealthPage repository={financeRepository} projects={projects} today={today} onNotice={showMessage} quickCaptureRequested={expenseCaptureRequested} onQuickCaptureOpened={() => setExpenseCaptureRequested(false)} />}

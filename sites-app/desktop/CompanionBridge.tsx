@@ -1,6 +1,6 @@
 import { researchProject, type WorkerArchive } from "../app/asaba-worker";
 import type { CareerScope } from "../app/asaba-career";
-import type { AsabaAdjustmentRequest, AsabaPlanningResult, AsabaPlanSave } from "../app/asaba-planning";
+import type { AsabaAdjustmentRequest, AsabaPlanningResult, AsabaPlanSave, AsabaProjectDecision } from "../app/asaba-planning";
 import { useEffect, useRef } from "react";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { isTauri } from "@tauri-apps/api/core";
@@ -16,21 +16,22 @@ import type { WorkspaceTask } from "./WorkPages";
 import { companionApi } from "./companionApi";
 import { Button } from "./DesktopControls";
 
-export function CompanionBridge({ projects, tasks, articles, dashboardRepository, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError }: {
+export function CompanionBridge({ projects, tasks, articles, dashboardRepository, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onOpenProjectDelegation, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError }: {
   projects: ProjectSummary[]; tasks: WorkspaceTask[]; articles: StoredArticle[]; dashboardRepository: DashboardRepository;
   onAction: (action: CompanionAction) => Promise<void>; onError: (message: string) => void;
   onSaveNote: (note: AsabaNote) => Promise<string>;
-  onPlan: (request: string, projectId: string | null, authorizedNoteIds?: string[]) => Promise<AsabaPlanningResult>;
+  onPlan: (request: string, projectId: string | null, authorizedNoteIds?: string[], milestoneId?: string | null) => Promise<AsabaPlanningResult>;
   onArchiveWorker: (request: WorkerArchive) => Promise<void>;
   onStartCareer: (id: string, scope: CareerScope) => Promise<void>;
   onCareerReview: (jobId: string) => Promise<void>;
   onOpenAdjustment: (request: AsabaAdjustmentRequest) => Promise<void>;
+  onOpenProjectDelegation: (result: AsabaProjectDecision) => Promise<void>;
   onSavePlan: (request: AsabaPlanSave) => Promise<{ projectId?: string }>;
   dashboardPreferences: DashboardPreferences; activeSession: FocusSession | null;
   onFocus: (command: AsabaFocusCommand) => Promise<void>;
 }) {
-  const latest = useRef({ projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError });
-  latest.current = { projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError };
+  const latest = useRef({ projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onOpenProjectDelegation, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError });
+  latest.current = { projects, tasks, articles, dashboardPreferences, activeSession, onFocus, onAction, onSaveNote, onPlan, onOpenAdjustment, onOpenProjectDelegation, onArchiveWorker, onSavePlan, onStartCareer, onCareerReview, onError };
   const opened = useRef(false);
   const publish = useRef<(() => Promise<void>) | null>(null);
   useEffect(() => {
@@ -79,12 +80,19 @@ export function CompanionBridge({ projects, tasks, articles, dashboardRepository
         await emitTo("companion", "asaba-note-result", { id: payload.id, error: String(error) });
       }
     });
-    const plan = listen<{ id: string; request: string; projectId: string | null; authorizedNoteIds?: string[] }>("asaba-plan", async ({ payload }) => {
+    const plan = listen<{ id: string; request: string; projectId: string | null; authorizedNoteIds?: string[]; milestoneId?: string | null }>("asaba-plan", async ({ payload }) => {
       if (!active) return;
       try {
-        const result = await latest.current.onPlan(payload.request, payload.projectId, payload.authorizedNoteIds);
+        const result = await latest.current.onPlan(payload.request, payload.projectId, payload.authorizedNoteIds, payload.milestoneId);
         await emitTo("companion", "asaba-plan-result", { id: payload.id, result });
       } catch (error) { await emitTo("companion", "asaba-plan-result", { id: payload.id, error: String(error) }); }
+    });
+    const delegation = listen<{ id: string; result: AsabaProjectDecision }>("asaba-open-project-delegation", async ({ payload }) => {
+      if (!active) return;
+      try {
+        await latest.current.onOpenProjectDelegation(payload.result);
+        await emitTo("companion", "asaba-open-project-delegation-result", { id: payload.id });
+      } catch (error) { await emitTo("companion", "asaba-open-project-delegation-result", { id: payload.id, error: String(error) }); }
     });
     const adjustment = listen<AsabaAdjustmentRequest>("asaba-open-adjustment", async ({ payload }) => {
       if (!active) return;
@@ -155,7 +163,7 @@ export function CompanionBridge({ projects, tasks, articles, dashboardRepository
       }
     });
     if (!opened.current) { opened.current = true; void companionApi.window(false).catch(error => latest.current.onError(String(error))); }
-    return () => { active = false; publish.current = null; window.clearInterval(timer); for (const subscription of [focus, capture, refreshRequested, plan, savePlan, openPlan, adjustment, archive, researchModel, careerStart, careerReview]) void subscription.then(stop => stop()); void subscription.then(stop => stop()); };
+    return () => { active = false; publish.current = null; window.clearInterval(timer); for (const subscription of [focus, capture, refreshRequested, plan, savePlan, openPlan, adjustment, delegation, archive, researchModel, careerStart, careerReview]) void subscription.then(stop => stop()); void subscription.then(stop => stop()); };
   }, [dashboardRepository]);
   useEffect(() => {
     if (!isTauri()) return;
